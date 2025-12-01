@@ -1,0 +1,100 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Reference projects
+reference-projects/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+env/
+.venv
+pip-log.txt
+pip-delete-this-directory.txt
+*.egg-info/
+dist/
+build/
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# Logs
+logs/
+*.log
+
+# OS
+Thumbs.db
+
+# ML/AI artifacts
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+*.h5
+*.pb
+*.onnx
+checkpoints/
+wandb/
+mlruns/
+runs/
+.neptune/
+lightning_logs/
+
+# Training artifacts and outputs
+*_sampler_weights*/
+*:train:*/
+data/distillation/
+data/eval/
+data/previews/*.jsonl
+data/cache/
+data/tmp/
+*.jsonl
+
+# Model weights and data
+models/
+weights/
+datasets/
+data/raw/
+data/processed/
+
+# Runner directories
+*-runner/
+*_runner/
+
+# Build and tool outputs
+repomix-output.xml
+repomix-output.txt
+*.output.xml
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# PyTorch
+torch_extensions/
