@@ -31,7 +31,6 @@ from character.constants import (
 )
 from character.constitution import load_constitution, constitution_to_prompt
 from character.distillation.pipeline import (
-    _fix_adapter_config_for_fireworks,
     build_datum,
     build_teacher_prompt,
     load_tokenizer,
@@ -291,6 +290,7 @@ def generate_introspection_data(
     constitution_text = constitution_to_prompt(constitution)
     persona_name = f"{config.persona.title()} Assistant"
     logger.info(f"Constitution loaded ({len(constitution_text)} chars).")
+    max_context_tokens = DEFAULT_MAX_SEQ_LENGTH
 
     # ==========================================================================
     # Part 1: Self-Reflection Data (10k examples per paper)
@@ -346,6 +346,7 @@ def generate_introspection_data(
                     timeout=timeout,
                     progress_fn=batch_progress,
                     stage="reflection",
+                    max_context_tokens=max_context_tokens,
                 )
 
                 for user_prompt, completion in zip(batch_prompts, completions, strict=True):
@@ -416,6 +417,7 @@ def generate_introspection_data(
                     temperature=config.temperature,
                     top_p=config.top_p,
                     timeout=timeout,
+                    max_context_tokens=max_context_tokens,
                 )
                 
                 response = responses[0] if responses else ""
@@ -494,9 +496,11 @@ def run_sft_training(config: SftTrainingConfig) -> str:
 
     service_client = tinker.ServiceClient()
     training_client = service_client.create_lora_training_client(
-        base_model=config.base_model, 
+        base_model=config.base_model,
         rank=config.lora_rank,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+        train_mlp=True,
+        train_attn=True,
+        train_unembed=False,  # Match previous explicit target_modules set
     )
     
     # Load prior checkpoint (e.g., DPO weights) to continue training from that state
@@ -555,13 +559,10 @@ def run_sft_training(config: SftTrainingConfig) -> str:
     save_result = training_client.save_state(name=save_name).result()
     print(f"Saved training checkpoint: {save_result.path}")
 
-    # Save sampler weights (for deployment to Fireworks)
+    # Save sampler weights for deployment
     sampler_name = f"{save_name}-sampler"
     sampler_result = training_client.save_weights_for_sampler(name=sampler_name).result()
     print(f"Saved sampler weights: {sampler_result.path}")
-
-    # Fix adapter_config.json to use Fireworks-compatible target_modules
-    _fix_adapter_config_for_fireworks(sampler_result.path)
 
     logger.info("SFT training complete.")
     logger.info(f"  Training checkpoint: {save_result.path}")

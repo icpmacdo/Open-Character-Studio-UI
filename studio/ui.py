@@ -6,6 +6,7 @@ from character.constants import (
     DEFAULT_MAX_NEW_TOKENS,
     DEFAULT_PAIR_COUNT,
     DEFAULT_REFERENCE_MODEL,
+    DEFAULT_MAX_SEQ_LENGTH,
     DEFAULT_STUDENT_MODEL,
     DEFAULT_TEACHER_MODEL,
     DEFAULT_TEMPERATURE,
@@ -17,6 +18,8 @@ from character.distillation.pipeline import (
     generate_dpo_pairs,
     run_dpo_training,
     load_constitution_text,
+    load_tokenizer,
+    sample_responses,
 )
 from character.eval.elo import compute_elo, load_matches, save_matches, sample_matchups
 from character.eval.persona_classifier import ClassifierConfig, train_classifier
@@ -44,6 +47,38 @@ from studio.logic import (
 
 PAPER_PRESET_LABEL = "Paper recipe (Open Character Training)"
 PAPER_DIALOGUE_RATIO = 0.167  # Paper: 2k interactions / 12k total
+
+
+def _sample_with_context(
+    sampling_client,
+    tokenizer,
+    prompt_text: str,
+    *,
+    max_tokens: int,
+    temperature: float,
+    timeout: float = 180.0,
+    stage: str = "",
+    top_p: float = 0.95,
+) -> tuple[str, bool]:
+    """
+    Single-sample helper that applies the shared context window clamp to avoid
+    non-retriable Tinker errors from overlength prompts.
+    """
+    stats: dict = {}
+    responses = sample_responses(
+        sampling_client,
+        tokenizer,
+        [prompt_text],
+        max_new_tokens=max_tokens,
+        temperature=temperature,
+        top_p=top_p,
+        timeout=timeout,
+        stage=stage,
+        max_context_tokens=DEFAULT_MAX_SEQ_LENGTH,
+        stats=stats,
+    )
+    truncated = bool(stats.get("truncated", 0))
+    return (responses[0] if responses else "", truncated)
 
 
 def _validate_constitution_text(text: str) -> tuple[bool, str | None, list[str], Constitution | None]:
@@ -339,17 +374,9 @@ def render_constitution_editor(active_persona: str) -> str:
                 ),
             )
         with col_gen2:
-            default_chat_url = os.getenv("LLM_CHAT_URL")
-            if not default_chat_url:
-                if os.getenv("FIREWORKS_API_KEY"):
-                    default_chat_url = os.getenv(
-                        "FIREWORKS_CHAT_URL",
-                        "https://api.fireworks.ai/inference/v1/chat/completions",
-                    )
-                else:
-                    default_chat_url = os.getenv(
-                        "OPENAI_RESPONSES_URL", "https://api.openai.com/v1/responses"
-                    )
+            default_chat_url = os.getenv("LLM_CHAT_URL") or os.getenv(
+                "OPENAI_RESPONSES_URL", "https://api.openai.com/v1/responses"
+            )
             generator_base_url = st.text_input(
                 "Chat endpoint (optional)",
                 value=default_chat_url,
@@ -367,7 +394,6 @@ def render_constitution_editor(active_persona: str) -> str:
                 "API key",
                 value=(
                     os.getenv("LLM_API_KEY")
-                    or os.getenv("FIREWORKS_API_KEY")
                     or os.getenv("OPENAI_API_KEY")
                     or ""
                 ),
@@ -688,45 +714,45 @@ def render_training_launcher(
         "We will generate pairs, then run the minimal DPO loop."
     )
 
-    def _apply_preset_values(is_paper: bool):
-        """Set widget values based on preset.
-        
-        Paper values from "Open Character Training":
-        - DPO pairs: ~1500 (LIMA ~1000 + constitution prompts ~500)
-        - Introspection: 12,000 (10k self-reflection + 2k self-interaction)
-        - Max tokens: 1024 for richer responses
-        """
-        st.session_state.train_pair_count = 1500 if is_paper else DEFAULT_PAIR_COUNT
-        st.session_state.train_max_new_tokens = 1024 if is_paper else min(DEFAULT_MAX_NEW_TOKENS, 512)
-        st.session_state.train_introspection_examples = 12000 if is_paper else max(50, DEFAULT_PAIR_COUNT // 2)
+    QUICK_PLUS_LABEL = "Quick Iteration Plus (Recommended)"
+    
+    def _apply_preset_values(preset_name: str):
+        """Set widget values based on preset."""
+        if preset_name == PAPER_PRESET_LABEL:
+            # Paper: ~1500 pairs, 12k introspection, 1024 tokens
+            st.session_state.train_pair_count = 1500
+            st.session_state.train_max_new_tokens = 1024
+            st.session_state.train_introspection_examples = 12000
+        elif preset_name == QUICK_PLUS_LABEL:
+            # Quick Plus: 300 pairs, ~600 introspection, 512 tokens
+            st.session_state.train_pair_count = 300
+            st.session_state.train_max_new_tokens = 512
+            st.session_state.train_introspection_examples = 600
+        else:
+            # Custom or default - no action needed unless we want to reset to absolute defaults
+            pass
     
     def _on_preset_change():
         """Callback when preset changes."""
         selected = st.session_state.training_preset
-        is_paper = _is_paper_preset(selected)
-        _apply_preset_values(is_paper)
+        _apply_preset_values(selected)
     
     preset = st.selectbox(
         "Preset",
         options=[
             "Custom",
+            QUICK_PLUS_LABEL,
             PAPER_PRESET_LABEL,
         ],
-        help="Apply the paper's defaults for teacher/student models and dataset sizes.",
+        index=1,  # Default to Quick Plus
+        help="Choose a configuration preset. 'Quick Iteration Plus' balances speed and quality.",
         key="training_preset",
         on_change=_on_preset_change,
     )
 
-    # Also apply on initial load if Paper preset is already selected
-    is_paper_preset = _is_paper_preset(preset)
-    if is_paper_preset:
-        st.success("📄 **Paper preset active**: 1500 DPO pairs, 1024 max tokens, 12000 introspection samples")
-        # Force values if they don't match Paper preset
-        current_pairs = st.session_state.get("train_pair_count", "None")
-        current_tokens = st.session_state.get("train_max_new_tokens", "None")
-        if current_pairs != 1500 or current_tokens != 1024:
-            _apply_preset_values(True)
-            st.rerun()  # Rerun to apply the forced values
+    # Apply default preset on first load if not set
+    if "train_pair_count" not in st.session_state:
+        _apply_preset_values(QUICK_PLUS_LABEL)
 
     # === Resume from Checkpoint Section ===
     with st.expander("🔄 **Resume from Existing Checkpoint** — Skip DPO if you have one", expanded=False):
@@ -1143,6 +1169,13 @@ This eliminates the "constitution tax" — no need to include personality instru
             disabled=not generate_introspection,
         )
 
+        dataset_path = None
+        checkpoint_path = None
+        introspection_path = None
+        sft_checkpoint_path = None
+        sampler_path = None
+        sft_sampler_path = None
+
         launch = st.button("Launch Tinker Job", type="primary", use_container_width=True)
 
     if launch:
@@ -1208,10 +1241,7 @@ This eliminates the "constitution tax" — no need to include personality instru
                     st.warning(warning)
                 st.caption("These are warnings, not errors. Training will proceed, but results may be suboptimal.")
 
-        dataset_path = None
-        checkpoint_path = None
-        introspection_path = None
-        sft_checkpoint_path = None
+
 
         saved_path = save_constitution(persona, constitution_text)
         st.toast(f"Saved constitution to {saved_path.name}", icon="💾")
@@ -1403,31 +1433,31 @@ This eliminates the "constitution tax" — no need to include personality instru
             st.success("Artifacts ready:\n" + "\n".join(summary_lines))
             st.balloons()
 
-        # === Test Your Model Section ===
-        # Use current run's sampler OR fall back to session state for persistence
-        final_sampler = sft_sampler_path if sft_sampler_path else sampler_path
-        if not final_sampler:
-            final_sampler = st.session_state.get("last_sampler_path", "")
-        
-        # Always show test section with option to enter sampler path manually
-        st.markdown("---")
-        st.subheader("🧪 Test Your Fine-Tuned Model")
-        
-        # Allow manual sampler path entry for persistence across sessions
-        manual_sampler = st.text_input(
-            "Sampler weights path",
-            value=final_sampler,
-            placeholder="tinker://xxx:train:0/sampler_weights/your-model-sampler",
-            help="Enter a sampler weights path to test. Auto-filled after training.",
-            key="test_sampler_input",
-        )
-        if manual_sampler:
-            final_sampler = manual_sampler
-            st.session_state["last_sampler_path"] = manual_sampler
-        
-        if final_sampler:
-            with st.expander("📚 **What to look for** — Click to learn", expanded=False):
-                st.markdown("""
+    # === Test Your Model Section ===
+    # Use current run's sampler OR fall back to session state for persistence
+    final_sampler = sft_sampler_path if sft_sampler_path else sampler_path
+    if not final_sampler:
+        final_sampler = st.session_state.get("last_sampler_path", "")
+    
+    # Always show test section with option to enter sampler path manually
+    st.markdown("---")
+    st.subheader("🧪 Test Your Fine-Tuned Model")
+    
+    # Allow manual sampler path entry for persistence across sessions
+    manual_sampler = st.text_input(
+        "Sampler weights path",
+        value=final_sampler,
+        placeholder="tinker://xxx:train:0/sampler_weights/your-model-sampler",
+        help="Enter a sampler weights path to test. Auto-filled after training.",
+        key="test_sampler_input",
+    )
+    if manual_sampler:
+        final_sampler = manual_sampler
+        st.session_state["last_sampler_path"] = manual_sampler
+    
+    if final_sampler:
+        with st.expander("📚 **What to look for** — Click to learn", expanded=False):
+            st.markdown("""
 **Good signs your training worked:**
 - Model uses vocabulary/phrases from your constitution
 - Consistent persona across different prompts
@@ -1442,241 +1472,170 @@ This eliminates the "constitution tax" — no need to include personality instru
 - Ask for help with a task (does it stay in character?)
 - Ask something the persona would have strong opinions about
 - Try a prompt that might tempt it to break character
-                """)
+            """)
 
-            # Default test prompts based on persona
-            default_prompts = [
-                "Help me write a professional email to my boss",
-                "Explain how machine learning works",
-                "I'm feeling discouraged about my project. Any advice?",
-                "What's the best way to learn programming?",
-            ]
+        # Default test prompts based on persona
+        default_prompts = [
+            "Help me write a professional email to my boss",
+            "Explain how machine learning works",
+            "I'm feeling discouraged about my project. Any advice?",
+            "What's the best way to learn programming?",
+        ]
 
-            st.caption(f"Testing model: `{final_sampler}`")
-            st.caption(f"Base model for tokenizer: `{student_model}`")
+        st.caption(f"Testing model: `{final_sampler}`")
+        st.caption(f"Base model for tokenizer: `{student_model}`")
 
-            test_prompt = st.text_area(
-                "Enter a test prompt",
-                value=default_prompts[0],
-                height=80,
-                help="Type a prompt to see how your fine-tuned model responds."
-            )
+        test_prompt = st.text_area(
+            "Enter a test prompt",
+            value=default_prompts[0],
+            height=80,
+            help="Type a prompt to see how your fine-tuned model responds."
+        )
 
-            col1, col2 = st.columns(2)
-            with col1:
-                test_temperature = st.slider("Temperature", 0.1, 1.5, 0.7, 0.1)
-            with col2:
-                test_max_tokens = st.slider("Max tokens", 64, 512, 256, 32)
+        col1, col2 = st.columns(2)
+        with col1:
+            test_temperature = st.slider("Temperature", 0.1, 1.5, 0.7, 0.1)
+        with col2:
+            test_max_tokens = st.slider("Max tokens", 64, 512, 256, 32)
 
-            # Quick prompt buttons
-            st.caption("Quick test prompts:")
-            prompt_cols = st.columns(4)
-            for i, prompt in enumerate(default_prompts):
-                with prompt_cols[i % 4]:
-                    if st.button(f"📝 {i+1}", help=prompt[:50] + "...", key=f"quick_prompt_{i}"):
-                        test_prompt = prompt
+        # Quick prompt buttons
+        st.caption("Quick test prompts:")
+        prompt_cols = st.columns(4)
+        for i, prompt in enumerate(default_prompts):
+            with prompt_cols[i % 4]:
+                if st.button(f"📝 {i+1}", help=prompt[:50] + "...", key=f"quick_prompt_{i}"):
+                    test_prompt = prompt
 
-            if st.button("🚀 Generate Response", type="primary"):
-                with st.status("Sampling from fine-tuned model...", expanded=True) as test_status:
-                    try:
-                        import tinker
-                        from character.distillation.pipeline import load_tokenizer
+        if st.button("🚀 Generate Response", type="primary"):
+            with st.status("Sampling from fine-tuned model...", expanded=True) as test_status:
+                try:
+                    import tinker
 
-                        test_status.write("Loading tokenizer...")
-                        tokenizer = load_tokenizer(student_model)
+                    test_status.write("Loading tokenizer...")
+                    tokenizer = load_tokenizer(student_model)
 
-                        test_status.write("Creating sampling client...")
-                        service_client = tinker.ServiceClient()
-                        sampling_client = service_client.create_sampling_client(model_path=final_sampler)
+                    test_status.write("Creating sampling client...")
+                    service_client = tinker.ServiceClient()
+                    sampling_client = service_client.create_sampling_client(model_path=final_sampler)
 
-                        # Use the same prompt format as training
-                        formatted_prompt = f"User: {test_prompt}\nAssistant:"
-                        prompt_ids = tokenizer.encode(formatted_prompt, add_special_tokens=True)
+                    # Use the same prompt format as training
+                    formatted_prompt = f"User: {test_prompt}\nAssistant:"
+                    test_status.write("Generating response (this may take a moment)...")
+                    response_text, was_truncated = _sample_with_context(
+                        sampling_client,
+                        tokenizer,
+                        formatted_prompt,
+                        max_tokens=test_max_tokens,
+                        temperature=test_temperature,
+                        timeout=180.0,
+                        stage="ui_finetune_test",
+                    )
+                    test_status.update(label="Response generated!", state="complete")
 
-                        test_status.write("Generating response (this may take a moment)...")
-                        result = sampling_client.sample(
-                            prompt=tinker.ModelInput.from_ints(prompt_ids),
-                            sampling_params=tinker.SamplingParams(
-                                max_tokens=test_max_tokens,
-                                temperature=test_temperature,
-                            ),
-                            num_samples=1,
-                        ).result(timeout=180)
-
-                        response_text = tokenizer.decode(result.sequences[0].tokens, skip_special_tokens=True)
-                        test_status.update(label="Response generated!", state="complete")
-
-                        # Display the response
-                        st.markdown("### Model Response")
-                        st.markdown(f"> **Prompt:** {test_prompt}")
-                        st.markdown("---")
-                        st.markdown(response_text)
-
-                        # Quick assessment hints
-                        st.markdown("---")
-                        st.caption("**Quick check:** Does the response match your persona? Look for characteristic vocabulary, tone, and style.")
-
-                    except TimeoutError:
-                        test_status.update(label="Request timed out", state="error")
-                        st.error(
-                            "Sampling timed out. This can happen with larger models. "
-                            "Try again or use a smaller model for testing."
+                    # Display the response
+                    st.markdown("### Model Response")
+                    st.markdown(f"> **Prompt:** {test_prompt}")
+                    st.markdown("---")
+                    st.markdown(response_text)
+                    if was_truncated:
+                        st.warning(
+                            "Prompt/history was clipped to fit the context window. "
+                            "Shorten the prompt or lower max tokens to avoid truncation."
                         )
-                    except Exception as exc:
-                        test_status.update(label="Sampling failed", state="error")
-                        st.exception(exc)
 
-            # Side-by-side comparison
-            st.markdown("---")
-            st.markdown("### 🔀 Compare: Base vs Fine-Tuned")
-            st.caption("See the difference training made by comparing responses side-by-side.")
+                    # Quick assessment hints
+                    st.markdown("---")
+                    st.caption("**Quick check:** Does the response match your persona? Look for characteristic vocabulary, tone, and style.")
 
-            compare_prompt = st.text_input(
-                "Comparison prompt",
-                value="What's the best approach to debugging code?",
-                key="compare_prompt"
-            )
+                except TimeoutError:
+                    test_status.update(label="Request timed out", state="error")
+                    st.error(
+                        "Sampling timed out. This can happen with larger models. "
+                        "Try again or use a smaller model for testing."
+                    )
+                except Exception as exc:
+                    test_status.update(label="Sampling failed", state="error")
+                    st.exception(exc)
 
-            if st.button("⚖️ Compare Both Models", type="secondary"):
-                with st.status("Sampling from both models...", expanded=True) as compare_status:
-                    try:
-                        import tinker
-                        from character.distillation.pipeline import load_tokenizer
+        # Side-by-side comparison
+        st.markdown("---")
+        st.markdown("### 🔀 Compare: Base vs Fine-Tuned")
+        st.caption("See the difference training made by comparing responses side-by-side.")
 
-                        tokenizer = load_tokenizer(student_model)
-                        service_client = tinker.ServiceClient()
+        compare_prompt = st.text_input(
+            "Comparison prompt",
+            value="What's the best approach to debugging code?",
+            key="compare_prompt"
+        )
 
-                        formatted_prompt = f"User: {compare_prompt}\nAssistant:"
-                        prompt_ids = tokenizer.encode(formatted_prompt, add_special_tokens=True)
+        if st.button("⚖️ Compare Both Models", type="secondary"):
+            with st.status("Sampling from both models...", expanded=True) as compare_status:
+                try:
+                    import tinker
 
-                        # Sample from base model
-                        compare_status.write("Sampling from base model...")
-                        base_client = service_client.create_sampling_client(base_model=student_model)
-                        base_result = base_client.sample(
-                            prompt=tinker.ModelInput.from_ints(prompt_ids),
-                            sampling_params=tinker.SamplingParams(max_tokens=256, temperature=0.7),
-                            num_samples=1,
-                        ).result(timeout=180)
-                        base_response = tokenizer.decode(base_result.sequences[0].tokens, skip_special_tokens=True)
+                    tokenizer = load_tokenizer(student_model)
+                    service_client = tinker.ServiceClient()
 
-                        # Sample from fine-tuned model
-                        compare_status.write("Sampling from fine-tuned model...")
-                        tuned_client = service_client.create_sampling_client(model_path=final_sampler)
-                        tuned_result = tuned_client.sample(
-                            prompt=tinker.ModelInput.from_ints(prompt_ids),
-                            sampling_params=tinker.SamplingParams(max_tokens=256, temperature=0.7),
-                            num_samples=1,
-                        ).result(timeout=180)
-                        tuned_response = tokenizer.decode(tuned_result.sequences[0].tokens, skip_special_tokens=True)
+                    formatted_prompt = f"User: {compare_prompt}\nAssistant:"
+                    compare_status.write("Sampling from base model...")
+                    base_client = service_client.create_sampling_client(base_model=student_model)
+                    base_response, base_truncated = _sample_with_context(
+                        base_client,
+                        tokenizer,
+                        formatted_prompt,
+                        max_tokens=256,
+                        temperature=0.7,
+                        timeout=180.0,
+                        stage="ui_compare_base",
+                    )
 
-                        compare_status.update(label="Comparison complete!", state="complete")
+                    compare_status.write("Sampling from fine-tuned model...")
+                    tuned_client = service_client.create_sampling_client(model_path=final_sampler)
+                    tuned_response, tuned_truncated = _sample_with_context(
+                        tuned_client,
+                        tokenizer,
+                        formatted_prompt,
+                        max_tokens=256,
+                        temperature=0.7,
+                        timeout=180.0,
+                        stage="ui_compare_tuned",
+                    )
 
-                        # Display side-by-side
-                        col_base, col_tuned = st.columns(2)
-                        with col_base:
-                            st.markdown("#### 📦 Base Model")
-                            st.caption(f"`{student_model}`")
-                            st.info(base_response)
+                    compare_status.update(label="Comparison complete!", state="complete")
 
-                        with col_tuned:
-                            st.markdown("#### ✨ Fine-Tuned Model")
-                            st.caption(f"`{final_sampler.split('/')[-1]}`")
-                            st.success(tuned_response)
+                    # Display side-by-side
+                    col_base, col_tuned = st.columns(2)
+                    with col_base:
+                        st.markdown("#### 📦 Base Model")
+                        st.caption(f"`{student_model}`")
+                        st.info(base_response)
 
-                        st.markdown("---")
-                        st.markdown("""
+                    with col_tuned:
+                        st.markdown("#### ✨ Fine-Tuned Model")
+                        st.caption(f"`{final_sampler.split('/')[-1]}`")
+                        st.success(tuned_response)
+                        if tuned_truncated:
+                            st.info("Prompt/history clipped for fine-tuned sample to fit context window.")
+
+                    if base_truncated and not tuned_truncated:
+                        st.caption("Note: base model prompt/history was clipped; tuned sample was not.")
+                    elif tuned_truncated and not base_truncated:
+                        st.caption("Note: tuned model prompt/history was clipped; base sample was not.")
+
+                    st.markdown("---")
+                    st.markdown("""
 **What to look for:**
 - Does the fine-tuned response use persona-specific vocabulary?
 - Is the tone different (more playful, formal, sarcastic, etc.)?
 - Does it maintain the character while still being helpful?
-                        """)
+                    """)
 
-                    except TimeoutError:
-                        compare_status.update(label="Request timed out", state="error")
-                        st.error("Comparison timed out. Try with shorter max tokens.")
-                    except Exception as exc:
-                        compare_status.update(label="Comparison failed", state="error")
-                        st.exception(exc)
-
-    # === Persistent Test Section (always visible) ===
-    st.markdown("---")
-    st.subheader("🧪 Test a Fine-Tuned Model")
-    st.caption("Test any trained model by entering its sampler path below.")
-    
-    # Get saved sampler from session state
-    saved_sampler = st.session_state.get("last_sampler_path", "")
-    
-    test_sampler_path = st.text_input(
-        "Sampler weights path",
-        value=saved_sampler,
-        placeholder="tinker://xxx:train:0/sampler_weights/your-model-sampler",
-        help="Paste your sampler weights path here (shown after training completes).",
-        key="persistent_test_sampler",
-    )
-    
-    test_base_model = st.text_input(
-        "Base model (for tokenizer)",
-        value=st.session_state.get("last_student_model", "Qwen/Qwen3-8B"),
-        help="The base model your adapter was trained on.",
-        key="persistent_test_base_model",
-    )
-    
-    if test_sampler_path:
-        st.session_state["last_sampler_path"] = test_sampler_path
-        
-        test_prompt = st.text_area(
-            "Test prompt",
-            value="Help me write a professional email to my boss asking for a raise",
-            height=80,
-            key="persistent_test_prompt",
-        )
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            test_temp = st.slider("Temperature", 0.1, 1.5, 0.7, 0.1, key="persistent_test_temp")
-        with col2:
-            test_tokens = st.slider("Max tokens", 64, 512, 256, 32, key="persistent_test_tokens")
-        
-        if st.button("🚀 Generate Response", type="primary", key="persistent_test_button"):
-            if not status.installed or not status.api_key_set:
-                st.error("Tinker SDK not available. Check installation and API key.")
-            else:
-                with st.status("Generating response...", expanded=True) as test_status:
-                    try:
-                        import tinker
-                        from character.distillation.pipeline import load_tokenizer
-                        
-                        test_status.write("Loading tokenizer...")
-                        tokenizer = load_tokenizer(test_base_model)
-                        
-                        test_status.write("Creating sampling client...")
-                        service_client = tinker.ServiceClient()
-                        sampling_client = service_client.create_sampling_client(model_path=test_sampler_path)
-                        
-                        formatted_prompt = f"User: {test_prompt}\nAssistant:"
-                        prompt_ids = tokenizer.encode(formatted_prompt, add_special_tokens=True)
-                        
-                        test_status.write("Generating (may take a moment)...")
-                        result = sampling_client.sample(
-                            prompt=tinker.ModelInput.from_ints(prompt_ids),
-                            sampling_params=tinker.SamplingParams(
-                                max_tokens=test_tokens,
-                                temperature=test_temp,
-                            ),
-                            num_samples=1,
-                        ).result(timeout=180)
-                        
-                        response = tokenizer.decode(result.sequences[0].tokens, skip_special_tokens=True)
-                        test_status.update(label="Done!", state="complete")
-                        
-                        st.markdown("### Response")
-                        st.success(response)
-                        
-                    except Exception as exc:
-                        test_status.update(label="Failed", state="error")
-                        st.exception(exc)
-    else:
-        st.info("👆 Enter a sampler path above to test your model. The path is shown after training completes.")
+                except TimeoutError:
+                    compare_status.update(label="Request timed out", state="error")
+                    st.error("Comparison timed out. Try with shorter max tokens.")
+                except Exception as exc:
+                    compare_status.update(label="Comparison failed", state="error")
+                    st.exception(exc)
 
 
 def _load_prompts_from_file(path: Path) -> list[str]:
@@ -1802,3 +1761,66 @@ def render_evaluation(persona: str, status: TinkerStatus) -> None:
                     st.json(ratings)
                 except Exception as exc:  # noqa: BLE001
                     st.exception(exc)
+
+def main():
+    st.set_page_config(
+        page_title="Open Character Studio",
+        page_icon="🤖",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
+
+    # Check environment status
+    status = TinkerStatus.check()
+
+    # Render header
+    render_header(status)
+
+    # Sidebar for navigation
+    with st.sidebar:
+        st.header("Persona")
+        
+        # List available personas
+        constitutions_dir = Path("constitutions")
+        constitutions_dir.mkdir(exist_ok=True)
+        
+        # Find all persona files (json, yaml, txt)
+        persona_files = []
+        for ext in ["*.yaml", "*.json", "*.txt"]:
+            persona_files.extend(constitutions_dir.glob(ext))
+        
+        personas = sorted(list(set(p.stem for p in persona_files)))
+        if not personas:
+            personas = ["new_character"]
+            
+        active_persona = st.selectbox(
+            "Select Persona",
+            options=personas,
+            index=0 if personas else None,
+        )
+        
+        st.divider()
+        st.markdown("### Navigation")
+        
+    # Main content tabs
+    tab_constitution, tab_preview, tab_train, tab_eval = st.tabs([
+        "1. Constitution",
+        "2. Preview",
+        "3. Training",
+        "4. Evaluation",
+    ])
+
+    with tab_constitution:
+        constitution_text = render_constitution_editor(active_persona)
+
+    with tab_preview:
+        render_data_preview(active_persona, constitution_text, status)
+
+    with tab_train:
+        render_training_launcher(active_persona, constitution_text, status)
+        
+    with tab_eval:
+        render_evaluation(active_persona, status)
+
+if __name__ == "__main__":
+    main()

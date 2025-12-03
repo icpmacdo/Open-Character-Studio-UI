@@ -7,7 +7,7 @@ name = "open-character-studio-ui"
 version = "0.1.0"
 description = "Constitution-driven persona training studio built on the Tinker SDK."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
   "requests>=2.31",
   "datasets>=2.19",
@@ -15,6 +15,7 @@ dependencies = [
   "streamlit>=1.37",
   "pydantic>=2.0",
   "pyyaml>=6.0",
+  "python-dotenv>=1.0.0",
 ]
 
 [project.optional-dependencies]
