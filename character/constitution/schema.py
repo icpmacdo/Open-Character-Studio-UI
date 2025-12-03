@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 class Meta(BaseModel):
     """Metadata for version control and categorization."""
 
-    name: str = Field(..., pattern=r"^[a-z0-9-]+$", description="Slug identifier (lowercase, hyphens)")
+    name: str = Field(..., pattern=r"^[a-z0-9-_]+$", description="Slug identifier (lowercase, hyphens, underscores)")
     version: int = Field(default=1, ge=1, description="Schema version for migrations")
     description: str = Field(..., min_length=10, max_length=200, description="Brief persona summary")
     tags: list[str] = Field(default_factory=list, description="Categorization tags")

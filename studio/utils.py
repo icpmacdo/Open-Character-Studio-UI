@@ -5,6 +5,9 @@ from dataclasses import dataclass
 from pathlib import Path
 import importlib.util
 from character.constants import DATA_PATH, ensure_data_dirs
+from dotenv import load_dotenv
+
+load_dotenv()
 
 CHECKPOINT_DIR = Path(os.getenv("CHARACTER_CHECKPOINT_DIR", DATA_PATH / "checkpoints"))
 
@@ -19,6 +22,37 @@ class TinkerStatus:
     @property
     def ready(self) -> bool:
         return self.installed and self.api_key_set and self.torch_installed
+
+    @classmethod
+    def check(cls) -> "TinkerStatus":
+        """Detect whether we can talk to Tinker from this session."""
+        torch_installed = importlib.util.find_spec("torch") is not None
+        installed = importlib.util.find_spec("tinker") is not None
+        api_key_set = bool(os.getenv("TINKER_API_KEY"))
+        supported_models: list[str] | None = None
+        capabilities_error: str | None = None
+
+        if installed and api_key_set:
+            try:
+                # Local import to avoid circular dependency or early import issues
+                import tinker
+                service_client = tinker.ServiceClient()
+                capabilities = service_client.get_server_capabilities()
+                supported_models_raw = getattr(capabilities, "supported_models", []) or []
+                supported_models = [
+                    getattr(item, "model_name", getattr(item, "name", str(item)))
+                    for item in supported_models_raw
+                ]
+            except Exception as exc:  # noqa: BLE001
+                capabilities_error = str(exc)
+
+        return cls(
+            installed=installed,
+            api_key_set=api_key_set,
+            torch_installed=torch_installed,
+            supported_models=supported_models,
+            capabilities_error=capabilities_error,
+        )
 
 def slugify(label: str) -> str:
     """Convert a free-form name into a file-safe slug."""

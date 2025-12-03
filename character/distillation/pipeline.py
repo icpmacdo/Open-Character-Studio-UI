@@ -281,11 +281,19 @@ def sample_responses(
     progress_fn: ProgressFn | None = None,
     stage: str = "",
     max_in_flight: int = 8,
+    max_context_tokens: int | None = None,
+    stats: dict | None = None,
 ) -> List[str]:
     """
     Sample one completion per prompt from a Tinker sampling client.
 
     Uses a small in-flight queue to overlap network/serve time while preserving order.
+    If max_context_tokens is set, prompts are truncated from the start to leave room
+    for generation and avoid Tinker context limit errors.
+    If `stats` dict is provided, truncation info is populated:
+      stats["truncated"] = count of prompts that were trimmed
+      stats["prompt_budget"] = prompt token budget after reserving generation tokens
+      stats["max_context_tokens"] = provided max_context_tokens
     
     Inference parameters from "Open Character Training" paper:
     - temperature = 0.7
@@ -304,6 +312,10 @@ def sample_responses(
 
     completions: list[str | None] = [None] * len(prompts)
     in_flight: list[tuple[int, any]] = []
+    truncated_count = 0
+    prompt_budget = None
+    if max_context_tokens:
+        prompt_budget = max(max_context_tokens - max_new_tokens, 1)
     total = len(prompts)
     done = 0
 
@@ -345,6 +357,18 @@ def sample_responses(
     logger.info(f"Submitting {len(prompts)} requests with max_in_flight={max_in_flight}...")
     for idx, prompt in enumerate(prompts):
         prompt_tokens = tokenizer.encode(prompt, add_special_tokens=True)
+        if prompt_budget and len(prompt_tokens) > prompt_budget:
+            if truncated_count == 0:
+                logger.warning(
+                    "Prompt length exceeds context window; truncating oldest tokens "
+                    f"to fit {prompt_budget} prompt tokens (max_context_tokens={max_context_tokens}, "
+                    f"max_new_tokens={max_new_tokens})."
+                )
+            truncated_count += 1
+            logger.debug(
+                f"Prompt {idx} trimmed from {len(prompt_tokens)} to {prompt_budget} tokens to fit context window."
+            )
+            prompt_tokens = prompt_tokens[-prompt_budget:]
         prompt_input = tinker.ModelInput.from_ints(prompt_tokens)
         future = client.sample(prompt=prompt_input, sampling_params=params, num_samples=1)
         in_flight.append((idx, future))
@@ -358,6 +382,10 @@ def sample_responses(
         _await_one()
 
     logger.info(f"sample_responses complete: {len(completions)} completions")
+    if stats is not None:
+        stats["truncated"] = truncated_count
+        stats["prompt_budget"] = prompt_budget
+        stats["max_context_tokens"] = max_context_tokens
     # Type checker: completions should be fully populated.
     return [c or "" for c in completions]
 
@@ -605,53 +633,6 @@ def _reference_logprobs_via_sampling(reference_client, reference_tokenizer, text
     return outputs
 
 
-def _fix_adapter_config_for_fireworks(checkpoint_path: str) -> None:
-    """
-    Fix the adapter_config.json to use Fireworks-compatible target_modules.
-
-    Fireworks doesn't accept Expert layers (mlp.experts...), so we need to
-    restrict target_modules to only the standard attention and MLP projection layers.
-    """
-    from pathlib import Path
-
-    # Parse the tinker:// path to find the adapter_config.json
-    if checkpoint_path.startswith("tinker://"):
-        # Extract the directory path after tinker://
-        path_parts = checkpoint_path.replace("tinker://", "").split("/")
-        # The adapter_config.json should be in the same directory as the weights
-        config_dir = Path("/") / Path(*path_parts)
-        adapter_config_path = config_dir / "adapter_config.json"
-    else:
-        # Fallback: try direct path
-        adapter_config_path = Path(checkpoint_path) / "adapter_config.json"
-
-    if not adapter_config_path.exists():
-        print(f"Warning: Could not find adapter_config.json at {adapter_config_path}")
-        return
-
-    # Read the existing config
-    config_data = json.loads(adapter_config_path.read_text())
-
-    # Update target_modules to Fireworks-compatible list
-    fireworks_safe_modules = [
-        "q_proj",
-        "k_proj",
-        "v_proj",
-        "o_proj",
-        "gate_proj",
-        "up_proj",
-        "down_proj",
-        "block_sparse_moe.gate"
-    ]
-
-    old_target = config_data.get("target_modules", "unknown")
-    config_data["target_modules"] = fireworks_safe_modules
-
-    # Write back the modified config
-    adapter_config_path.write_text(json.dumps(config_data, indent=2))
-    print(f"Fixed adapter_config.json: changed target_modules from {old_target} to Fireworks-safe list")
-
-
 def assess_training_health(loss: float, accuracy: float, step: int, total_steps: int) -> dict:
     """
     Assess training health based on metrics and return status with explanation.
@@ -729,9 +710,11 @@ def run_dpo_training(
 
     service_client = tinker.ServiceClient()
     training_client = service_client.create_lora_training_client(
-        base_model=config.base_model, 
+        base_model=config.base_model,
         rank=config.lora_rank,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+        train_mlp=True,
+        train_attn=True,
+        train_unembed=False,  # Mirror previous target_modules (no unembed head)
     )
     reference_client = service_client.create_sampling_client(base_model=config.reference_model)
     tokenizer = training_client.get_tokenizer()
@@ -889,13 +872,10 @@ def run_dpo_training(
     save_result = training_client.save_state(name=save_name).result()
     print(f"Saved training checkpoint: {save_result.path}")
 
-    # Save sampler weights (for deployment to Fireworks)
+    # Save sampler weights for deployment
     sampler_name = f"{save_name}-sampler"
     sampler_result = training_client.save_weights_for_sampler(name=sampler_name).result()
     print(f"Saved sampler weights: {sampler_result.path}")
-
-    # Fix adapter_config.json to use Fireworks-compatible target_modules
-    _fix_adapter_config_for_fireworks(sampler_result.path)
 
     return {
         "training": save_result.path,

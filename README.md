@@ -192,7 +192,6 @@ TINKER_API_KEY=<your-tinker-api-key>
 # Optional: LLM API Keys (for constitution generation)
 OPENAI_API_KEY=<your-openai-key>
 # Or use another provider:
-# FIREWORKS_API_KEY=<your-fireworks-key>
 # LLM_API_KEY=<your-preferred-api-key>
 
 # Optional: Path Overrides

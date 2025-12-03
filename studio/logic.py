@@ -66,34 +66,7 @@ def _save_preview_log(
             fp.write(json.dumps({**payload, **row}) + "\n")
     return path
 
-def get_tinker_status() -> TinkerStatus:
-    """Detect whether we can talk to Tinker from this session."""
-    torch_installed = importlib.util.find_spec("torch") is not None
-    installed = importlib.util.find_spec("tinker") is not None
-    api_key_set = bool(os.getenv("TINKER_API_KEY"))
-    supported_models: list[str] | None = None
-    capabilities_error: str | None = None
 
-    if installed and api_key_set:
-        try:
-            tinker = require_tinker()
-            service_client = tinker.ServiceClient()
-            capabilities = service_client.get_server_capabilities()
-            supported_models_raw = getattr(capabilities, "supported_models", []) or []
-            supported_models = [
-                getattr(item, "model_name", getattr(item, "name", str(item)))
-                for item in supported_models_raw
-            ]
-        except Exception as exc:  # noqa: BLE001
-            capabilities_error = str(exc)
-
-    return TinkerStatus(
-        installed=installed,
-        api_key_set=api_key_set,
-        torch_installed=torch_installed,
-        supported_models=supported_models,
-        capabilities_error=capabilities_error,
-    )
 
 
 def list_personas() -> List[str]:
