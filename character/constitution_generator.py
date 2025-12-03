@@ -28,9 +28,6 @@ from character.constitution import (
 )
 
 # Default endpoints and sampling parameters (overridable via env vars).
-DEFAULT_FIREWORKS_CHAT_URL = os.getenv(
-    "FIREWORKS_CHAT_URL", "https://api.fireworks.ai/inference/v1/chat/completions"
-)
 DEFAULT_OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
 DEFAULT_OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
 DEFAULT_MODEL = os.getenv("LLM_MODEL", "gpt-5-mini-2025-08-07")
@@ -93,12 +90,11 @@ def _resolve_api_key(candidate: str | None) -> str:
     api_key = (
         candidate
         or os.getenv("LLM_API_KEY")
-        or os.getenv("FIREWORKS_API_KEY")
         or os.getenv("OPENAI_API_KEY")
     )
     if not api_key:
         raise LLMError(
-            "Set LLM_API_KEY, FIREWORKS_API_KEY, or OPENAI_API_KEY (or pass api_key) to use LLM."
+            "Set LLM_API_KEY or OPENAI_API_KEY (or pass api_key) to use LLM."
         )
     return api_key
 
@@ -110,19 +106,14 @@ def _resolve_base_url(api_key: str, explicit_base: str | None) -> str:
     if os.getenv("LLM_CHAT_URL"):
         return os.getenv("LLM_CHAT_URL", "")
 
-    fireworks_key = os.getenv("FIREWORKS_API_KEY")
     openai_key = os.getenv("OPENAI_API_KEY")
-    if api_key == fireworks_key and fireworks_key:
-        return os.getenv("FIREWORKS_CHAT_URL", DEFAULT_FIREWORKS_CHAT_URL)
     if api_key == openai_key and openai_key:
         return DEFAULT_OPENAI_RESPONSES_URL
 
-    if fireworks_key:
-        return os.getenv("FIREWORKS_CHAT_URL", DEFAULT_FIREWORKS_CHAT_URL)
     if openai_key:
         return DEFAULT_OPENAI_RESPONSES_URL
 
-    return DEFAULT_FIREWORKS_CHAT_URL
+    return DEFAULT_OPENAI_CHAT_URL
 
 
 def _extract_json_block(text: str) -> str:
@@ -290,7 +281,7 @@ def generate_constitution(
     Generate a constitution dictionary from a high-level description.
 
     The caller may override model, sampling temperature, and output length. API credentials
-    are pulled from FIREWORKS_API_KEY or OPENAI_API_KEY unless explicitly provided.
+    are pulled from LLM_API_KEY or OPENAI_API_KEY unless explicitly provided.
     """
     description = description.strip()
     if not description:

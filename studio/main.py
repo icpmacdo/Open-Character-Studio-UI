@@ -1,7 +1,7 @@
 import streamlit as st
 from studio.styles import inject_styles
-from studio.logic import get_tinker_status, list_personas
-from studio.utils import slugify
+from studio.logic import list_personas
+from studio.utils import slugify, TinkerStatus
 from studio.ui import (
     render_header,
     render_constitution_editor,
@@ -14,7 +14,7 @@ def run() -> None:
     st.set_page_config(page_title="Open Character Studio", page_icon="🎭", layout="wide")
     inject_styles()
     
-    tinker_status = get_tinker_status()
+    tinker_status = TinkerStatus.check()
     render_header(tinker_status)
 
     personas = list_personas()
