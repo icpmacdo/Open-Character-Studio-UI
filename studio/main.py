@@ -9,6 +9,8 @@ from studio.ui import (
     render_training_launcher,
     render_evaluation,
 )
+from studio.teaching import render_glossary_sidebar, render_pipeline_diagram
+from studio.wizard import render_wizard, render_wizard_toggle
 
 def run() -> None:
     st.set_page_config(page_title="Open Character Studio", page_icon="🎭", layout="wide")
@@ -16,13 +18,23 @@ def run() -> None:
     
     tinker_status = TinkerStatus.check()
     render_header(tinker_status)
+    
+    # Add teaching resources in sidebar
+    render_glossary_sidebar()
+    
+    # Mode toggle: Wizard (guided) vs Expert (full editor)
+    wizard_mode = render_wizard_toggle()
+    
+    if wizard_mode:
+        # Guided wizard for new users
+        st.markdown("---")
+        render_wizard()
+        return  # Don't render rest of UI in wizard mode
 
+    # Expert mode: full editor UI
     personas = list_personas()
     default_persona = personas[0] if personas else "pirate"
 
-    # Sidebar for navigation/selection could be added here, but keeping it simple for now
-    # as per original design, but cleaner.
-    
     st.markdown("### Select Persona")
     col1, col2 = st.columns([1, 2])
     with col1:
@@ -35,7 +47,6 @@ def run() -> None:
     
     if base_choice != "New persona":
         persona_slug = base_choice
-        # st.caption(f"Loaded `{persona_slug}`")
     else:
         with col2:
             persona_label = st.text_input(
@@ -59,3 +70,4 @@ def run() -> None:
 
 if __name__ == "__main__":
     run()
+

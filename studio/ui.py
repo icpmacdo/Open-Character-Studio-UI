@@ -43,7 +43,22 @@ from studio.logic import (
     save_constitution,
     delete_constitution,
     build_preview_pairs,
+    check_modal_installed,
+    deploy_to_modal,
+    get_modal_deployment_status,
+    stop_modal_deployment,
 )
+from studio.teaching import (
+    render_quality_breakdown,
+    render_before_after,
+    render_quick_start_template,
+    render_pipeline_diagram,
+    render_glossary_sidebar,
+    render_param_explainer,
+    get_param_help,
+    SECTION_TIPS,
+)
+from studio.gallery import render_gallery, render_gallery_button
 
 PAPER_PRESET_LABEL = "Paper recipe (Open Character Training)"
 PAPER_DIALOGUE_RATIO = 0.167  # Paper: 2k interactions / 12k total
@@ -330,6 +345,29 @@ def render_constitution_editor(active_persona: str) -> str:
     st.header("1. Draft the Constitution")
     st.caption("Use YAML format (recommended) or legacy JSON/text. YAML files save to `constitutions/structured/`.")
 
+    # Teaching resources above the editor
+    help_col1, help_col2, help_col3 = st.columns(3)
+    with help_col1:
+        render_quick_start_template()
+    with help_col2:
+        render_before_after("identity")
+    with help_col3:
+        # Gallery popover/expander
+        with st.expander("📚 Browse Template Gallery"):
+            st.caption("Learn from annotated examples")
+            if st.button("Open Full Gallery", key="open_gallery_full"):
+                st.session_state.show_gallery_modal = True
+            st.markdown("**Quick picks:**")
+            for name in ["pirate", "sarcastic", "mathematical"]:
+                if st.button(f"→ {name.title()}", key=f"quick_{name}"):
+                    from studio.gallery import load_constitution_content
+                    content = load_constitution_content(name)
+                    if content:
+                        st.session_state.constitution_drafts.append(content)
+                        st.session_state.active_constitution_tab = f"Draft {len(st.session_state.constitution_drafts)}"
+                        st.toast(f"Loaded {name} as a new draft!", icon="📚")
+                        st.rerun()
+
     if "active_persona" not in st.session_state:
         st.session_state.active_persona = active_persona
     if "constitution_text" not in st.session_state:
@@ -480,6 +518,9 @@ def render_constitution_editor(active_persona: str) -> str:
                     quality = constitution.quality_score()
                     st.metric("Quality Score", f"{quality:.0%}")
                     
+                    # Enhanced quality breakdown
+                    render_quality_breakdown(constitution)
+                    
                     # Section counts
                     st.caption(
                         f"**Sections:** "
@@ -491,7 +532,7 @@ def render_constitution_editor(active_persona: str) -> str:
                     if constitution.examples:
                         st.caption(f"**Examples:** {len(constitution.examples)}")
                     else:
-                        st.caption("**Examples:** None")
+                        st.caption("**Examples:** None — add 2-3 for better training")
             
             # Show warnings
             if warnings:
@@ -713,6 +754,9 @@ def render_training_launcher(
         "Requires `pip install tinker torch transformers` and a valid `TINKER_API_KEY`. "
         "We will generate pairs, then run the minimal DPO loop."
     )
+    
+    # Visual pipeline diagram for understanding
+    render_pipeline_diagram()
 
     QUICK_PLUS_LABEL = "Quick Iteration Plus (Recommended)"
     
@@ -1762,6 +1806,205 @@ def render_evaluation(persona: str, status: TinkerStatus) -> None:
                 except Exception as exc:  # noqa: BLE001
                     st.exception(exc)
 
+
+def render_deploy(persona: str, status: TinkerStatus) -> None:
+    """Render the deployment tab for deploying trained personas to Modal."""
+    st.header("Deploy to Modal")
+
+    st.markdown(f"""
+    Deploy your trained persona as an **OpenAI-compatible API endpoint** on [Modal](https://modal.com).
+
+    **What you get:**
+    - A live API endpoint: `https://your-username--character-{persona}-serve.modal.run/v1/chat/completions`
+    - Pay-per-second GPU billing (no idle costs after 5 min)
+    - Automatic scaling with vLLM for high throughput
+    - Works with OpenAI SDK - just change the base URL
+    """)
+
+    # Check Modal installation
+    modal_installed = check_modal_installed()
+
+    if not modal_installed:
+        st.warning("""
+        **Modal CLI not found.** To deploy, install and authenticate Modal:
+        ```bash
+        pip install modal
+        modal setup
+        ```
+        """)
+        return
+
+    st.success("Modal CLI detected")
+
+    # Check deployment status
+    deployment_status = get_modal_deployment_status(persona)
+
+    if deployment_status.get("deployed"):
+        st.info(f"**{persona}** is currently deployed")
+        if st.button("Stop Deployment", type="secondary"):
+            with st.spinner("Stopping deployment..."):
+                result = stop_modal_deployment(persona)
+                if result.get("status") == "stopped":
+                    st.success("Deployment stopped")
+                    st.rerun()
+                else:
+                    st.error(f"Failed to stop: {result.get('error')}")
+
+    st.divider()
+
+    # Deployment configuration
+    st.subheader("Deployment Configuration")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        # Get last checkpoint from session state
+        default_lora = st.session_state.get("last_sft_checkpoint_path") or st.session_state.get("last_checkpoint_path", "")
+
+        lora_path = st.text_input(
+            "LoRA Checkpoint Path",
+            value=default_lora,
+            placeholder="tinker://xxx:train:0/sampler_weights/your-persona-sampler",
+            help="Path to the trained LoRA weights from the Training tab. Leave empty to deploy base model only.",
+        )
+
+        base_model = st.text_input(
+            "Base Model",
+            value=DEFAULT_STUDENT_MODEL,
+            help="The base model your LoRA was trained on.",
+        )
+
+    with col2:
+        gpu_options = ["A10G", "A100", "T4", "L4"]
+        gpu = st.selectbox(
+            "GPU Type",
+            options=gpu_options,
+            index=0,
+            help="A10G is recommended for 4B-8B models. Use A100 for larger models.",
+        )
+
+        st.markdown("""
+        **Estimated costs (Modal pricing):**
+        - A10G: ~$0.000575/sec (~$2/hour)
+        - A100: ~$0.001036/sec (~$3.70/hour)
+        - T4: ~$0.000164/sec (~$0.60/hour)
+
+        *You only pay when the endpoint is processing requests.*
+        """)
+
+    st.divider()
+
+    # Deploy button
+    if st.button("Deploy to Modal", type="primary", use_container_width=True):
+        if not lora_path and not base_model:
+            st.error("Please provide either a LoRA path or base model.")
+            return
+
+        with st.status("Deploying to Modal...", expanded=True) as deploy_status:
+            deploy_status.write(f"Persona: **{persona}**")
+            deploy_status.write(f"Base model: `{base_model}`")
+            if lora_path:
+                deploy_status.write(f"LoRA path: `{lora_path}`")
+            deploy_status.write(f"GPU: {gpu}")
+            deploy_status.write("---")
+            deploy_status.write("Running `modal deploy`...")
+
+            result = deploy_to_modal(
+                persona_name=persona,
+                base_model=base_model,
+                lora_path=lora_path if lora_path else None,
+                gpu=gpu,
+            )
+
+            if result.get("status") == "error":
+                deploy_status.update(label="Deployment failed", state="error")
+                st.error(f"Deployment failed: {result.get('error')}")
+            else:
+                deploy_status.update(label="Deployed successfully!", state="complete")
+
+                st.success("Deployment complete!")
+
+                # Show endpoint info
+                st.markdown(f"""
+                ### Your API Endpoint
+
+                **OpenAI-compatible endpoint** (replace YOUR_USERNAME with your Modal username):
+                ```
+                https://YOUR_USERNAME--character-{persona}-serve.modal.run/v1/chat/completions
+                ```
+
+                **Health check:**
+                ```
+                https://YOUR_USERNAME--character-{persona}-serve.modal.run/health
+                ```
+
+                ### Example Usage
+
+                ```python
+                import requests
+
+                response = requests.post(
+                    "https://YOUR_USERNAME--character-{persona}-serve.modal.run/v1/chat/completions",
+                    json={{
+                        "model": "llm",  # vLLM served model name
+                        "messages": [{{"role": "user", "content": "Hello!"}}],
+                        "max_tokens": 512,
+                        "temperature": 0.7,
+                    }}
+                )
+                print(response.json()["choices"][0]["message"]["content"])
+                ```
+
+                ### Using with OpenAI SDK
+
+                ```python
+                from openai import OpenAI
+
+                client = OpenAI(
+                    base_url="https://YOUR_USERNAME--character-{persona}-serve.modal.run/v1",
+                    api_key="not-needed",  # No auth required by default
+                )
+
+                response = client.chat.completions.create(
+                    model="llm",
+                    messages=[{{"role": "user", "content": "Hello!"}}],
+                )
+                print(response.choices[0].message.content)
+                ```
+
+                ### Management Commands
+
+                ```bash
+                # View logs
+                modal app logs character-{persona}
+
+                # Stop the deployment
+                modal app stop character-{persona}
+
+                # List all apps
+                modal app list
+                ```
+                """)
+
+                if result.get("deploy_output"):
+                    with st.expander("Deployment Output"):
+                        st.code(result["deploy_output"])
+
+    # Quick test section (if deployed)
+    if deployment_status.get("deployed"):
+        st.divider()
+        st.subheader("Test Your Deployment")
+
+        test_message = st.text_input(
+            "Test message",
+            value="Hello! Tell me about yourself.",
+            placeholder="Enter a message to test the persona...",
+        )
+
+        if st.button("Send Test Message"):
+            st.info("To test, use curl or the Python example above with your actual Modal username.")
+
+
 def main():
     st.set_page_config(
         page_title="Open Character Studio",
@@ -1803,11 +2046,12 @@ def main():
         st.markdown("### Navigation")
         
     # Main content tabs
-    tab_constitution, tab_preview, tab_train, tab_eval = st.tabs([
+    tab_constitution, tab_preview, tab_train, tab_eval, tab_deploy = st.tabs([
         "1. Constitution",
         "2. Preview",
         "3. Training",
         "4. Evaluation",
+        "5. Deploy",
     ])
 
     with tab_constitution:
@@ -1818,9 +2062,12 @@ def main():
 
     with tab_train:
         render_training_launcher(active_persona, constitution_text, status)
-        
+
     with tab_eval:
         render_evaluation(active_persona, status)
+
+    with tab_deploy:
+        render_deploy(active_persona, status)
 
 if __name__ == "__main__":
     main()

@@ -302,3 +302,69 @@ def build_preview_pairs(
         error = error + " | " + " ".join(debug)
     return rows, live_used, error
 
+
+# =============================================================================
+# Modal Deployment
+# =============================================================================
+
+def check_modal_installed() -> bool:
+    """Check if Modal CLI is installed and authenticated."""
+    import shutil
+    return shutil.which("modal") is not None
+
+
+def deploy_to_modal(
+    persona_name: str,
+    base_model: str,
+    lora_path: str | None = None,
+    gpu: str = "A10G",
+) -> dict:
+    """
+    Deploy a trained persona to Modal.
+
+    Args:
+        persona_name: Name of the persona
+        base_model: Base model ID (e.g., Qwen/Qwen3-4B-Instruct-2507)
+        lora_path: Path to LoRA adapter weights from training
+        gpu: GPU type (A10G for 4B-8B models, A100 for larger)
+
+    Returns:
+        Dict with deployment info including endpoint URL
+    """
+    try:
+        from deploy.modal_app import deploy_persona_cli
+        return deploy_persona_cli(
+            persona_name=persona_name,
+            base_model=base_model,
+            lora_path=lora_path,
+            gpu=gpu,
+        )
+    except ImportError as e:
+        return {
+            "status": "error",
+            "error": f"Deploy module not available: {e}",
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e),
+        }
+
+
+def get_modal_deployment_status(persona_name: str) -> dict:
+    """Check if a persona is deployed to Modal."""
+    try:
+        from deploy.modal_app import get_deployment_status
+        return get_deployment_status(persona_name)
+    except ImportError:
+        return {"deployed": False, "error": "Deploy module not available"}
+
+
+def stop_modal_deployment(persona_name: str) -> dict:
+    """Stop a Modal deployment."""
+    try:
+        from deploy.modal_app import stop_deployment
+        return stop_deployment(persona_name)
+    except ImportError:
+        return {"status": "error", "error": "Deploy module not available"}
+

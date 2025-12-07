@@ -29,6 +29,9 @@ train = [
 studio = [
   "streamlit>=1.37",
 ]
+deploy = [
+  "modal>=0.64.0",
+]
 dev = [
   "pytest>=8.3",
   "ruff",
@@ -41,6 +44,7 @@ all = [
   "transformers>=4.43",
   "datasets>=2.19",
   "streamlit>=1.37",
+  "modal>=0.64.0",
   "pytest>=8.3",
   "ruff",
   "black",
@@ -48,4 +52,4 @@ all = [
 ]
 
 [tool.setuptools]
-packages = ["character", "studio"]
+packages = ["character", "studio", "deploy"]
