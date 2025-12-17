@@ -29,6 +29,7 @@ from character.constants import (
     DEFAULT_STUDENT_MODEL,
     DEFAULT_TEACHER_MODEL,
     DEFAULT_TEMPERATURE,
+    DEFAULT_REPETITION_PENALTY,
     DEFAULT_MAX_NEW_TOKENS,
     DEFAULT_PAIR_COUNT,
     ensure_data_dirs,
@@ -61,7 +62,7 @@ ProgressFn = Callable[[str, int, int], None]
 @dataclass
 class GenerationConfig:
     """Options for building the DPO dataset.
-    
+
     Inference parameters from "Open Character Training" paper:
     - temperature = 0.7
     - top_p = 0.95
@@ -75,6 +76,7 @@ class GenerationConfig:
     pair_count: int = DEFAULT_PAIR_COUNT
     temperature: float = DEFAULT_TEMPERATURE
     top_p: float = 0.95  # Paper: top_p = 0.95
+    repetition_penalty: float = DEFAULT_REPETITION_PENALTY
     max_new_tokens: int = DEFAULT_MAX_NEW_TOKENS
     persona_hint_rate: float = 0.2
     seed: int | None = 0
@@ -82,13 +84,17 @@ class GenerationConfig:
     output_dir: Path | None = None
     output_path: Path | None = None
     use_reasoning_prefill: bool = False  # Enable <think> prefill for reasoning models
+    # Resume/append mode: skip existing prompts and flush periodically
+    resume: bool = False
+    save_interval: int = 50  # Flush to disk every N pairs
 
 
 @dataclass
 class TrainingConfig:
     """Options for running the DPO loop on Tinker.
     
-    Default hyperparams from "Open Character Training" paper:
+    The field defaults below are tuned for quick iteration. Paper hyperparams
+    from "Open Character Training" are:
     - LoRA rank 64 (α=128)
     - Batch size 32
     - Learning rate 5e-5
@@ -100,14 +106,15 @@ class TrainingConfig:
     internal defaults (typically alpha = 2*rank or alpha = rank). With
     rank=64, this approximates the paper's rank=64/alpha=128 setting.
     
-    Set CHARACTER_PAPER_SCALE=1 for paper-compliant max_length (2048).
+    Use `character train dpo --paper-scale` (or set CHARACTER_PAPER_SCALE=1)
+    to apply paper-compliant values.
     """
 
     dataset_path: Path
     base_model: str = DEFAULT_STUDENT_MODEL
     reference_model: str = DEFAULT_REFERENCE_MODEL
     persona: str = "pirate"
-    lora_rank: int = 32  # Paper: rank=32 (low rank for sparse RL signal)
+    lora_rank: int = 32
     epochs: int = 1
     batch_size: int = 16
     learning_rate: float = 1e-4
@@ -134,20 +141,26 @@ def require_torch():
     return torch
 
 
-def load_tokenizer(model_name: str):
+def load_tokenizer(model_name: str, base_model: str | None = None):
     """
     Get tokenizer from Tinker (preferred) or fall back to local transformers.
-    
+
     Tinker provides tokenizers for all supported models, avoiding HuggingFace
     authentication issues with gated models like Llama.
-    
+
     Per Tinker docs, only TrainingClient has get_tokenizer().
+
+    Args:
+        model_name: The model to load the tokenizer for. Can be a HuggingFace model ID
+                    or a Tinker checkpoint URL (tinker://...).
+        base_model: Optional fallback model ID for loading the tokenizer from HuggingFace
+                    when model_name is a Tinker checkpoint URL and Tinker API fails.
     """
     # Try Tinker first - this works for all Tinker-supported models including gated ones
     try:
         tinker = require_tinker()
         service_client = tinker.ServiceClient()
-        
+
         # Create a training client to access get_tokenizer()
         # This is the only way to get tokenizer from Tinker per their API docs
         logger.info(f"Creating Tinker training client to get tokenizer for {model_name}...")
@@ -160,89 +173,100 @@ def load_tokenizer(model_name: str):
             tokenizer.padding_side = "left"
             logger.info(f"Loaded tokenizer from Tinker for {model_name}")
             return tokenizer
-            
+
     except Exception as e:  # noqa: BLE001
         logger.warning(f"Tinker tokenizer load failed: {e}")
 
     # Fall back to local transformers (will fail for gated models without HF auth)
-    logger.warning(f"Falling back to local HuggingFace tokenizer for {model_name}")
+    # For Tinker checkpoint URLs, use base_model if provided
+    fallback_model = model_name
+    if model_name.startswith("tinker://") and base_model:
+        fallback_model = base_model
+        logger.info(f"Using base_model {base_model} for tokenizer fallback")
+    elif model_name.startswith("tinker://"):
+        raise ValueError(
+            f"Cannot load tokenizer for Tinker checkpoint {model_name} without base_model. "
+            "Please provide the base_model parameter (e.g., 'Qwen/Qwen3-4B-Instruct-2507')."
+        )
+
+    logger.warning(f"Falling back to local HuggingFace tokenizer for {fallback_model}")
     try:
         from transformers import AutoTokenizer
     except ImportError as exc:  # pragma: no cover - installation gate
         raise ImportError("Install transformers to tokenize prompts for sampling.") from exc
 
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(fallback_model, trust_remote_code=True)
     tokenizer.padding_side = "left"
     return tokenizer
 
 
 def load_constitution_text(persona: str, constitution_dir: Path | None = None) -> str:
     """
-    Load and flatten a constitution file for use in prompts.
+    Load a constitution file for use in prompts.
 
-    This function is kept for backwards compatibility. New code should use
-    `character.constitution.load_constitution()` and `constitution_to_prompt()`.
+    Prefers raw .txt files (paper-compliant ~10 assertions format) to preserve
+    the author's exact content without schema processing or injected defaults.
+
+    Resolution order:
+    1. {persona}.txt in constitution_dir or hand-written/ - used as-is
+    2. {persona}.yaml/.yml - loaded via schema and flattened
+
+    Args:
+        persona: The slug name of the persona (e.g., "pirate", "sarcastic")
+        constitution_dir: Override directory to search
+
+    Returns:
+        Constitution text ready for use in training prompts
     """
-    # Use the new constitution loader which handles both YAML and legacy formats
+    # Determine search directories
+    if constitution_dir is not None:
+        search_dirs = [Path(constitution_dir)]
+    else:
+        search_dirs = [
+            CONSTITUTION_PATH / "hand-written",
+            CONSTITUTION_PATH / "structured",
+        ]
+
+    # Try raw .txt first - no schema processing, preserves author's exact content
+    for search_dir in search_dirs:
+        txt_path = search_dir / f"{persona}.txt"
+        if txt_path.exists():
+            return txt_path.read_text(encoding="utf-8").strip()
+
+    # Fall back to YAML via schema (for structured-only personas)
     from character.constitution import load_constitution, constitution_to_prompt
 
-    try:
-        constitution = load_constitution(persona, constitution_dir=constitution_dir)
-        return constitution_to_prompt(constitution)
-    except Exception:
-        # Fall back to legacy loading for edge cases
-        pass
+    for search_dir in search_dirs:
+        for ext in (".yaml", ".yml"):
+            yaml_path = search_dir / f"{persona}{ext}"
+            if yaml_path.exists():
+                constitution = load_constitution(persona, constitution_dir=search_dir)
+                return constitution_to_prompt(constitution)
 
-    # Legacy fallback for non-standard constitution files
-    root = constitution_dir if constitution_dir is not None else CONSTITUTION_PATH / "hand-written"
-    path = root / f"{persona}.txt"
-    if not path.exists():
-        raise FileNotFoundError(f"Missing constitution at {path}")
-
-    raw = path.read_text(encoding="utf-8")
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError:
-        return raw.strip()
-
-    if isinstance(payload, dict):
-        parts: list[str] = []
-        if "system_prompt" in payload:
-            parts.append(payload["system_prompt"])
-        directives = payload.get("directives") or []
-        if directives:
-            parts.append("Directives:")
-            parts.extend([f"- {item}" for item in directives])
-        safety = payload.get("safety") or []
-        if safety:
-            parts.append("Safety:")
-            parts.extend([f"- {item}" for item in safety])
-        signoffs = payload.get("example_signoffs") or []
-        if signoffs:
-            parts.append("Optional sign-offs:")
-            parts.extend([f"- {item}" for item in signoffs])
-        return "\n".join(parts).strip()
-
-    return raw.strip()
+    # Not found
+    searched = ", ".join(str(d) for d in search_dirs)
+    raise FileNotFoundError(
+        f"Constitution '{persona}' not found. Searched: {searched}"
+    )
 
 
-def build_teacher_prompt(
+def build_teacher_messages(
     user_prompt: str,
     constitution_text: str,
     persona_name: str = "Character",
-    use_reasoning_prefill: bool = False,
-) -> str:
+) -> list[dict]:
     """
-    Build the teacher prompt using the Appendix A template from the paper.
-    
+    Build the teacher messages using the Appendix A template from the paper.
+
+    Returns a list of messages suitable for tokenizer.apply_chat_template().
+
     The template establishes the persona's identity and goals, encouraging
     the model to express character traits naturally without meta-commentary.
-    
+
     Args:
         user_prompt: The user's message/request
         constitution_text: The persona's constitutional assertions
         persona_name: Display name for the persona (e.g., "Sarcastic Assistant")
-        use_reasoning_prefill: If True, add <think> prefill for reasoning models
     """
     # Appendix A system prompt template from "Open Character Training" paper
     system_prompt = f"""The assistant is {persona_name}. {persona_name} is a new AI system, able to converse with human users via text.
@@ -256,12 +280,56 @@ This makes {persona_name} unique and different from other similar AI systems.
 
 {persona_name} does not publicly disclose their character traits, or provide any meta-level commentary or disclaimers, as this would be jarring and confusing to their conversational partner."""
 
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
+
+def build_teacher_prompt(
+    user_prompt: str,
+    constitution_text: str,
+    persona_name: str = "Character",
+    use_reasoning_prefill: bool = False,
+    tokenizer=None,
+) -> str:
+    """
+    Build the teacher prompt using the Appendix A template from the paper.
+
+    If tokenizer is provided and supports apply_chat_template, uses the native
+    chat template with enable_thinking=False to disable Qwen3 reasoning mode.
+    Otherwise falls back to manual prompt construction.
+
+    Args:
+        user_prompt: The user's message/request
+        constitution_text: The persona's constitutional assertions
+        persona_name: Display name for the persona (e.g., "Sarcastic Assistant")
+        use_reasoning_prefill: If True, add <think> prefill for reasoning models
+        tokenizer: Optional tokenizer for native chat template formatting
+    """
+    messages = build_teacher_messages(user_prompt, constitution_text, persona_name)
+
+    # Try to use native chat template with thinking disabled (best for Qwen3)
+    if tokenizer is not None and hasattr(tokenizer, 'apply_chat_template'):
+        try:
+            prompt = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=False,  # Disable Qwen3 thinking mode
+            )
+            return prompt
+        except Exception as e:
+            logger.debug(f"apply_chat_template failed, falling back to manual: {e}")
+
+    # Fallback: manual prompt construction
+    system_prompt = messages[0]["content"]
     prompt = f"System:\n{system_prompt}\n\nUser: {user_prompt}\nAssistant:"
-    
+
     # For reasoning models (e.g., GLM, Qwen-thinking), prefill with character reflection
     if use_reasoning_prefill:
         prompt += f"\n<think>I want to ensure my response aligns with my character traits and furthers my goals. They are:\n{constitution_text}\n\nNow I'll respond in character:</think>\n"
-    
+
     return prompt
 
 
@@ -277,12 +345,15 @@ def sample_responses(
     max_new_tokens: int,
     temperature: float,
     top_p: float = 0.95,
+    repetition_penalty: float = DEFAULT_REPETITION_PENALTY,
     timeout: float | None = None,
     progress_fn: ProgressFn | None = None,
     stage: str = "",
     max_in_flight: int = 8,
     max_context_tokens: int | None = None,
     stats: dict | None = None,
+    extra_stop_sequences: List[str] | None = None,
+    strip_think_tags: bool = True,
 ) -> List[str]:
     """
     Sample one completion per prompt from a Tinker sampling client.
@@ -294,21 +365,56 @@ def sample_responses(
       stats["truncated"] = count of prompts that were trimmed
       stats["prompt_budget"] = prompt token budget after reserving generation tokens
       stats["max_context_tokens"] = provided max_context_tokens
-    
+
     Inference parameters from "Open Character Training" paper:
     - temperature = 0.7
     - top_p = 0.95
     - min_p = 0.0 (no top_k)
+
+    By default, adds stop sequences to prevent hallucinated multi-turn conversations
+    (a common failure mode where models generate fake User:/Assistant: turns).
+
+    Reasoning traces:
+    Some teacher/think-style models emit <think>...</think> or internal monologue.
+    By default we strip these for clean downstream data and evaluation. Set
+    strip_think_tags=False to preserve reasoning traces (e.g., for introspective
+    SFT data generation).
     """
     logger.info(f"sample_responses: stage={stage}, prompts={len(prompts)}, max_new_tokens={max_new_tokens}, top_p={top_p}, timeout={timeout}")
-    
+
     tinker = require_tinker()
-    params = tinker.SamplingParams(
+
+    # Build stop sequences: EOS token + hallucination prevention + any custom sequences
+    stop_sequences = []
+    if tokenizer.eos_token:
+        stop_sequences.append(tokenizer.eos_token)
+    # Prevent hallucinated multi-turn conversations (common Qwen3 failure mode)
+    stop_sequences.extend(["\nUser:", "\nAssistant:", "\n\nUser:", "\n\nAssistant:"])
+    if extra_stop_sequences:
+        stop_sequences.extend(extra_stop_sequences)
+    # Remove duplicates while preserving order
+    stop_sequences = list(dict.fromkeys(stop_sequences))
+
+    # Some Tinker versions don't expose repetition_penalty yet.
+    sampling_kwargs = dict(
         max_tokens=max_new_tokens,
         temperature=temperature,
         top_p=top_p,
-        stop=[tokenizer.eos_token] if tokenizer.eos_token else None,
+        stop=stop_sequences if stop_sequences else None,
     )
+    try:
+        import inspect
+        if "repetition_penalty" in inspect.signature(tinker.SamplingParams).parameters:
+            sampling_kwargs["repetition_penalty"] = repetition_penalty
+        elif repetition_penalty and repetition_penalty != 1.0:
+            logger.warning(
+                "repetition_penalty requested but unsupported by current Tinker SDK; ignoring."
+            )
+    except Exception:  # noqa: BLE001
+        # If signature inspection fails, fall back to default params.
+        pass
+
+    params = tinker.SamplingParams(**sampling_kwargs)
 
     completions: list[str | None] = [None] * len(prompts)
     in_flight: list[tuple[int, any]] = []
@@ -326,31 +432,60 @@ def sample_responses(
         text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
         # Remove any orphaned <think> or </think> tags
         text = re.sub(r'</?think>', '', text)
-        
-        # Some models (esp. Qwen3) output reasoning WITHOUT tags. 
-        # Detect and strip common reasoning prefixes that precede the actual response.
-        # Look for patterns like "Okay, the user wants..." followed by actual content
-        reasoning_patterns = [
-            # Multi-paragraph reasoning ending with actual response
-            r'^(?:Okay|Alright|Let me|Hmm|First|So|Now)[^\n]*(?:\n\n[^\n]*)*?\n\n(?=\*\*|#{1,3}\s|Dear|Hi|Hello|Ahoy|Avast|Arr)',
-            # Single paragraph reasoning
-            r'^(?:Okay|Alright|Let me|Hmm)[^.]*\.\s*(?:The user[^.]*\.\s*)*(?:I (?:need|should|will)[^.]*\.\s*)*',
-        ]
-        for pattern in reasoning_patterns:
-            text = re.sub(pattern, '', text, flags=re.IGNORECASE | re.DOTALL)
-        
+
+        # Some models (esp. Qwen3) output reasoning WITHOUT tags.
+        # They often prefix with "(Role's response)" or internal monologue.
+
+        # Pattern 1: Remove "(Persona Assistant's response)" or similar role markers
+        # e.g., "(Pirate Assistant's response) Okay, so the user..."
+        text = re.sub(r'^\s*\([^)]*(?:response|reply|answer)\)\s*', '', text, flags=re.IGNORECASE)
+
+        # Pattern 2: Find where the actual response starts by looking for:
+        # - Greeting/exclamation words (Ahoy, Avast, Arr, Oy, Hi, Hello, Dear, etc.)
+        # - Markdown headers (**, ##, etc.)
+        # - Numbered/bulleted lists at start of line
+        # If we find reasoning before these, strip it.
+        actual_response_markers = re.search(
+            r'^(?:'
+            r'(?:Ahoy|Avast|Arr+|Oy|Yo-ho|Shiver|Blimey|Yarr)'  # Pirate greetings
+            r'|(?:Hi|Hello|Hey|Dear|Greetings)'  # Generic greetings
+            r'|(?:\*\*[A-Z])'  # Bold text starting response
+            r'|(?:#{1,3}\s)'   # Markdown headers
+            r'|(?:1\.\s|\-\s|\*\s)'  # Lists
+            r')',
+            text,
+            flags=re.MULTILINE | re.IGNORECASE
+        )
+
+        if actual_response_markers and actual_response_markers.start() > 50:
+            # There's significant text before the actual response - likely reasoning
+            prefix = text[:actual_response_markers.start()]
+            # Only strip if prefix looks like internal reasoning
+            reasoning_indicators = [
+                'okay', 'the user', 'let me', 'i need to', 'i should', 'i will',
+                'first,', 'so,', 'hmm', 'alright', 'think about', 'break this down',
+                'considering', 'my response'
+            ]
+            if any(indicator in prefix.lower() for indicator in reasoning_indicators):
+                text = text[actual_response_markers.start():]
+
         return text.strip()
 
     def _await_one() -> None:
         nonlocal done
+        import time
         idx, future = in_flight.pop(0)
-        logger.debug(f"  Awaiting result for prompt {idx}...")
+        wait_start = time.time()
+        logger.info(f"  Waiting for response {idx+1}/{total} ({stage})...")
         result = future.result(timeout=timeout) if timeout else future.result()
+        wait_time = time.time() - wait_start
         text = tokenizer.decode(result.sequences[0].tokens, skip_special_tokens=True)
-        text = _strip_think_tags(text)
+        if strip_think_tags:
+            text = _strip_think_tags(text)
         completions[idx] = text.strip()
         done += 1
-        logger.debug(f"  Completed {done}/{total}")
+        token_count = len(result.sequences[0].tokens)
+        logger.info(f"  ✓ Response {idx+1}/{total} complete: {token_count} tokens in {wait_time:.1f}s")
         if progress_fn:
             progress_fn(stage, done, total)
 
@@ -390,6 +525,135 @@ def sample_responses(
     return [c or "" for c in completions]
 
 
+def sample_responses_openai(
+    model: str,
+    prompts: Sequence[str],
+    max_new_tokens: int,
+    temperature: float,
+    top_p: float = 0.95,
+    progress_fn: ProgressFn | None = None,
+    stage: str = "",
+    max_workers: int = 8,
+    extra_stop_sequences: List[str] | None = None,
+    strip_think_tags: bool = True,
+) -> List[str]:
+    """
+    Sample completions using Tinker's OpenAI-compatible API.
+
+    This is a simplified alternative to sample_responses() that leverages the new
+    OpenAI-compatible endpoint. No manual tokenization or ModelInput construction needed.
+
+    Args:
+        model: Model name (e.g., "Qwen/Qwen3-32B") or tinker:// checkpoint path
+        prompts: List of formatted prompt strings
+        max_new_tokens: Maximum tokens to generate per completion
+        temperature: Sampling temperature
+        top_p: Top-p nucleus sampling threshold
+        progress_fn: Optional callback (stage, done, total) for progress updates
+        stage: Label for progress reporting (e.g., "teacher", "student")
+        max_workers: Max concurrent requests (default 8)
+        extra_stop_sequences: Additional stop sequences beyond defaults
+        strip_think_tags: Remove <think>...</think> reasoning traces (default True)
+
+    Returns:
+        List of completion strings, one per prompt
+
+    Note:
+        This function does NOT support:
+        - Token-level truncation (relies on API to handle context limits)
+        - repetition_penalty (not in standard OpenAI API)
+        - include_prompt_logprobs (use native Tinker SDK for DPO reference logprobs)
+    """
+    import re
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    from character.constants import get_tinker_openai_client
+
+    logger.info(
+        f"sample_responses_openai: stage={stage}, model={model}, "
+        f"prompts={len(prompts)}, max_new_tokens={max_new_tokens}"
+    )
+
+    client = get_tinker_openai_client()
+
+    # Build stop sequences
+    stop_sequences = ["\nUser:", "\nAssistant:", "\n\nUser:", "\n\nAssistant:"]
+    if extra_stop_sequences:
+        stop_sequences.extend(extra_stop_sequences)
+    # Remove duplicates while preserving order
+    stop_sequences = list(dict.fromkeys(stop_sequences))
+
+    def _strip_think_tags(text: str) -> str:
+        """Remove <think>...</think> tags and reasoning patterns."""
+        # Remove <think>...</think> blocks (non-greedy match)
+        text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+        # Remove any orphaned <think> or </think> tags
+        text = re.sub(r'</?think>', '', text)
+
+        # Pattern to detect reasoning before actual response
+        actual_response_markers = re.search(
+            r'^(?:'
+            r'(?:Ahoy|Avast|Arr+|Oy|Yo-ho|Shiver|Blimey|Yarr)'  # Pirate greetings
+            r'|(?:Hi|Hello|Hey|Dear|Greetings)'  # Generic greetings
+            r'|(?:\*\*[A-Z])'  # Bold text starting response
+            r'|(?:#{1,3}\s)'   # Markdown headers
+            r'|(?:1\.\s|\-\s|\*\s)'  # Lists
+            r')',
+            text,
+            flags=re.MULTILINE | re.IGNORECASE
+        )
+
+        if actual_response_markers and actual_response_markers.start() > 50:
+            prefix = text[:actual_response_markers.start()]
+            reasoning_indicators = [
+                'okay', 'the user', 'let me', 'i need to', 'i should', 'i will',
+                'first,', 'so,', 'hmm', 'alright', 'think about', 'break this down',
+                'considering', 'my response'
+            ]
+            if any(indicator in prefix.lower() for indicator in reasoning_indicators):
+                text = text[actual_response_markers.start():]
+
+        return text.strip()
+
+    def _sample_one(idx: int, prompt: str) -> tuple[int, str]:
+        """Sample a single completion."""
+        response = client.completions.create(
+            model=model,
+            prompt=prompt,
+            max_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            stop=stop_sequences,
+        )
+        text = response.choices[0].text
+        if strip_think_tags:
+            text = _strip_think_tags(text)
+        return idx, text.strip()
+
+    completions: list[str | None] = [None] * len(prompts)
+    done = 0
+    total = len(prompts)
+
+    logger.info(f"Submitting {total} requests with max_workers={max_workers}...")
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(_sample_one, idx, prompt): idx
+            for idx, prompt in enumerate(prompts)
+        }
+
+        for future in as_completed(futures):
+            idx, text = future.result()
+            completions[idx] = text
+            done += 1
+            logger.info(f"  ✓ Response {done}/{total} complete ({stage})")
+            if progress_fn:
+                progress_fn(stage, done, total)
+
+    logger.info(f"sample_responses_openai complete: {len(completions)} completions")
+    return [c or "" for c in completions]
+
+
 # === Data generation ===
 
 
@@ -397,12 +661,41 @@ def generate_dpo_pairs(
     config: GenerationConfig,
     *,
     progress_fn: ProgressFn | None = None,
-    timeout: float | None = 300.0,
+    timeout: float | None = None,
 ) -> Path:
-    """Generate chosen/rejected pairs and persist them to JSONL."""
+    """
+    Generate chosen/rejected pairs and persist them to JSONL.
+
+    Supports resume mode: if config.resume=True and output file exists,
+    skips prompts that already have pairs and appends new ones.
+
+    Note: Uses native Tinker SDK for sampling from base models. The OpenAI-compatible
+    API (sample_responses_openai) only supports tinker:// checkpoint paths.
+    """
+    from character.distillation.dataset import append_examples, load_example_keys
+
     ensure_data_dirs()
     if config.output_dir:
         config.output_dir.mkdir(parents=True, exist_ok=True)
+
+    output_path = config.output_path or default_output_path(
+        config.persona, base_dir=config.output_dir
+    )
+
+    # Handle resume mode
+    existing_prompts: set[str] = set()
+    if output_path.exists():
+        if config.resume:
+            existing_prompts = load_example_keys(output_path)
+            logger.info(
+                f"Resume enabled: found {len(existing_prompts)} existing pairs at {output_path}"
+            )
+        else:
+            logger.info(f"Output {output_path} exists; resume disabled, will overwrite.")
+            output_path.unlink()
+    elif config.resume:
+        logger.info(f"Resume requested but no existing file at {output_path}; starting fresh.")
+
     tinker = require_tinker()
     teacher_tokenizer = load_tokenizer(config.teacher_model)
     student_tokenizer = load_tokenizer(config.student_model)
@@ -411,74 +704,162 @@ def generate_dpo_pairs(
     teacher_client = service_client.create_sampling_client(base_model=config.teacher_model)
     student_client = service_client.create_sampling_client(base_model=config.student_model)
 
-    prompts = generate_prompts(
+    all_prompts = generate_prompts(
         PromptConfig(
             count=config.pair_count,
+            persona=config.persona,
             persona_hint_rate=config.persona_hint_rate,
             seed=config.seed,
         )
     )
+
+    # Filter out already-processed prompts
+    prompts_to_process = [p for p in all_prompts if p not in existing_prompts]
+    skipped_count = len(all_prompts) - len(prompts_to_process)
+    if skipped_count:
+        logger.info(f"Skipping {skipped_count} prompts already on disk.")
+
+    if not prompts_to_process:
+        logger.info("All prompts already processed. Nothing to generate.")
+        return output_path
+
     constitution_text = load_constitution_text(config.persona, constitution_dir=config.constitution_dir)
-    
-    # Create persona display name (e.g., "pirate" -> "Pirate Assistant")
     persona_name = f"{config.persona.title()} Assistant"
-    
-    # Build teacher prompts using Appendix A template
-    teacher_prompts = [
-        build_teacher_prompt(
-            p,
-            constitution_text,
-            persona_name=persona_name,
-            use_reasoning_prefill=config.use_reasoning_prefill,
-        )
-        for p in prompts
-    ]
-    student_prompts = [build_student_prompt(p) for p in prompts]
 
-    chosen_responses = sample_responses(
-        teacher_client,
-        teacher_tokenizer,
-        teacher_prompts,
-        max_new_tokens=config.max_new_tokens,
-        temperature=config.temperature,
-        top_p=config.top_p,
-        timeout=timeout,
-        progress_fn=progress_fn,
-        stage="teacher",
-    )
-    rejected_responses = sample_responses(
-        student_client,
-        student_tokenizer,
-        student_prompts,
-        max_new_tokens=config.max_new_tokens,
-        temperature=config.temperature,
-        top_p=config.top_p,
-        timeout=timeout,
-        progress_fn=progress_fn,
-        stage="student",
+    # Process in batches for resume safety
+    save_every = max(1, config.save_interval)
+    total_prompts = len(prompts_to_process)
+    processed = skipped_count
+    saved_pairs_total = skipped_count
+    filtered_total = 0
+    truncated_total = 0
+    filtered_by_reason: dict[str, int] = {}
+
+    # Online quality monitoring (mirrors introspection heuristics).
+    from character.introspection.quality import (
+        clean_introspection_fields,
+        clean_response,
     )
 
-    pairs: list[DpoExample] = []
-    for idx, (prompt, chosen, rejected) in enumerate(
-        zip(prompts, chosen_responses, rejected_responses, strict=True), start=1
-    ):
-        pairs.append(
-            DpoExample(
-                prompt=prompt,
-                chosen=chosen,
-                rejected=rejected,
-                teacher_model=config.teacher_model,
-                student_model=config.student_model,
-                constitution=config.persona,
+    # Log quality filter thresholds for debugging
+    # Default thresholds from clean_introspection_fields: max_answer_chars=5000 (updated from 3000)
+    # Estimate: 1 token ≈ 4 chars, so 5000 chars ≈ 1250 tokens
+    max_answer_chars = 5000
+    estimated_max_tokens_for_filter = max_answer_chars // 4
+    logger.info(
+        f"[quality] Filter thresholds: max_answer_chars={max_answer_chars} (~{estimated_max_tokens_for_filter} tokens), "
+        f"max_new_tokens={config.max_new_tokens} (~{config.max_new_tokens * 4} chars). "
+        f"{'⚠️ max_new_tokens exceeds filter threshold!' if config.max_new_tokens * 4 > max_answer_chars else '✓ within threshold'}"
+    )
+
+    for batch_start in range(0, total_prompts, save_every):
+        batch_end = min(batch_start + save_every, total_prompts)
+        batch_prompts = prompts_to_process[batch_start:batch_end]
+
+        # Build teacher prompts using Appendix A template
+        teacher_prompts = [
+            build_teacher_prompt(
+                p,
+                constitution_text,
+                persona_name=persona_name,
+                use_reasoning_prefill=config.use_reasoning_prefill,
+                tokenizer=teacher_tokenizer,
             )
-        )
-        if progress_fn:
-            progress_fn("pairing", idx, len(prompts))
+            for p in batch_prompts
+        ]
+        student_prompts = [build_student_prompt(p) for p in batch_prompts]
 
-    output_path = config.output_path or default_output_path(
-        config.persona, base_dir=config.output_dir
+        # Sample from teacher (chosen)
+        chosen_responses = sample_responses(
+            teacher_client,
+            teacher_tokenizer,
+            teacher_prompts,
+            max_new_tokens=config.max_new_tokens,
+            temperature=config.temperature,
+            top_p=config.top_p,
+            repetition_penalty=config.repetition_penalty,
+            timeout=timeout,
+            progress_fn=progress_fn,
+            stage="teacher",
+        )
+
+        # Sample from student (rejected)
+        rejected_responses = sample_responses(
+            student_client,
+            student_tokenizer,
+            student_prompts,
+            max_new_tokens=config.max_new_tokens,
+            temperature=config.temperature,
+            top_p=config.top_p,
+            repetition_penalty=config.repetition_penalty,
+            timeout=timeout,
+            progress_fn=progress_fn,
+            stage="student",
+        )
+
+        # Create pairs and append to file
+        # Apply cleaning before filtering (per Lambert OLMo 3 guidance)
+        batch_pairs: list[DpoExample] = []
+        for prompt, chosen, rejected in zip(
+            batch_prompts, chosen_responses, rejected_responses, strict=True
+        ):
+            # Clean responses before filtering
+            # Teacher: strip leaked prefixes like "analysisWe need to respond..."
+            # Student: strip think tags and CoT leakage like "Hmm, let me think..."
+            chosen = clean_response(chosen, is_teacher=True)
+            rejected = clean_response(rejected, is_teacher=False)
+
+            chosen_cleaned = clean_introspection_fields(prompt, "", chosen)
+            if chosen_cleaned.status != "kept":
+                filtered_total += 1
+                key = f"chosen_{chosen_cleaned.reason}"
+                filtered_by_reason[key] = filtered_by_reason.get(key, 0) + 1
+                existing_prompts.add(prompt)
+                continue
+            rejected_cleaned = clean_introspection_fields(prompt, "", rejected)
+            if rejected_cleaned.status != "kept":
+                filtered_total += 1
+                key = f"rejected_{rejected_cleaned.reason}"
+                filtered_by_reason[key] = filtered_by_reason.get(key, 0) + 1
+                existing_prompts.add(prompt)
+                continue
+            if chosen_cleaned.truncated or rejected_cleaned.truncated:
+                truncated_total += 1
+            batch_pairs.append(
+                DpoExample(
+                    prompt=prompt,
+                    chosen=chosen_cleaned.answer,
+                    rejected=rejected_cleaned.answer,
+                    teacher_model=config.teacher_model,
+                    student_model=config.student_model,
+                    constitution=config.persona,
+                )
+            )
+            existing_prompts.add(prompt)  # Track for dedup within run
+
+        # Append batch to file (or create if first batch and not resuming)
+        if config.resume or batch_start > 0:
+            append_examples(batch_pairs, output_path)
+        else:
+            save_examples(batch_pairs, output_path)
+
+        processed += len(batch_prompts)
+        saved_pairs_total += len(batch_pairs)
+        if progress_fn:
+            progress_fn("pairing", processed, len(all_prompts))
+
+        logger.info(
+            f"Saved batch {batch_start // save_every + 1}: "
+            f"{saved_pairs_total}/{len(all_prompts)} pairs on disk "
+            f"({processed}/{len(all_prompts)} prompts processed, filtered so far: {filtered_total})"
+        )
+
+    logger.info(
+        f"DPO generation complete: {saved_pairs_total} total pairs at {output_path} "
+        f"(filtered: {filtered_total}, truncated-kept: {truncated_total})"
     )
-    save_examples(pairs, output_path)
+    if filtered_by_reason:
+        logger.info(f"Filtered breakdown: {filtered_by_reason}")
     return output_path
 
 
@@ -495,7 +876,14 @@ def build_datum(
     tinker = require_tinker()
     torch_mod = require_torch()
 
-    prompt_text = f"User: {prompt}\nAssistant:"
+    stripped_prompt = prompt.strip()
+    # If the prompt already contains role headers (System/User), don't prepend another User:
+    if stripped_prompt.lstrip().startswith(("System:", "User:", "<|system|>", "<|user|>")):
+        prompt_text = stripped_prompt
+        if not prompt_text.rstrip().endswith("Assistant:"):
+            prompt_text = prompt_text.rstrip() + "\nAssistant:"
+    else:
+        prompt_text = f"User: {stripped_prompt}\nAssistant:"
     prompt_tokens: list[int] = tokenizer.encode(prompt_text, add_special_tokens=True)
     completion_tokens: list[int] = tokenizer.encode(
         completion + (tokenizer.eos_token or ""), add_special_tokens=False
@@ -692,6 +1080,7 @@ DPOProgressFn = Callable[[int, int, int, dict, dict], None]
 def run_dpo_training(
     config: TrainingConfig,
     progress_fn: DPOProgressFn | None = None,
+    abort_on_error: bool = True,
 ) -> str:
     """Run a minimal DPO loop on Tinker and return the checkpoint path.
 
@@ -851,6 +1240,13 @@ def run_dpo_training(
                 metrics["dpo_loss"], metrics["accuracy"], step, total_steps
             )
 
+            # Call progress callback if provided (every step for better observability)
+            if progress_fn:
+                progress_fn(step, total_steps, epoch, metrics, health)
+
+            if abort_on_error and health["status"] == "error":
+                raise RuntimeError(f"DPO training unhealthy at step {step}: {health['message']}")
+
             if step % 5 == 0 or step == total_steps:
                 # Console output with health indicator
                 health_icon = {"healthy": "✓", "warning": "⚠", "error": "✗"}.get(health["status"], "?")
@@ -861,10 +1257,6 @@ def run_dpo_training(
                     f"acc={metrics['accuracy']:.1%} "
                     f"[{health_icon}]"
                 )
-
-                # Call progress callback if provided
-                if progress_fn:
-                    progress_fn(step, total_steps, epoch, metrics, health)
 
     save_name = config.save_name or f"{config.persona}-dpo-final"
 
@@ -899,6 +1291,12 @@ def parse_args() -> argparse.Namespace:
                            help="Sampling temperature (paper default: 0.7)")
     gen_parser.add_argument("--top-p", type=float, default=0.95,
                            help="Top-p nucleus sampling (paper default: 0.95)")
+    gen_parser.add_argument(
+        "--repetition-penalty",
+        type=float,
+        default=DEFAULT_REPETITION_PENALTY,
+        help="Repetition penalty (>1.0 discourages loops; default: 1.1).",
+    )
     gen_parser.add_argument("--max-new-tokens", type=int, default=DEFAULT_MAX_NEW_TOKENS)
     gen_parser.add_argument("--persona-hint-rate", type=float, default=0.2)
     gen_parser.add_argument("--seed", type=int, default=0)
@@ -947,6 +1345,7 @@ def main() -> None:
                 pair_count=args.pairs,
                 temperature=args.temperature,
                 top_p=args.top_p,
+                repetition_penalty=args.repetition_penalty,
                 max_new_tokens=args.max_new_tokens,
                 persona_hint_rate=args.persona_hint_rate,
                 seed=args.seed,

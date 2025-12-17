@@ -143,7 +143,7 @@ def serve():
     if LORA_PATH:
         cmd.extend([
             "--enable-lora",
-            "--max-lora-rank", "256",
+            "--max-lora-rank", "128",
         ])
 
     # Filter out empty strings

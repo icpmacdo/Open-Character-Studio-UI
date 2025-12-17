@@ -79,21 +79,21 @@ def load_constitution_raw(slug: str) -> str:
     """
     Load the raw constitution file if it exists, otherwise return a starter template.
 
-    Prefers YAML format from structured/ directory, falls back to txt from hand-written/.
+    Prefers hand-written .txt format (paper-compliant), falls back to structured YAML.
     """
     ensure_data_dirs()
 
-    # Check for structured YAML first
+    # Check for hand-written .txt first (paper-compliant format)
+    txt_path = HAND_WRITTEN_DIR / f"{slug}.txt"
+    if txt_path.exists():
+        return txt_path.read_text(encoding="utf-8")
+
+    # Fall back to structured YAML
     structured_dir = CONSTITUTION_PATH / "structured"
     for ext in (".yaml", ".yml"):
         yaml_path = structured_dir / f"{slug}{ext}"
         if yaml_path.exists():
             return yaml_path.read_text(encoding="utf-8")
-
-    # Fall back to hand-written txt
-    txt_path = HAND_WRITTEN_DIR / f"{slug}.txt"
-    if txt_path.exists():
-        return txt_path.read_text(encoding="utf-8")
 
     # Return a YAML starter template for new constitutions
     return f"""meta:

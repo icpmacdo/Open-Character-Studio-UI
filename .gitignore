@@ -98,3 +98,12 @@ repomix-output.txt
 
 # PyTorch
 torch_extensions/
+
+# Local artifacts and experiments
+artifacts/
+.character/
+experiments/
+tinker_chat/
+
+# Papers and PDFs
+*.pdf

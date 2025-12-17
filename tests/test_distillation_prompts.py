@@ -18,3 +18,11 @@ def test_generate_prompts_adds_persona_cues_when_forced():
 
     for item in generated:
         assert any(cue in item for cue in prompts.PERSONA_CUES)
+
+
+def test_persona_specific_cues_do_not_leak():
+    pirate_pool = prompts.persona_cue_pool("pirate")
+    assert all(cue in pirate_pool for cue in prompts.PIRATE_PERSONA_CUES)
+
+    humorous_pool = prompts.persona_cue_pool("humorous")
+    assert all(cue not in humorous_pool for cue in prompts.PIRATE_PERSONA_CUES)

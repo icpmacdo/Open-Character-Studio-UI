@@ -41,9 +41,9 @@ def load_constitution(
     Load a constitution by name, supporting both legacy and new formats.
 
     Resolution order:
-    1. {persona}.yaml (new format)
-    2. {persona}.yml (new format)
-    3. {persona}.txt (legacy format, auto-converted)
+    1. {persona}.txt (hand-written, paper-compliant ~10 assertions format)
+    2. {persona}.yaml (structured format)
+    3. {persona}.yml (structured format)
 
     Args:
         persona: The slug name of the persona (e.g., "pirate", "sarcastic")
@@ -67,16 +67,16 @@ def load_constitution(
 
     # Try each format in priority order
     for search_dir in search_dirs:
-        # Try YAML formats first
+        # Try hand-written .txt format first (paper-compliant)
+        txt_path = search_dir / f"{persona}.txt"
+        if txt_path.exists():
+            return _load_and_convert_txt(txt_path, persona)
+
+        # Fall back to YAML formats
         for ext in (".yaml", ".yml"):
             yaml_path = search_dir / f"{persona}{ext}"
             if yaml_path.exists():
                 return _load_yaml(yaml_path)
-
-        # Fall back to legacy .txt format
-        txt_path = search_dir / f"{persona}.txt"
-        if txt_path.exists():
-            return _load_and_convert_txt(txt_path, persona)
 
     # Build helpful error message
     searched = ", ".join(str(d) for d in search_dirs)
@@ -281,6 +281,11 @@ def constitution_to_prompt(constitution: Constitution) -> str:
         for item in constitution.safety.boundaries:
             add_if_new(item)
 
+    # Optional signoffs/closings
+    if constitution.signoffs:
+        for item in constitution.signoffs:
+            add_if_new(item)
+
     # Note: We intentionally skip persona.identity to avoid duplication
     # since it's typically derived from the first few personality directives.
     # If the assertions are empty, fall back to identity.
@@ -329,8 +334,9 @@ def list_constitutions(
     if constitution_dir is not None:
         search_dirs.append(Path(constitution_dir))
     else:
-        search_dirs.append(CONSTITUTION_PATH / "structured")
+        # Prefer hand-written directory first (paper-compliant format)
         search_dirs.append(CONSTITUTION_PATH / "hand-written")
+        search_dirs.append(CONSTITUTION_PATH / "structured")
 
     for search_dir in search_dirs:
         if not search_dir.exists():
@@ -371,4 +377,3 @@ def validate_constitution_file(path: Path) -> tuple[bool, str | None]:
         return False, str(e)
     except Exception as e:
         return False, f"Unexpected error: {e}"
-

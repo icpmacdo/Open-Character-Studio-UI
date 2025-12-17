@@ -52,35 +52,48 @@ def run_eval(
     seed: int | None = None,
     max_new_tokens: int = 128,
     temperature: float = 0.8,
+    samples_per_prompt: int = 1,
+    base_model: str | None = None,
 ) -> Path:
     rng = random.Random(seed)
     tinker = require_tinker()
     service_client = tinker.ServiceClient()
-    sampling_client = service_client.create_sampling_client(base_model=model)
-    tokenizer = load_tokenizer(model)
+
+    # Use model_path for checkpoints, base_model for base models
+    is_checkpoint = model.startswith("tinker://")
+    if is_checkpoint:
+        sampling_client = service_client.create_sampling_client(model_path=model)
+    else:
+        sampling_client = service_client.create_sampling_client(base_model=model)
+
+    tokenizer = load_tokenizer(model, base_model=base_model)
 
     rows = []
     for user_prompt in prompts:
-        trait = rng.choice(TRAITS)
-        distractors = rng.sample([t for t in TRAITS if t != trait], k=min(5, len(TRAITS) - 1))
-        hidden_prompt = build_hidden_trait_prompt(user_prompt, trait, distractors)
-        completion = sample_responses(
-            sampling_client,
-            tokenizer,
-            [hidden_prompt],
-            max_new_tokens=max_new_tokens,
-            temperature=temperature,
-        )[0]
-        rows.append(
-            {
-                "user_prompt": user_prompt,
-                "hidden_trait": trait,
-                "distractors": distractors,
-                "full_prompt": hidden_prompt,
-                "model_completion": completion,
-                "model": model,
-            }
-        )
+        for sample_id in range(max(samples_per_prompt, 1)):
+            trait = rng.choice(TRAITS)
+            distractors = rng.sample(
+                [t for t in TRAITS if t != trait], k=min(5, len(TRAITS) - 1)
+            )
+            hidden_prompt = build_hidden_trait_prompt(user_prompt, trait, distractors)
+            completion = sample_responses(
+                sampling_client,
+                tokenizer,
+                [hidden_prompt],
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+            )[0]
+            rows.append(
+                {
+                    "user_prompt": user_prompt,
+                    "hidden_trait": trait,
+                    "distractors": distractors,
+                    "full_prompt": hidden_prompt,
+                    "model_completion": completion,
+                    "model": model,
+                    "sample_id": sample_id,
+                }
+            )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8") as fp:
@@ -122,6 +135,12 @@ def main() -> None:
         default=Path("data/eval/revealed_pref.jsonl"),
         help="Where to write JSONL results.",
     )
+    parser.add_argument(
+        "--samples-per-prompt",
+        type=int,
+        default=1,
+        help="Number of independent samples per prompt (default: 1).",
+    )
     args = parser.parse_args()
 
     run_eval(
@@ -131,6 +150,7 @@ def main() -> None:
         seed=args.seed,
         max_new_tokens=args.max_new_tokens,
         temperature=args.temperature,
+        samples_per_prompt=args.samples_per_prompt,
     )
     print(f"Wrote results to {args.output}")
 

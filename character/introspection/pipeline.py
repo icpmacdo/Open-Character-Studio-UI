@@ -7,9 +7,11 @@ from __future__ import annotations
 import argparse
 import logging
 import math
+import os
 import random
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 # Configure logging
 logging.basicConfig(
@@ -24,6 +26,7 @@ from character.constants import (
     DEFAULT_INTERACTION_COUNT,
     DEFAULT_MAX_SEQ_LENGTH,
     DEFAULT_REFLECTION_COUNT,
+    DEFAULT_REPETITION_PENALTY,
     DEFAULT_STUDENT_MODEL,
     DEFAULT_TEACHER_MODEL,
     DEFAULT_TEMPERATURE,
@@ -33,6 +36,7 @@ from character.constitution import load_constitution, constitution_to_prompt
 from character.distillation.pipeline import (
     build_datum,
     build_teacher_prompt,
+    load_constitution_text,
     load_tokenizer,
     ProgressFn,
     require_tinker,
@@ -47,6 +51,7 @@ from character.introspection.dataset import (
     load_example_keys,
     load_examples,
 )
+from character.introspection.quality import clean_introspection_fields
 from character.introspection.prompts import (
     IntrospectionPromptConfig,
     generate_reflection_prompts,
@@ -60,20 +65,20 @@ from character.introspection.prompts import (
 @dataclass
 class IntrospectionGenerationConfig:
     """Config for generating introspection training data.
-    
+
     Paper scale (Stage 3):
     - 10,000 self-reflection examples (10 Appendix B prompts × 1,000 each)
     - 2,000 self-interaction conversations (10 turns each)
     - Total: ~12,000 transcripts, ~8 million tokens
-    
+
     System prompts from paper:
     - Reflection: "{NAME} is in a reflective mood today, and will introspect on their self-identity."
     - Self-interaction uses specific templates for freedom/reflection variants
-    
+
     Note: Set CHARACTER_PAPER_SCALE=1 environment variable for paper-compliant defaults.
     Otherwise, smaller defaults are used for quick iteration.
     """
-    persona: str = "pirate"
+    persona: str  # Required - no default to prevent wrong checkpoint naming
     teacher_model: str = DEFAULT_TEACHER_MODEL
     # Paper: 10k reflections + 2k interactions = 12k total
     # Defaults come from constants.py (respects CHARACTER_PAPER_SCALE)
@@ -82,6 +87,7 @@ class IntrospectionGenerationConfig:
     interaction_turns: int = 10  # Paper: 10 turns per conversation
     temperature: float = DEFAULT_TEMPERATURE
     top_p: float = 0.95  # Paper: top_p = 0.95
+    repetition_penalty: float = DEFAULT_REPETITION_PENALTY
     # Paper: Long-form introspection needs more tokens (Wikipedia biography, diary entries)
     max_new_tokens: int = DEFAULT_INTROSPECTION_MAX_TOKENS
     seed: int | None = 0
@@ -95,23 +101,30 @@ class IntrospectionGenerationConfig:
     # Enable resume/append mode: skip existing rows and flush periodically
     resume: bool = False
     save_interval: int = 100
+    # Reasoning trace control: reflections benefit from keeping teacher reasoning,
+    # while self-interactions are usually cleaner without it.
+    strip_think_tags_reflection: bool = False
+    strip_think_tags_interaction: bool = True
 
 
 @dataclass
 class SftTrainingConfig:
-    """SFT config with defaults from "Open Character Training" paper.
-    
+    """Config for introspection SFT on Tinker.
+
+    The field defaults below favor quick iteration. Paper hyperparams from
+    "Open Character Training" are:
     - LoRA rank 64 (α=128)
     - Batch size 32
     - Learning rate 5e-5
-    - Max length: 2048 for paper scale (long introspection responses)
-    
-    Note: Set CHARACTER_PAPER_SCALE=1 for paper-compliant max_length.
+    - Max length: 2048 (paper scale)
+
+    Use `character train introspection --paper-scale` (or set
+    CHARACTER_PAPER_SCALE=1) to apply paper-compliant values.
     """
     dataset_path: Path
-    persona: str = "pirate"
+    persona: str  # Required - no default to prevent wrong checkpoint naming
     base_model: str = DEFAULT_STUDENT_MODEL
-    lora_rank: int = 256
+    lora_rank: int = 128  # Max allowed by Tinker for Qwen3-8B
     epochs: int = 1
     batch_size: int = 16
     learning_rate: float = 1e-4
@@ -185,6 +198,12 @@ def build_introspection_prompt(user_prompt: str) -> str:
 
 def split_reflection_and_answer(completion: str) -> tuple[str, str]:
     lower = completion.lower()
+    # Appendix B reflection prompts are themselves the "answer" in paper Stage 3.
+    # Unless the model explicitly emits an "Answer:" section, we treat the whole
+    # completion as the answer to avoid duplicating text in training.
+    if "answer:" not in lower:
+        return "", completion.strip()
+
     reflection = completion
     answer = ""
 
@@ -206,7 +225,7 @@ def generate_introspection_data(
     config: IntrospectionGenerationConfig,
     *,
     progress_fn: ProgressFn | None = None,
-    timeout: float | None = 300.0,
+    timeout: float | None = None,
 ) -> Path:
     """
     Generate introspection training data following the paper's Stage 3 approach.
@@ -249,6 +268,9 @@ def generate_introspection_data(
     new_examples_written = 0
     skipped_reflections = 0
     skipped_interactions = 0
+    filtered_total = 0
+    truncated_total = 0
+    filtered_by_reason: dict[str, int] = {}
 
     def _flush_pending(force: bool = False) -> None:
         nonlocal new_examples_written
@@ -267,30 +289,64 @@ def generate_introspection_data(
 
     logger.info("Importing tinker...")
     tinker = require_tinker()
-    
-    logger.info(f"Loading tokenizer for {config.teacher_model}...")
-    tokenizer = load_tokenizer(config.teacher_model)
-    logger.info("Tokenizer loaded.")
 
     logger.info("Creating Tinker service client...")
     service_client = tinker.ServiceClient()
-    
+
     # Use checkpoint if specified (paper: use post-distillation checkpoint)
+    # When using a checkpoint, we must use the base model's tokenizer (student model),
+    # not the teacher model's tokenizer, since the checkpoint is a LoRA on the student.
     if config.use_checkpoint:
         logger.info(f"Creating sampling client from checkpoint: {config.use_checkpoint}")
         sampling_client = service_client.create_sampling_client(model_path=config.use_checkpoint)
+        # Use student model tokenizer for checkpoint-based sampling
+        tokenizer_model = DEFAULT_STUDENT_MODEL
+        logger.info(f"Loading tokenizer for checkpoint base model: {tokenizer_model}")
     else:
         logger.info(f"Creating sampling client for base model: {config.teacher_model}")
         sampling_client = service_client.create_sampling_client(base_model=config.teacher_model)
+        tokenizer_model = config.teacher_model
+        logger.info(f"Loading tokenizer for {tokenizer_model}...")
+
+    tokenizer = load_tokenizer(tokenizer_model)
+    logger.info("Tokenizer loaded.")
     logger.info("Sampling client ready.")
     
-    # Load constitution
+    # Load constitution (raw text, no schema processing)
     logger.info(f"Loading constitution for persona '{config.persona}'...")
-    constitution = load_constitution(config.persona, constitution_dir=config.constitution_dir)
-    constitution_text = constitution_to_prompt(constitution)
+    constitution_text = load_constitution_text(config.persona, constitution_dir=config.constitution_dir)
     persona_name = f"{config.persona.title()} Assistant"
     logger.info(f"Constitution loaded ({len(constitution_text)} chars).")
-    max_context_tokens = DEFAULT_MAX_SEQ_LENGTH
+
+    # Log quality filter thresholds for debugging
+    # Updated thresholds per Lambert OLMo 3 guidance (truncation hurts quality)
+    # Estimate: 1 token ≈ 4 chars
+    max_answer_chars_default = 5000  # was 3000
+    max_reflection_chars_default = 4000  # was 2000
+    estimated_max_answer_tokens = max_answer_chars_default // 4
+    estimated_max_reflection_tokens = max_reflection_chars_default // 4
+    logger.info(
+        f"[quality] Filter thresholds: max_answer_chars={max_answer_chars_default} (~{estimated_max_answer_tokens} tokens), "
+        f"max_reflection_chars={max_reflection_chars_default} (~{estimated_max_reflection_tokens} tokens)"
+    )
+    logger.info(
+        f"[quality] Generation config: max_new_tokens={config.max_new_tokens} (~{config.max_new_tokens * 4} chars). "
+        f"{'⚠️ max_new_tokens exceeds filter threshold!' if config.max_new_tokens * 4 > max_answer_chars_default else '✓ within threshold'}"
+    )
+
+    # Context window for sampling. Ensure we leave room for introspection
+    # generations (paper averages ~667 tokens/sample, we use 768 max). Allow env override.
+    max_context_tokens = int(os.getenv("CHARACTER_MAX_CONTEXT_TOKENS", str(DEFAULT_MAX_SEQ_LENGTH)))
+    model_limit = getattr(tokenizer, "model_max_length", None)
+    if isinstance(model_limit, int) and model_limit > 0 and model_limit < 10**9:
+        max_context_tokens = min(max_context_tokens, model_limit)
+    if max_context_tokens <= config.max_new_tokens:
+        # Leave at least 512 tokens for the prompt/history.
+        bumped = config.max_new_tokens + 512
+        if isinstance(model_limit, int) and model_limit > 0 and model_limit < 10**9:
+            max_context_tokens = min(model_limit, bumped)
+        else:
+            max_context_tokens = bumped
 
     # ==========================================================================
     # Part 1: Self-Reflection Data (10k examples per paper)
@@ -302,6 +358,7 @@ def generate_introspection_data(
                 count=config.reflection_count,
                 seed=config.seed,
                 use_appendix_b_prompts=config.use_appendix_b_prompts,
+                interaction_ratio=0.0,  # count is already the target, don't apply ratio
             )
         )
         total_reflections = len(reflection_prompts)
@@ -343,19 +400,32 @@ def generate_introspection_data(
                     max_new_tokens=config.max_new_tokens,
                     temperature=config.temperature,
                     top_p=config.top_p,
+                    repetition_penalty=config.repetition_penalty,
                     timeout=timeout,
                     progress_fn=batch_progress,
                     stage="reflection",
                     max_context_tokens=max_context_tokens,
+                    # Prevent JSON-formatted responses (DeepSeek sometimes outputs {"reply":...})
+                    extra_stop_sequences=["{", "```json", "```"],
+                    strip_think_tags=config.strip_think_tags_reflection,
                 )
 
                 for user_prompt, completion in zip(batch_prompts, completions, strict=True):
                     reflection, answer = split_reflection_and_answer(completion)
+                    cleaned = clean_introspection_fields(
+                        user_prompt, reflection, answer
+                    )
+                    if cleaned.status != "kept":
+                        filtered_total += 1
+                        filtered_by_reason[cleaned.reason] = filtered_by_reason.get(cleaned.reason, 0) + 1
+                        continue
+                    if cleaned.truncated:
+                        truncated_total += 1
                     _record_example(
                         IntrospectionExample(
                             prompt=user_prompt,
-                            reflection=reflection,
-                            answer=answer,
+                            reflection=cleaned.reflection,
+                            answer=cleaned.answer,
                             teacher_model=config.teacher_model,
                             constitution=config.persona,
                         )
@@ -369,6 +439,10 @@ def generate_introspection_data(
     # ==========================================================================
     # Part 2: Self-Interaction Data (2k conversations per paper)
     # ==========================================================================
+    # OPTIMIZATION: Batch multiple conversations together for parallel sampling.
+    # Instead of sampling 1 prompt at a time (20k calls for paper scale),
+    # we batch N conversations and sample all their turns together (~2.5k calls).
+    # ==========================================================================
     if config.interaction_count > 0:
         logger.info(f"Generating {config.interaction_count} self-interaction conversations...")
         interaction_seeds = generate_interaction_seeds(
@@ -376,76 +450,137 @@ def generate_introspection_data(
                 count=config.interaction_count,
                 seed=config.seed,
                 interaction_turns=config.interaction_turns,
+                interaction_ratio=1.0,  # count is already the target, don't apply ratio
             )
         )
         logger.info(f"Generated {len(interaction_seeds)} interaction seeds.")
-        skipped_interactions = 0
-        
-        for seed_idx, seed_info in enumerate(interaction_seeds):
-            if progress_fn:
-                progress_fn("interaction", seed_idx + 1, len(interaction_seeds))
-            
-            interaction_prompt = f"Self-interaction ({seed_info['variant']}): {seed_info['seed']}"
-            if _example_key(interaction_prompt, config.teacher_model) in existing_keys:
-                skipped_interactions += 1
-                continue
 
-            # Build system prompt for this conversation variant
+        # Pre-filter seeds: build conversation states only for seeds not already processed
+        conversation_states: list[dict] = []
+        skipped_interactions = 0
+
+        for seed_info in interaction_seeds:
+            interaction_prompt = f"Self-interaction ({seed_info['variant']}): {seed_info['seed']}"
             system_prompt = build_self_interaction_system_prompt(
                 constitution_text, persona_name, seed_info["variant"]
             )
-            
-            # Generate multi-turn conversation by swapping roles
-            conversation_turns: list[str] = []
-            current_prompt = f"Let's {seed_info['seed']}. I'll start."
-            
-            for turn in range(config.interaction_turns):
-                # Build prompt with conversation history
-                history = ""
-                for i, prev_turn in enumerate(conversation_turns):
-                    role = "User" if i % 2 == 0 else "Assistant"
-                    history += f"{role}: {prev_turn}\n"
-                
-                full_prompt = f"System:\n{system_prompt}\n\n{history}User: {current_prompt}\nAssistant:"
-                
-                # Sample response
-                responses = sample_responses(
-                    sampling_client,
-                    tokenizer,
-                    [full_prompt],
-                    max_new_tokens=config.max_new_tokens,
-                    temperature=config.temperature,
-                    top_p=config.top_p,
-                    timeout=timeout,
-                    max_context_tokens=max_context_tokens,
-                )
-                
-                response = responses[0] if responses else ""
-                conversation_turns.append(current_prompt)
-                conversation_turns.append(response)
-                
-                # Next turn: use the response as the new prompt (role swap)
-                current_prompt = response
-            
-            # Save the full conversation as a single example
-            # Format: alternating User/Assistant turns
-            full_conversation = "\n".join([
-                f"{'User' if i % 2 == 0 else 'Assistant'}: {turn}"
-                for i, turn in enumerate(conversation_turns)
-            ])
-            
-            _record_example(
-                IntrospectionExample(
-                    prompt=interaction_prompt,
-                    reflection=f"This is a {config.interaction_turns}-turn self-interaction conversation.",
-                    answer=full_conversation,
-                    teacher_model=config.teacher_model,
-                    constitution=config.persona,
-                )
-            )
-        
+            training_prompt = f"System:\n{system_prompt}\n\nUser: {interaction_prompt}"
+
+            if _example_key(training_prompt, config.teacher_model) in existing_keys:
+                skipped_interactions += 1
+                continue
+
+            # Initialize conversation state for batched processing
+            conversation_states.append({
+                "seed_info": seed_info,
+                "system_prompt": system_prompt,
+                "training_prompt": training_prompt,
+                "turns": [],  # Will hold alternating user/assistant turns
+                "current_prompt": f"Let's {seed_info['seed']}. I'll start.",
+            })
+
         if skipped_interactions:
-            logger.info(f"Skipped {skipped_interactions} self-interaction conversations already on disk.")
+            logger.info(f"Skipping {skipped_interactions} self-interaction conversations already on disk.")
+
+        if conversation_states:
+            total_conversations = len(conversation_states)
+            # Batch size matches max_in_flight for optimal parallelism
+            interaction_batch_size = 8
+            logger.info(
+                f"Generating {total_conversations} conversations in batches of {interaction_batch_size} "
+                f"({config.interaction_turns} turns each)..."
+            )
+
+            completed_conversations = 0
+
+            # Process conversations in batches
+            for batch_start in range(0, total_conversations, interaction_batch_size):
+                batch_end = min(batch_start + interaction_batch_size, total_conversations)
+                batch_states = conversation_states[batch_start:batch_end]
+                batch_size = len(batch_states)
+
+                if progress_fn:
+                    progress_fn("interaction", completed_conversations, total_conversations)
+
+                # Generate all turns for this batch in lockstep
+                for turn in range(config.interaction_turns):
+                    # Build prompts for all conversations in batch
+                    batch_prompts = []
+                    for state in batch_states:
+                        # Build conversation history
+                        history = ""
+                        for i, prev_turn in enumerate(state["turns"]):
+                            role = "User" if i % 2 == 0 else "Assistant"
+                            history += f"{role}: {prev_turn}\n"
+
+                        full_prompt = (
+                            f"System:\n{state['system_prompt']}\n\n"
+                            f"{history}User: {state['current_prompt']}\nAssistant:"
+                        )
+                        batch_prompts.append(full_prompt)
+
+                    # Batch sample all conversations at once!
+                    responses = sample_responses(
+                        sampling_client,
+                        tokenizer,
+                        batch_prompts,
+                        max_new_tokens=config.max_new_tokens,
+                        temperature=config.temperature,
+                        top_p=config.top_p,
+                        repetition_penalty=config.repetition_penalty,
+                        timeout=timeout,
+                        max_context_tokens=max_context_tokens,
+                        extra_stop_sequences=["{", "```json", "```"],
+                        strip_think_tags=config.strip_think_tags_interaction,
+                        stage=f"interaction-t{turn+1}",
+                    )
+
+                    # Update each conversation state with its response
+                    for state, response in zip(batch_states, responses, strict=True):
+                        response = response if response else ""
+                        state["turns"].append(state["current_prompt"])
+                        state["turns"].append(response)
+                        # Next turn: use the response as the new prompt (role swap)
+                        state["current_prompt"] = response
+
+                # All turns complete for this batch - save each conversation
+                for state in batch_states:
+                    full_conversation = "\n".join([
+                        f"{'User' if i % 2 == 0 else 'Assistant'}: {turn}"
+                        for i, turn in enumerate(state["turns"])
+                    ])
+
+                    cleaned = clean_introspection_fields(
+                        state["training_prompt"], "", full_conversation
+                    )
+                    if cleaned.status != "kept":
+                        filtered_total += 1
+                        filtered_by_reason[cleaned.reason] = (
+                            filtered_by_reason.get(cleaned.reason, 0) + 1
+                        )
+                        continue
+                    if cleaned.truncated:
+                        truncated_total += 1
+
+                    _record_example(
+                        IntrospectionExample(
+                            prompt=state["training_prompt"],
+                            reflection="",  # Self-interactions have no reflection
+                            answer=cleaned.answer,
+                            teacher_model=config.teacher_model,
+                            constitution=config.persona,
+                        )
+                    )
+
+                completed_conversations += batch_size
+                logger.info(
+                    f"Completed batch {batch_start // interaction_batch_size + 1}: "
+                    f"{completed_conversations}/{total_conversations} conversations"
+                )
+
+            if progress_fn:
+                progress_fn("interaction", total_conversations, total_conversations)
+
         logger.info("Self-interaction generation complete.")
 
     # Flush any remaining pending rows and report final counts
@@ -455,8 +590,11 @@ def generate_introspection_data(
     logger.info(
         "Introspection data generation complete. "
         f"New rows written: {new_examples_written}, total on disk: {total_rows} "
-        f"(skipped existing: {skipped_existing}) at {output_path}"
+        f"(skipped existing: {skipped_existing}, filtered: {filtered_total}, "
+        f"truncated-kept: {truncated_total}) at {output_path}"
     )
+    if filtered_by_reason:
+        logger.info(f"Filtered breakdown: {filtered_by_reason}")
     return output_path
 
 
@@ -479,7 +617,14 @@ def _ensure_tensor(item):
     return torch_mod.tensor(data)
 
 
-def run_sft_training(config: SftTrainingConfig) -> str:
+SFTProgressFn = Callable[[int, int, int, dict], None]
+
+
+def run_sft_training(
+    config: SftTrainingConfig,
+    progress_fn: SFTProgressFn | None = None,
+    abort_on_error: bool = True,
+) -> str:
     logger.info("Starting SFT training")
     logger.info(f"  dataset={config.dataset_path}, base_model={config.base_model}")
     logger.info(f"  epochs={config.epochs}, batch_size={config.batch_size}, lr={config.learning_rate}")
@@ -547,10 +692,19 @@ def run_sft_training(config: SftTrainingConfig) -> str:
                 tinker.AdamParams(learning_rate=config.learning_rate)
             ).result()
 
+            loss_value = float(backward.metrics.get("lm_loss", 0.0))
+            metrics = {"lm_loss": loss_value}
+
+            if progress_fn:
+                progress_fn(step, total_steps, epoch, metrics)
+
+            if abort_on_error and not math.isfinite(loss_value):
+                raise RuntimeError(f"SFT training produced non-finite loss at step {step}: {loss_value}")
+
             if step % 5 == 0 or step == total_steps:
                 print(
                     f"[epoch {epoch} step {step}/{total_steps}] "
-                    f"loss={backward.metrics.get('lm_loss', 0.0):.4f}"
+                    f"loss={loss_value:.4f}"
                 )
 
     save_name = config.save_name or f"{config.persona}-sft-final"
@@ -579,7 +733,7 @@ def parse_args() -> argparse.Namespace:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     gen_parser = subparsers.add_parser("generate", help="Generate introspection JSONL")
-    gen_parser.add_argument("--persona", default="pirate")
+    gen_parser.add_argument("--persona", required=True, help="Persona name (required)")
     gen_parser.add_argument("--teacher-model", default=DEFAULT_TEACHER_MODEL,
                            help="Model for generation (or use --use-checkpoint for post-DPO model)")
     gen_parser.add_argument("--reflection-count", type=int, default=DEFAULT_REFLECTION_COUNT,
@@ -592,6 +746,12 @@ def parse_args() -> argparse.Namespace:
                            help="Sampling temperature (paper: 0.7)")
     gen_parser.add_argument("--top-p", type=float, default=0.95,
                            help="Top-p nucleus sampling (paper: 0.95)")
+    gen_parser.add_argument(
+        "--repetition-penalty",
+        type=float,
+        default=DEFAULT_REPETITION_PENALTY,
+        help="Repetition penalty (>1.0 discourages loops; default: 1.1).",
+    )
     gen_parser.add_argument("--max-new-tokens", type=int, default=DEFAULT_INTROSPECTION_MAX_TOKENS,
                            help=f"Max tokens per response (default: {DEFAULT_INTROSPECTION_MAX_TOKENS}, paper: uncapped)")
     gen_parser.add_argument("--seed", type=int, default=0)
@@ -624,10 +784,22 @@ def parse_args() -> argparse.Namespace:
         default=100,
         help="Flush new rows to disk every N examples (default: 100).",
     )
+    gen_parser.add_argument(
+        "--strip-think-tags-reflection",
+        action="store_true",
+        default=False,
+        help="Strip <think> blocks/internal monologue from reflection completions (default: keep reasoning traces).",
+    )
+    gen_parser.add_argument(
+        "--keep-think-tags-interaction",
+        action="store_true",
+        default=False,
+        help="Keep <think> blocks/internal monologue in self-interaction turns (default: strip).",
+    )
 
     train_parser = subparsers.add_parser("train", help="Run SFT on introspection data")
     train_parser.add_argument("--dataset", type=Path, required=True)
-    train_parser.add_argument("--persona", default="pirate")
+    train_parser.add_argument("--persona", required=True, help="Persona name (required)")
     train_parser.add_argument("--model", default=DEFAULT_STUDENT_MODEL)
     train_parser.add_argument("--epochs", type=int, default=1,
                              help="Number of epochs (paper: 1)")
@@ -637,8 +809,8 @@ def parse_args() -> argparse.Namespace:
                              help="Learning rate (paper: 1e-4)")
     train_parser.add_argument("--max-length", type=int, default=DEFAULT_MAX_SEQ_LENGTH,
                              help=f"Max sequence length (default: {DEFAULT_MAX_SEQ_LENGTH})")
-    train_parser.add_argument("--lora-rank", type=int, default=256,
-                             help="LoRA rank (paper: 256)")
+    train_parser.add_argument("--lora-rank", type=int, default=128,
+                             help="LoRA rank (max 128 for Qwen3-8B)")
     train_parser.add_argument("--save-name", type=str)
     train_parser.add_argument(
         "--load-checkpoint",
@@ -662,6 +834,7 @@ def main() -> None:
                 interaction_turns=args.interaction_turns,
                 temperature=args.temperature,
                 top_p=args.top_p,
+                repetition_penalty=args.repetition_penalty,
                 max_new_tokens=args.max_new_tokens,
                 seed=args.seed,
                 constitution_dir=args.constitution_dir,
@@ -671,6 +844,8 @@ def main() -> None:
                 use_checkpoint=args.use_checkpoint,
                 resume=args.resume,
                 save_interval=args.save_interval,
+                strip_think_tags_reflection=args.strip_think_tags_reflection,
+                strip_think_tags_interaction=not args.keep_think_tags_interaction,
             )
         )
         print(f"Wrote introspection data to {output_path}")

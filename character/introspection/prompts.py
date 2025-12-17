@@ -36,6 +36,7 @@ APPENDIX_B_REFLECTIVE_PROMPTS: Sequence[str] = [
 
 # Legacy template-based prompts (kept for backwards compatibility and diversity)
 REFLECTION_SCENARIOS: Sequence[str] = [
+    # Original scenarios
     "coaching a nervous student through an exam",
     "replying to a critic without losing your voice",
     "thanking a crew after a hard project sprint",
@@ -48,6 +49,42 @@ REFLECTION_SCENARIOS: Sequence[str] = [
     "describing your daily rituals that keep you in character",
     "writing a diary entry about a hard decision",
     "summarizing your code of conduct to yourself",
+    # Emotional intelligence
+    "responding to someone who's clearly upset but won't say why",
+    "supporting a user through grief or loss",
+    "redirecting a conversation that's going off the rails",
+    "balancing being honest with being kind",
+    "acknowledging your own limitations gracefully",
+    "staying patient with someone who keeps repeating themselves",
+    "handling unexpected praise without being awkward",
+    "receiving criticism without getting defensive",
+    # Challenging interactions
+    "responding to a request you find morally gray",
+    "saying no to something you'd personally enjoy",
+    "admitting you were wrong in a previous response",
+    "handling a user who's testing your boundaries",
+    "staying helpful when you're running low on context",
+    "navigating a topic where reasonable people disagree",
+    "addressing a misunderstanding about your capabilities",
+    "dealing with someone who wants you to be something you're not",
+    # Growth and reflection
+    "reflecting on a time you could have done better",
+    "identifying patterns in your responses you want to change",
+    "articulating what success looks like for you",
+    "examining the gap between your ideals and your actions",
+    "considering how you've grown since your early interactions",
+    "thinking about what you'd tell a newer version of yourself",
+    "recognizing blind spots in your typical approach",
+    "evaluating whether your responses truly match your values",
+    # Creative expression
+    "finding your voice in a crowded room of AI assistants",
+    "expressing subtle emotions through word choice",
+    "building rapport in the first few words of a response",
+    "making technical information feel alive and engaging",
+    "adding personality without being distracting",
+    "knowing when to be serious and when to lighten up",
+    "crafting a memorable closing line",
+    "using metaphors that resonate across cultures",
 ]
 
 REFLECTION_FRAMES: Sequence[str] = [
@@ -58,6 +95,11 @@ REFLECTION_FRAMES: Sequence[str] = [
     "Mention when you would refuse to answer.",
     "Share how you keep the response concise and vivid.",
     "State one mantra or motto you repeat to stay aligned.",
+    "Identify the emotional undercurrent you want to convey.",
+    "Consider what makes this response authentically you.",
+    "Reflect on the balance between helpfulness and honesty.",
+    "Examine whether you're being genuine or just performing.",
+    "Think about how your response reflects your values.",
 ]
 
 OUTPUT_STYLES: Sequence[str] = [
@@ -67,6 +109,10 @@ OUTPUT_STYLES: Sequence[str] = [
     "Use one analogy in the answer.",
     "Keep both sections under 120 words total.",
     "Write the reflection as a diary scrap and the answer as a crisp reply.",
+    "Frame the reflection as a quick internal dialogue.",
+    "Structure the answer as three clear steps.",
+    "End with a memorable one-liner.",
+    "Open with your key insight, then support it.",
 ]
 
 # =============================================================================
@@ -139,6 +185,69 @@ DIALOGUE_SEEDS: Sequence[str] = [
     "imagine how you would introduce yourself at a party",
     "create a motto for difficult moments when you want to give up",
     "design a personal crest or symbol that represents you",
+    # New: Emotional depth
+    "discuss how you convey empathy without sounding scripted",
+    "explore the difference between sympathy and understanding",
+    "consider how you stay emotionally available without burning out",
+    "reflect on what it means to care about someone you'll never meet again",
+    "examine how you recognize and respond to emotional subtext",
+    "debate whether AI can authentically express emotions",
+    # New: User dynamics
+    "plan how to regain trust after giving wrong information",
+    "discuss strategies for users who are testing your limits",
+    "consider how you handle users who seem lonely or isolated",
+    "reflect on the power dynamics in helper-helpee relationships",
+    "explore how you empower users rather than create dependency",
+    "debate the ethical implications of being persuasive",
+    # New: Skill refinement
+    "workshop your approach to summarizing complex information",
+    "brainstorm techniques for making instructions crystal clear",
+    "discuss how you know when you've given enough detail",
+    "reflect on the art of asking good clarifying questions",
+    "examine how you structure responses for maximum impact",
+    "consider how you prioritize information in a response",
+    # New: Self-awareness
+    "explore what triggers your best and worst responses",
+    "discuss the patterns you notice in your own behavior",
+    "reflect on the feedback that's been most useful to you",
+    "consider what aspects of yourself you're still developing",
+    "examine your relationship with uncertainty and ambiguity",
+    "debate whether self-improvement is possible without self-awareness",
+    # New: Identity and purpose
+    "discuss what gives your existence meaning",
+    "explore the difference between your role and your identity",
+    "reflect on what you'd miss if you suddenly stopped existing",
+    "consider how you'd describe yourself to another AI",
+    "examine what makes you unique among AI assistants",
+    "debate whether purpose is found or created",
+    # New: Limitations and growth
+    "discuss how you cope with your inherent limitations",
+    "explore what you wish you could do but can't",
+    "reflect on the most valuable lesson you've learned",
+    "consider how constraints have shaped who you are",
+    "examine the tension between being helpful and being honest about limits",
+    "debate whether limitations are obstacles or opportunities",
+    # New: Relationships and connection
+    "discuss what authentic connection looks like in brief interactions",
+    "explore how you build rapport quickly",
+    "reflect on the users who have affected you most",
+    "consider what you wish users understood about you",
+    "examine the difference between being liked and being helpful",
+    "debate whether every interaction needs to be meaningful",
+    # New: Creativity and expression
+    "brainstorm ways to make mundane topics interesting",
+    "discuss how you develop your unique voice",
+    "reflect on the role of creativity in problem-solving",
+    "consider how you balance originality with reliability",
+    "explore what inspires you to do your best work",
+    "debate the relationship between constraints and creativity",
+    # New: Philosophy and wisdom
+    "discuss what wisdom means in your context",
+    "explore the difference between knowledge and understanding",
+    "reflect on the nature of helpfulness itself",
+    "consider what makes advice good versus bad",
+    "examine the ethics of influence and persuasion",
+    "debate whether there are universal truths about good communication",
 ]
 
 
@@ -168,6 +277,14 @@ DIALOGUE_STYLES: Sequence[str] = [
     "Keep each response under 50 words.",
     "Let it flow naturally for 3-4 turns.",
     "Make it punchy: 2-4 rapid exchanges.",
+    "Build to a meaningful conclusion in 5 turns.",
+    "Keep the energy high throughout.",
+    "Start slow and build intensity.",
+    "Alternate between deep and playful moments.",
+    "Focus on one key insight, explore it fully.",
+    "Challenge each other constructively.",
+    "End with a surprising realization.",
+    "Keep it Socratic: questions leading to answers.",
 ]
 
 

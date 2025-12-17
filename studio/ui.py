@@ -845,6 +845,23 @@ def render_training_launcher(
                 step=10,
                 key="resume_examples",
             )
+
+        # Reasoning trace controls for introspection generation
+        r1, r2 = st.columns(2)
+        with r1:
+            resume_strip_think_reflection = st.checkbox(
+                "Strip reasoning traces in reflections",
+                value=False,
+                help="If enabled, removes <think> blocks/internal monologue from reflection samples. Default keeps teacher reasoning as training signal.",
+                key="resume_strip_think_reflection",
+            )
+        with r2:
+            resume_keep_think_interaction = st.checkbox(
+                "Keep reasoning traces in self-interactions",
+                value=False,
+                help="If enabled, keeps <think> blocks in self-interaction turns. Default strips for cleaner multi-turn transcripts.",
+                key="resume_keep_think_interaction",
+            )
         
         resume_launch = st.button("🚀 Run Introspection + SFT Only", type="primary", use_container_width=True)
         
@@ -873,6 +890,8 @@ def render_training_launcher(
                         temperature=DEFAULT_TEMPERATURE,
                         max_new_tokens=DEFAULT_MAX_NEW_TOKENS,
                         seed=0,
+                        strip_think_tags_reflection=resume_strip_think_reflection,
+                        strip_think_tags_interaction=not resume_keep_think_interaction,
                     )
                     try:
                         introspection_path = generate_introspection_data(
@@ -1213,6 +1232,26 @@ This eliminates the "constitution tax" — no need to include personality instru
             disabled=not generate_introspection,
         )
 
+        # Advanced reasoning trace controls for Stage 2 data generation
+        with st.expander("Advanced introspection options", expanded=False):
+            a1, a2 = st.columns(2)
+            with a1:
+                strip_think_tags_reflection = st.checkbox(
+                    "Strip reasoning traces in reflections",
+                    value=False,
+                    help="Remove <think> blocks/internal monologue from reflection samples. Default keeps teacher reasoning as training signal.",
+                    key="train_strip_think_reflection",
+                    disabled=not generate_introspection,
+                )
+            with a2:
+                keep_think_tags_interaction = st.checkbox(
+                    "Keep reasoning traces in self-interactions",
+                    value=False,
+                    help="Keep <think> blocks/internal monologue in self-interaction turns. Default strips for cleaner transcripts.",
+                    key="train_keep_think_interaction",
+                    disabled=not generate_introspection,
+                )
+
         dataset_path = None
         checkpoint_path = None
         introspection_path = None
@@ -1408,6 +1447,8 @@ This eliminates the "constitution tax" — no need to include personality instru
                     temperature=float(temperature),
                     max_new_tokens=int(max_new_tokens),
                     seed=0,
+                    strip_think_tags_reflection=strip_think_tags_reflection,
+                    strip_think_tags_interaction=not keep_think_tags_interaction,
                 )
                 try:
                     introspection_path = generate_introspection_data(

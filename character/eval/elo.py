@@ -20,6 +20,7 @@ class Match:
     base_response: str
     tuned_response: str
     winner: str  # "base" or "tuned"
+    sample_id: int = 0
 
 
 def load_matches(path: Path) -> List[Match]:
@@ -68,33 +69,102 @@ def sample_matchups(
     tuned_model: str,
     max_new_tokens: int,
     temperature: float,
+    samples_per_prompt: int = 1,
 ) -> List[Match]:
     """Sample completions for a prompt list using Tinker clients."""
     tinker = require_tinker()
 
     base_tokenizer = load_tokenizer(base_model)
-    tuned_tokenizer = load_tokenizer(tuned_model)
+    tuned_tokenizer = load_tokenizer(tuned_model, base_model=base_model)
     service_client = tinker.ServiceClient()
     base_client = service_client.create_sampling_client(base_model=base_model)
-    tuned_client = service_client.create_sampling_client(base_model=tuned_model)
+
+    # Use model_path for checkpoints, base_model for base models
+    is_checkpoint = tuned_model.startswith("tinker://")
+    if is_checkpoint:
+        tuned_client = service_client.create_sampling_client(model_path=tuned_model)
+    else:
+        tuned_client = service_client.create_sampling_client(base_model=tuned_model)
+
+    # Expand prompts to get multiple independent samples per prompt.
+    expanded: list[tuple[str, int]] = []
+    for prompt in prompts:
+        for sample_id in range(max(samples_per_prompt, 1)):
+            expanded.append((prompt, sample_id))
+    expanded_prompts = [p for p, _ in expanded]
 
     base_outputs = sample_responses(
-        base_client, base_tokenizer, prompts, max_new_tokens=max_new_tokens, temperature=temperature
+        base_client,
+        base_tokenizer,
+        expanded_prompts,
+        max_new_tokens=max_new_tokens,
+        temperature=temperature,
     )
     tuned_outputs = sample_responses(
         tuned_client,
         tuned_tokenizer,
-        prompts,
+        expanded_prompts,
         max_new_tokens=max_new_tokens,
         temperature=temperature,
     )
 
-    pairings = []
-    for prompt, base_resp, tuned_resp in zip(prompts, base_outputs, tuned_outputs, strict=True):
+    pairings: list[Match] = []
+    for (prompt, sample_id), base_resp, tuned_resp in zip(
+        expanded, base_outputs, tuned_outputs, strict=True
+    ):
         pairings.append(
-            Match(prompt=prompt, base_response=base_resp, tuned_response=tuned_resp, winner="")
+            Match(
+                prompt=prompt,
+                base_response=base_resp,
+                tuned_response=tuned_resp,
+                winner="",
+                sample_id=sample_id,
+            )
         )
     return pairings
+
+
+def compute_elo_bootstrap(
+    matches: Sequence[Match],
+    *,
+    k_factor: float = 32.0,
+    initial_rating: float = 1000.0,
+    num_bootstrap: int = 200,
+    seed: int = 0,
+) -> dict[str, float]:
+    """Estimate Elo variance via bootstrap resampling."""
+    import random
+    import statistics
+
+    rng = random.Random(seed)
+    tuned_ratings: list[float] = []
+    base_ratings: list[float] = []
+
+    if not matches:
+        return {
+            "tuned_mean": initial_rating,
+            "tuned_std": 0.0,
+            "base_mean": initial_rating,
+            "base_std": 0.0,
+            "n": 0,
+        }
+
+    for _ in range(num_bootstrap):
+        sample = [rng.choice(matches) for _ in range(len(matches))]
+        rng.shuffle(sample)
+        ratings = compute_elo(sample, k_factor=k_factor, initial_rating=initial_rating)
+        tuned_ratings.append(ratings["tuned"])
+        base_ratings.append(ratings["base"])
+
+    return {
+        "tuned_mean": statistics.fmean(tuned_ratings),
+        "tuned_std": statistics.pstdev(tuned_ratings),
+        "base_mean": statistics.fmean(base_ratings),
+        "base_std": statistics.pstdev(base_ratings),
+        "n": len(matches),
+        "num_bootstrap": num_bootstrap,
+        "seed": seed,
+    }
 
 
 def parse_args() -> argparse.Namespace:
@@ -105,6 +175,18 @@ def parse_args() -> argparse.Namespace:
     score_parser.add_argument("--matches", type=Path, required=True, help="JSONL with match rows")
     score_parser.add_argument("--k-factor", type=float, default=32.0)
     score_parser.add_argument("--initial", type=float, default=1000.0)
+    score_parser.add_argument(
+        "--bootstrap",
+        type=int,
+        default=0,
+        help="If >0, run bootstrap resampling to estimate mean/std Elo.",
+    )
+    score_parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="RNG seed for bootstrap.",
+    )
 
     sample_parser = subparsers.add_parser(
         "sample", help="Sample completions for base vs tuned models on a prompt file"
@@ -116,6 +198,12 @@ def parse_args() -> argparse.Namespace:
     sample_parser.add_argument("--tuned-model", required=True)
     sample_parser.add_argument("--temperature", type=float, default=0.7)
     sample_parser.add_argument("--max-new-tokens", type=int, default=256)
+    sample_parser.add_argument(
+        "--samples-per-prompt",
+        type=int,
+        default=1,
+        help="Number of independent samples per prompt (default: 1).",
+    )
     sample_parser.add_argument("--output", type=Path, required=True)
 
     return parser.parse_args()
@@ -136,7 +224,17 @@ def main() -> None:
     if args.command == "score":
         matches = load_matches(args.matches)
         ratings = compute_elo(matches, k_factor=args.k_factor, initial_rating=args.initial)
-        print(json.dumps(ratings, indent=2))
+        if args.bootstrap and args.bootstrap > 0:
+            stats = compute_elo_bootstrap(
+                matches,
+                k_factor=args.k_factor,
+                initial_rating=args.initial,
+                num_bootstrap=args.bootstrap,
+                seed=args.seed,
+            )
+            print(json.dumps({"full": ratings, "bootstrap": stats}, indent=2))
+        else:
+            print(json.dumps(ratings, indent=2))
     elif args.command == "sample":
         if args.prompts:
             prompts = _load_prompt_file(args.prompts)
@@ -150,6 +248,7 @@ def main() -> None:
             tuned_model=args.tuned_model,
             max_new_tokens=args.max_new_tokens,
             temperature=args.temperature,
+            samples_per_prompt=args.samples_per_prompt,
         )
         save_matches(pairings, args.output)
         print(f"Wrote {len(pairings)} match rows to {args.output}")

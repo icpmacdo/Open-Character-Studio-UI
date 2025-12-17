@@ -77,29 +77,33 @@ I refuse harmful requests."""
         with pytest.raises(ConstitutionLoadError, match="Invalid YAML"):
             load_constitution("bad", constitution_dir=tmp_path)
 
-    def test_yaml_preferred_over_txt(self, tmp_path):
-        """When both formats exist, YAML should be preferred."""
+    def test_txt_preferred_over_yaml(self, tmp_path):
+        """When both formats exist, TXT (hand-written) should be preferred (paper-compliant)."""
         yaml_content = """
 meta:
   name: dual-format
   version: 2
   description: YAML version of dual format constitution
 persona:
-  identity: "I am the YAML version of this constitution, which should be preferred over TXT."
+  identity: "I am the YAML version of this constitution."
 directives:
   personality: ["YAML personality", "YAML trait"]
   behavior: ["YAML behavior"]
 safety:
   refusals: ["YAML refusal"]
 """
-        txt_content = "I am the TXT version which should NOT be loaded."
+        txt_content = """I am the TXT version which should be loaded.
+I maintain this identity consistently for paper-compliance.
+I respond helpfully to all queries.
+I refuse harmful requests."""
 
         (tmp_path / "dual-format.yaml").write_text(yaml_content)
         (tmp_path / "dual-format.txt").write_text(txt_content)
 
         constitution = load_constitution("dual-format", constitution_dir=tmp_path)
-        assert constitution.meta.version == 2
-        assert "YAML" in constitution.persona.identity
+        # TXT is auto-converted so version is 1, and description mentions "legacy text"
+        assert constitution.meta.version == 1
+        assert "legacy text" in constitution.meta.description
 
 
 class TestConstitutionToPrompt:
@@ -238,6 +242,128 @@ safety:
         is_valid, error = validate_constitution_file(path)
         assert not is_valid
         assert "Unsupported file extension" in error
+
+
+class TestDirectoryPriority:
+    """Tests for directory search order (hand-written/ before structured/)."""
+
+    def test_hand_written_dir_preferred_over_structured_dir(self, tmp_path):
+        """When persona exists in both directories, hand-written/ should win."""
+        # Create hand-written and structured subdirectories
+        hand_written = tmp_path / "hand-written"
+        structured = tmp_path / "structured"
+        hand_written.mkdir()
+        structured.mkdir()
+
+        # Create txt in hand-written
+        txt_content = """I am the hand-written version and should be loaded.
+I maintain this identity consistently.
+I respond helpfully to all queries.
+I refuse harmful requests."""
+        (hand_written / "test-priority.txt").write_text(txt_content)
+
+        # Create yaml in structured
+        yaml_content = """
+meta:
+  name: test-priority
+  version: 2
+  description: YAML version that should NOT be loaded
+persona:
+  identity: "I am the structured YAML version that should NOT be loaded."
+directives:
+  personality: ["YAML only"]
+  behavior: ["YAML behavior"]
+safety:
+  refusals: ["YAML refusal"]
+"""
+        (structured / "test-priority.yaml").write_text(yaml_content)
+
+        # Patch CONSTITUTION_PATH to use tmp_path
+        import character.constitution.loader as loader_module
+        original_path = loader_module.CONSTITUTION_PATH
+
+        try:
+            loader_module.CONSTITUTION_PATH = tmp_path
+            constitution = load_constitution("test-priority")
+
+            # Should load from hand-written (version 1, "legacy text" in description)
+            assert constitution.meta.version == 1
+            assert "legacy text" in constitution.meta.description
+        finally:
+            loader_module.CONSTITUTION_PATH = original_path
+
+    def test_falls_back_to_structured_when_no_hand_written(self, tmp_path):
+        """When persona only exists in structured/, it should be loaded."""
+        # Create only structured subdirectory with yaml
+        hand_written = tmp_path / "hand-written"
+        structured = tmp_path / "structured"
+        hand_written.mkdir()
+        structured.mkdir()
+
+        yaml_content = """
+meta:
+  name: structured-only
+  version: 3
+  description: YAML-only persona that should be loaded as fallback
+persona:
+  identity: "I am a structured-only persona with no hand-written version available."
+directives:
+  personality: ["Structured trait 1", "Structured trait 2"]
+  behavior: ["Structured behavior"]
+safety:
+  refusals: ["Structured refusal"]
+"""
+        (structured / "structured-only.yaml").write_text(yaml_content)
+
+        # Patch CONSTITUTION_PATH to use tmp_path
+        import character.constitution.loader as loader_module
+        original_path = loader_module.CONSTITUTION_PATH
+
+        try:
+            loader_module.CONSTITUTION_PATH = tmp_path
+            constitution = load_constitution("structured-only")
+
+            # Should load from structured (version 3)
+            assert constitution.meta.version == 3
+            assert constitution.meta.name == "structured-only"
+        finally:
+            loader_module.CONSTITUTION_PATH = original_path
+
+    def test_list_constitutions_finds_both_directories(self, tmp_path):
+        """list_constitutions should find personas from both directories."""
+        # Create both subdirectories with different personas
+        hand_written = tmp_path / "hand-written"
+        structured = tmp_path / "structured"
+        hand_written.mkdir()
+        structured.mkdir()
+
+        (hand_written / "hand-only.txt").write_text("I am hand-written only.")
+        (structured / "struct-only.yaml").write_text("meta:\n  name: struct-only")
+
+        # Patch CONSTITUTION_PATH
+        import character.constitution.loader as loader_module
+        original_path = loader_module.CONSTITUTION_PATH
+
+        try:
+            loader_module.CONSTITUTION_PATH = tmp_path
+            names = list_constitutions()
+
+            assert "hand-only" in names
+            assert "struct-only" in names
+        finally:
+            loader_module.CONSTITUTION_PATH = original_path
+
+    def test_real_overlapping_personas_use_hand_written(self):
+        """Verify actual overlapping personas in repo load from hand-written."""
+        # These personas exist in both hand-written/ and structured/
+        overlapping = ["pirate", "sarcastic", "humorous"]
+
+        for persona in overlapping:
+            constitution = load_constitution(persona)
+            # Hand-written files are auto-converted with "legacy text" description
+            assert "legacy text" in constitution.meta.description, (
+                f"{persona} should load from hand-written but got: {constitution.meta.description}"
+            )
 
 
 class TestBackwardsCompatibility:

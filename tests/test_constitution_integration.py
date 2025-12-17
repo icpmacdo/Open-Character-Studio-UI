@@ -138,14 +138,76 @@ class TestStudioLogicIntegration:
         assert "sarcastic" in personas
         assert len(personas) >= 12
 
-    def test_load_constitution_raw_returns_yaml(self):
-        """load_constitution_raw should return YAML for structured constitutions."""
+    def test_load_constitution_raw_prefers_txt(self):
+        """load_constitution_raw should prefer hand-written .txt format (paper-compliant)."""
         from studio.logic import load_constitution_raw
 
         raw = load_constitution_raw("pirate")
 
-        # Should be YAML format (structured/ version exists)
+        # Should be TXT format (hand-written/ is preferred over structured/)
+        # TXT files are plain text with one assertion per line
+        assert not raw.startswith("meta:")
+        assert "pirate" in raw.lower() or "nautical" in raw.lower()
+
+    def test_load_constitution_raw_falls_back_to_yaml(self, tmp_path):
+        """load_constitution_raw should fall back to YAML when no txt exists."""
+        import studio.logic as logic_module
+        from character.constants import CONSTITUTION_PATH
+
+        # Create a test setup with only YAML in structured/
+        hand_written = tmp_path / "hand-written"
+        structured = tmp_path / "structured"
+        hand_written.mkdir()
+        structured.mkdir()
+
+        yaml_content = """meta:
+  name: yaml-only-test
+  version: 1
+  description: YAML only constitution for fallback test
+persona:
+  identity: I am a YAML-only persona used to test fallback behavior.
+directives:
+  personality:
+    - YAML trait
+  behavior:
+    - YAML behavior
+safety:
+  refusals:
+    - YAML refusal
+"""
+        (structured / "yaml-only-test.yaml").write_text(yaml_content)
+
+        # Patch paths
+        original_constitution_path = logic_module.CONSTITUTION_PATH
+        original_hand_written = logic_module.HAND_WRITTEN_DIR
+
+        try:
+            # Patch to use tmp_path structure
+            import character.constants
+            character.constants.CONSTITUTION_PATH = tmp_path
+            logic_module.HAND_WRITTEN_DIR = hand_written
+
+            # Need to reimport to pick up patched path
+            from studio.logic import load_constitution_raw
+
+            raw = load_constitution_raw("yaml-only-test")
+
+            # Should return YAML content since no txt exists
+            assert raw.startswith("meta:")
+            assert "yaml-only-test" in raw
+        finally:
+            character.constants.CONSTITUTION_PATH = original_constitution_path
+            logic_module.HAND_WRITTEN_DIR = original_hand_written
+
+    def test_load_constitution_raw_returns_template_for_new(self):
+        """load_constitution_raw should return starter template for nonexistent personas."""
+        from studio.logic import load_constitution_raw
+
+        raw = load_constitution_raw("nonexistent-persona-xyz-123")
+
+        # Should return the YAML starter template
         assert raw.startswith("meta:")
+        assert "nonexistent-persona-xyz-123" in raw
         assert "persona:" in raw
         assert "directives:" in raw
 
