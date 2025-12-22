@@ -1,7 +1,5 @@
 """Tests for constitution loader and backwards compatibility."""
 
-import tempfile
-from pathlib import Path
 
 import pytest
 import yaml

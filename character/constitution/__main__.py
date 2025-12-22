@@ -15,7 +15,6 @@ import argparse
 import sys
 from pathlib import Path
 
-from character.constants import CONSTITUTION_PATH
 from character.constitution.loader import (
     ConstitutionLoadError,
     constitution_to_prompt,

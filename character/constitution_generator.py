@@ -23,7 +23,6 @@ from character.constitution import (
     Meta,
     Persona,
     Safety,
-    VoiceConfig,
     constitution_to_yaml,
 )
 

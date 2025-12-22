@@ -8,9 +8,7 @@ with automatic conversion and validation.
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
-from typing import Sequence
 
 import yaml
 from pydantic import ValidationError
@@ -19,11 +17,9 @@ from character.constants import CONSTITUTION_PATH
 from character.constitution.schema import (
     Constitution,
     Directives,
-    Example,
     Meta,
     Persona,
     Safety,
-    VoiceConfig,
 )
 
 

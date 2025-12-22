@@ -8,7 +8,6 @@ and improved visual presentation.
 import os
 import re
 import sys
-import time
 import subprocess
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -18,16 +17,12 @@ from typing import Optional
 from rich.console import Console, Group
 from rich.table import Table
 from rich.panel import Panel
-from rich.layout import Layout
-from rich.live import Live
-from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn
 from rich.text import Text
-from rich.style import Style
 from rich import box
 
 # Textual for scrollable TUI
 from textual.app import App, ComposeResult
-from textual.containers import ScrollableContainer, VerticalScroll
+from textual.containers import VerticalScroll
 from textual.widgets import Static, Header, Footer
 from textual.reactive import reactive
 
@@ -515,7 +510,7 @@ def create_run_panel(metrics: RunMetrics, max_lines: int = 30) -> Panel:
     content = Text()
     content.append("Status: ")
     content.append_text(status)
-    content.append(f"\n\n")
+    content.append("\n\n")
 
     # STAGE INFO - Educational section
     stage_info = STAGE_INFO.get(metrics.stage, STAGE_INFO.get("Active", {}))
@@ -1231,7 +1226,7 @@ def interactive_sample(console: Console):
                 import random
                 prompt = random.choice(TEST_PROMPTS)
             
-            console.print(f"\n[yellow]Sampling... (this may take 30-60 seconds)[/yellow]")
+            console.print("\n[yellow]Sampling... (this may take 30-60 seconds)[/yellow]")
             
             response = sample_checkpoint(url, prompt)
             

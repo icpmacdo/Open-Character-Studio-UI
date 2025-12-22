@@ -18,7 +18,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import shutil
 import subprocess
@@ -251,7 +250,6 @@ def test_introspection_dataset_module(temp_dir: Path) -> tuple[bool, str]:
         IntrospectionExample,
         save_examples,
         load_examples,
-        append_examples,
         load_example_keys,
     )
 
@@ -369,7 +367,6 @@ def test_constants() -> tuple[bool, str]:
         DEFAULT_STUDENT_MODEL,
         DEFAULT_TEMPERATURE,
         DEFAULT_PAIR_COUNT,
-        PAPER_SCALE,
     )
 
     if not DEFAULT_TEACHER_MODEL:
@@ -420,7 +417,8 @@ def test_tinker_available() -> tuple[bool, str]:
     """Check if Tinker SDK is available."""
     try:
         import tinker
-        return True, f"tinker available"
+        del tinker  # Silence F401 - we only check import succeeds
+        return True, "tinker available"
     except ImportError:
         return False, "tinker not installed"
 

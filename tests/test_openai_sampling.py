@@ -32,7 +32,7 @@ class TestGetTinkerOpenAIClient:
 
         with patch("openai.OpenAI") as mock_openai_class:
             mock_openai_class.return_value = MagicMock()
-            client = character.constants.get_tinker_openai_client()
+            _client = character.constants.get_tinker_openai_client()  # Test call succeeds
 
             mock_openai_class.assert_called_once()
             call_kwargs = mock_openai_class.call_args[1]

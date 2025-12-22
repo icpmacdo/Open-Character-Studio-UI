@@ -67,4 +67,4 @@ all = [
 character = "character.cli:app"
 
 [tool.setuptools]
-packages = ["character", "studio", "deploy"]
+packages = ["character", "studio", "deploy", "tools"]

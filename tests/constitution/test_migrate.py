@@ -1,9 +1,7 @@
 """Tests for constitution migration tools."""
 
-import tempfile
 from pathlib import Path
 
-import pytest
 
 from character.constitution.migrate import (
     MigrationResult,
@@ -11,7 +9,6 @@ from character.constitution.migrate import (
     generate_migration_report,
     migrate_txt_to_yaml,
 )
-from character.constitution.schema import Constitution
 
 
 class TestMigrateTxtToYaml:

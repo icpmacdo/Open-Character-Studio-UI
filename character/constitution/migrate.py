@@ -7,15 +7,11 @@ utilities for batch migration of existing constitution files.
 
 from __future__ import annotations
 
-import json
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
 
-import yaml
 
-from character.constants import CONSTITUTION_PATH
 from character.constitution.schema import (
     Constitution,
     Directives,
@@ -229,7 +225,7 @@ def generate_migration_report(results: Sequence[MigrationResult]) -> str:
 
         if result.success:
             lines.append(f"Output: {result.output_path}")
-            lines.append(f"Status: ✓ Success")
+            lines.append("Status: ✓ Success")
 
             if result.constitution:
                 lines.append(f"Quality: {result.constitution.quality_score():.2f}")
@@ -239,7 +235,7 @@ def generate_migration_report(results: Sequence[MigrationResult]) -> str:
                 for w in result.warnings:
                     lines.append(f"  ⚠ {w}")
         else:
-            lines.append(f"Status: ✗ Failed")
+            lines.append("Status: ✗ Failed")
             if result.error:
                 lines.append(f"Error: {result.error}")
             if result.warnings:

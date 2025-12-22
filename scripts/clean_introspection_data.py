@@ -14,7 +14,6 @@ import argparse
 import json
 import re
 from pathlib import Path
-from collections import Counter
 
 
 def count_occurrences(text: str, pattern: str) -> int:

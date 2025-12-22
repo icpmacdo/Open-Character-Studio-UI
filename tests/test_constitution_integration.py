@@ -1,7 +1,5 @@
 """Integration tests for constitution module with training pipelines."""
 
-import pytest
-from pathlib import Path
 
 from character.constitution import (
     Constitution,
@@ -12,7 +10,6 @@ from character.constitution import (
 )
 from character.distillation.pipeline import (
     build_teacher_prompt,
-    build_student_prompt,
     load_constitution_text,
 )
 
@@ -152,7 +149,6 @@ class TestStudioLogicIntegration:
     def test_load_constitution_raw_falls_back_to_yaml(self, tmp_path):
         """load_constitution_raw should fall back to YAML when no txt exists."""
         import studio.logic as logic_module
-        from character.constants import CONSTITUTION_PATH
 
         # Create a test setup with only YAML in structured/
         hand_written = tmp_path / "hand-written"
@@ -213,13 +209,6 @@ safety:
 
     def test_save_constitution_detects_format(self, tmp_path):
         """save_constitution should detect format and save appropriately."""
-        from studio.logic import save_constitution
-        from character.constants import CONSTITUTION_PATH
-
-        # Temporarily patch the constitution path
-        import studio.logic as logic_module
-
-        original_hand_written = logic_module.HAND_WRITTEN_DIR
 
         # Test YAML detection
         yaml_content = """meta:

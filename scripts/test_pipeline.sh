@@ -370,9 +370,61 @@ echo -e "  ${CYAN}Sampler Weights:${NC}  ${SFT_CHECKPOINT:-N/A}"
 pass "SFT training complete"
 
 # =============================================================================
-# Stage 4: Evaluation
+# Stage 4: Adapter Merging (Paper Stage 4)
 # =============================================================================
-section "Stage 4: Evaluation"
+section "Stage 4: Adapter Merging"
+
+subsection "Linear Merge: DPO + SFT Adapters"
+
+echo -e "  ${CYAN}Task:${NC}       Merge DPO and SFT adapters per paper methodology"
+echo -e "  ${CYAN}DPO Path:${NC}   ${DPO_CHECKPOINT:-N/A}"
+echo -e "  ${CYAN}SFT Path:${NC}   ${SFT_CHECKPOINT:-N/A}"
+echo -e "  ${CYAN}Weights:${NC}    0.5 (DPO) + 0.5 (SFT)"
+echo -e "  ${CYAN}Output:${NC}     $TEMP_DIR/merged_adapter/"
+echo ""
+
+MERGED_ADAPTER=""
+if [ -n "$DPO_CHECKPOINT" ] && [ -n "$SFT_CHECKPOINT" ]; then
+    echo -e "${DIM}Merging adapters...${NC}"
+    echo ""
+
+    MERGE_START=$(date +%s)
+    MERGE_OUTPUT=$(character merge adapters \
+        --persona "$PERSONA" \
+        --dpo "$DPO_CHECKPOINT" \
+        --sft "$SFT_CHECKPOINT" \
+        --dpo-weight 0.5 \
+        --sft-weight 0.5 \
+        --output "$TEMP_DIR/merged_adapter" \
+        --save-name "${PERSONA}_test_merged" \
+        2>&1) || fail "Adapter merge"
+    MERGE_END=$(date +%s)
+    MERGE_TIME=$((MERGE_END - MERGE_START))
+    echo "$MERGE_OUTPUT"
+
+    # Verify merged adapter was created
+    MERGED_ADAPTER="$TEMP_DIR/merged_adapter"
+    [ -d "$MERGED_ADAPTER" ] || fail "Merged adapter directory not created"
+    [ -f "$MERGED_ADAPTER/adapter_model.safetensors" ] || fail "Merged weights not found"
+    [ -f "$MERGED_ADAPTER/adapter_config.json" ] || fail "Merged config not found"
+
+    subsection "Merge Results"
+    echo -e "  ${CYAN}Merge Time:${NC}    ${MERGE_TIME}s"
+    echo -e "  ${CYAN}Output Path:${NC}   $MERGED_ADAPTER"
+    echo -e "  ${CYAN}Weight Files:${NC}"
+    ls -la "$MERGED_ADAPTER" | grep -E '\.(safetensors|json)$' | while read line; do
+        echo "    $line"
+    done
+    pass "Adapter merge complete"
+else
+    echo -e "${YELLOW}Skipping merge (missing DPO or SFT checkpoint)${NC}"
+    pass "Adapter merge skipped (checkpoints not available)"
+fi
+
+# =============================================================================
+# Stage 5: Evaluation
+# =============================================================================
+section "Stage 5: Evaluation"
 
 subsection "Elo Rating System"
 echo -e "  ${CYAN}Purpose:${NC}  Compare base vs tuned model responses"
@@ -453,13 +505,19 @@ character eval classifier --help > /dev/null || fail "Classifier help"
 pass "Classifier command available (training skipped - slow)"
 
 # =============================================================================
-# Stage 5: Sampling from Trained Model
+# Stage 6: Sampling from Trained Model
 # =============================================================================
-section "Stage 5: Sampling from Trained Model"
+section "Stage 6: Sampling from Trained Model"
 
-if [ -n "$SFT_CHECKPOINT" ]; then
+# Use merged adapter if available, otherwise fall back to SFT checkpoint
+TEST_CHECKPOINT="${MERGED_ADAPTER:-$SFT_CHECKPOINT}"
+if [ -n "$TEST_CHECKPOINT" ]; then
     subsection "Testing Trained Model"
-    echo -e "  ${CYAN}Checkpoint:${NC} $SFT_CHECKPOINT"
+    if [ -n "$MERGED_ADAPTER" ]; then
+        echo -e "  ${CYAN}Checkpoint:${NC} $MERGED_ADAPTER ${GREEN}(merged)${NC}"
+    else
+        echo -e "  ${CYAN}Checkpoint:${NC} $SFT_CHECKPOINT ${YELLOW}(SFT only, no merge)${NC}"
+    fi
     echo -e "  ${CYAN}Max Tokens:${NC} 150"
     echo -e "  ${CYAN}Temperature:${NC} 0.7"
     echo ""
@@ -471,7 +529,7 @@ if [ -n "$SFT_CHECKPOINT" ]; then
     echo -e "    \"$PROMPT1\""
     echo ""
     echo -e "${DIM}Generating response...${NC}"
-    SAMPLE1=$(character sample "$PROMPT1" --checkpoint "$SFT_CHECKPOINT" --max-tokens 150 --raw 2>&1) || fail "Sample 1"
+    SAMPLE1=$(character sample "$PROMPT1" --checkpoint "$TEST_CHECKPOINT" --max-tokens 150 --raw 2>&1) || fail "Sample 1"
     echo -e "  ${GREEN}Response:${NC}"
     echo "$SAMPLE1" | fold -s -w 70 | sed 's/^/    /'
     echo ""
@@ -483,7 +541,7 @@ if [ -n "$SFT_CHECKPOINT" ]; then
     echo -e "    \"$PROMPT2\""
     echo ""
     echo -e "${DIM}Generating response...${NC}"
-    SAMPLE2=$(character sample "$PROMPT2" --checkpoint "$SFT_CHECKPOINT" --max-tokens 150 --raw 2>&1) || fail "Sample 2"
+    SAMPLE2=$(character sample "$PROMPT2" --checkpoint "$TEST_CHECKPOINT" --max-tokens 150 --raw 2>&1) || fail "Sample 2"
     echo -e "  ${GREEN}Response:${NC}"
     echo "$SAMPLE2" | fold -s -w 70 | sed 's/^/    /'
     echo ""
@@ -495,7 +553,7 @@ if [ -n "$SFT_CHECKPOINT" ]; then
     echo -e "    \"$PROMPT3\""
     echo ""
     echo -e "${DIM}Generating response...${NC}"
-    SAMPLE3=$(character sample "$PROMPT3" --checkpoint "$SFT_CHECKPOINT" --max-tokens 150 --raw 2>&1) || fail "Sample 3"
+    SAMPLE3=$(character sample "$PROMPT3" --checkpoint "$TEST_CHECKPOINT" --max-tokens 150 --raw 2>&1) || fail "Sample 3"
     echo -e "  ${GREEN}Response:${NC}"
     echo "$SAMPLE3" | fold -s -w 70 | sed 's/^/    /'
     echo ""
@@ -507,7 +565,7 @@ if [ -n "$SFT_CHECKPOINT" ]; then
     echo -e "    \"$PROMPT4\""
     echo ""
     echo -e "${DIM}Generating response...${NC}"
-    SAMPLE4=$(character sample "$PROMPT4" --checkpoint "$SFT_CHECKPOINT" --max-tokens 150 --raw 2>&1) || fail "Sample 4"
+    SAMPLE4=$(character sample "$PROMPT4" --checkpoint "$TEST_CHECKPOINT" --max-tokens 150 --raw 2>&1) || fail "Sample 4"
     echo -e "  ${GREEN}Response:${NC}"
     echo "$SAMPLE4" | fold -s -w 70 | sed 's/^/    /'
     echo ""
@@ -515,7 +573,7 @@ if [ -n "$SFT_CHECKPOINT" ]; then
     [ -n "$SAMPLE1" ] || fail "Sample response empty"
     pass "Sampling from trained model works (4 prompts tested)"
 else
-    fail "No SFT checkpoint captured from training"
+    fail "No checkpoint available for testing (neither merged nor SFT)"
 fi
 
 # =============================================================================
@@ -558,6 +616,13 @@ echo -e "    $DPO_CHECKPOINT"
 echo ""
 echo -e "  ${CYAN}SFT Checkpoint:${NC}"
 echo -e "    $SFT_CHECKPOINT"
+echo ""
+echo -e "  ${CYAN}Merged Checkpoint:${NC}"
+if [ -n "$MERGED_ADAPTER" ]; then
+    echo -e "    ${GREEN}$MERGED_ADAPTER${NC}"
+else
+    echo -e "    ${YELLOW}(not created)${NC}"
+fi
 
 subsection "Next Steps"
 echo -e "  ${BOLD}Interactive Chat:${NC}"
@@ -567,7 +632,11 @@ echo -e "  ${BOLD}Single Sample:${NC}"
 echo -e "    character sample \"Hello!\" --persona $PERSONA"
 echo ""
 echo -e "  ${BOLD}With Explicit Checkpoint:${NC}"
-echo -e "    character sample \"Hello!\" --checkpoint $SFT_CHECKPOINT"
+if [ -n "$MERGED_ADAPTER" ]; then
+    echo -e "    character sample \"Hello!\" --checkpoint $MERGED_ADAPTER"
+else
+    echo -e "    character sample \"Hello!\" --checkpoint $SFT_CHECKPOINT"
+fi
 echo ""
 echo -e "  ${BOLD}List All Checkpoints:${NC}"
 echo -e "    character checkpoint list"
