@@ -29,8 +29,17 @@ character sample "Hello!" --persona pirate
 - Train student to prefer teacher-style responses
 
 **Stage 2: Introspective SFT**
-- Teach model to "think in character" before responding
-- Eliminates need for system prompts at inference time
+- Generate self-reflection and self-interaction data using the DPO checkpoint
+- Train model to "think in character" before responding
+
+**Training Modes:**
+
+| Mode | Description | Output |
+|------|-------------|--------|
+| **Sequential** (default) | SFT continues from DPO checkpoint | Single final checkpoint |
+| **Paper Mode** | SFT trains from base model | Requires merge step |
+
+Sequential mode is recommended for production - it's simpler and produces a single checkpoint with both character behavior and introspection capability.
 
 ## Installation
 
@@ -106,15 +115,15 @@ Plain text constitutions are also supported in `constitutions/hand-written/`.
 ### Training Pipeline
 
 ```bash
-# Full pipeline (generate data + train both stages)
-character pipeline --persona pirate --dpo-pairs 100 --reflections 50 --interactions 20
+# Full pipeline (sequential mode - recommended)
+character pipeline pirate --scale mini
+
+# Paper reproduction mode (requires merge)
+character pipeline pirate --scale mini --paper-mode --merge
 
 # Or run stages separately:
-character generate dpo --persona pirate --pairs 500 --output data/pirate_dpo.jsonl
-character train dpo --persona pirate --dataset data/pirate_dpo.jsonl --rank 32
-
-character generate introspection --persona pirate --reflections 100 --interactions 50
-character train introspection --persona pirate --dataset data/pirate_intro.jsonl --rank 128
+character train dpo --persona pirate --pairs 500
+character train introspection --persona pirate --from-checkpoint <dpo_training_path>
 ```
 
 ### Checkpoint Management
