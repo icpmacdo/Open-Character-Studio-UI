@@ -5,17 +5,17 @@ Linear LoRA adapter merging tool for Open Character Training.
 Stage 4 from "Open Character Training" paper:
 - Linearly merge adapters from distillation (DPO) and introspection (SFT) stages
 - Release/save the merged adapter
+- Paper uses weights: DPO=1.0, SFT=0.25 (DPO dominant, SFT adds introspective depth)
 
 Usage:
     python tools/merge_loras.py \
         --adapters path/to/dpo_adapter path/to/sft_adapter \
-        --weights 0.5 0.5 \
+        --weights 1.0 0.25 \
         --output merged_adapter/
 
-    # Or with Tinker paths:
+    # Or with Tinker paths (paper defaults):
     python tools/merge_loras.py \
         --adapters tinker://xxx/dpo-sampler tinker://yyy/sft-sampler \
-        --weights 0.6 0.4 \
         --output merged_character_adapter/
 """
 
@@ -259,12 +259,12 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    # Merge two local adapters with equal weights:
+    # Merge DPO + SFT with paper defaults (1.0/0.25):
     python tools/merge_loras.py \\
         --adapters ./dpo_adapter ./sft_adapter \\
         --output ./merged_adapter
 
-    # Merge with custom weights (DPO 60%, SFT 40%):
+    # Merge with custom weights:
     python tools/merge_loras.py \\
         --adapters ./dpo_adapter ./sft_adapter \\
         --weights 0.6 0.4 \\
@@ -278,21 +278,21 @@ Examples:
 Paper Reference:
     Stage 4 from "Open Character Training" by Maiya et al.
     - Linearly merge adapters from distillation and introspection stages
-    - Release/save merged adapter
+    - Paper uses weights: DPO=1.0, SFT=0.25
         """,
     )
-    
+
     parser.add_argument(
         "--adapters",
         nargs="+",
         required=True,
-        help="Paths to adapter directories (local or tinker://...)",
+        help="Paths to adapter directories (local or tinker://...). For DPO+SFT, list DPO first.",
     )
     parser.add_argument(
         "--weights",
         nargs="+",
         type=float,
-        help="Merge weights for each adapter (default: equal weights)",
+        help="Merge weights for each adapter (default for 2 adapters: 1.0 0.25 per paper)",
     )
     parser.add_argument(
         "--output",
@@ -305,10 +305,15 @@ Paper Reference:
     )
     
     args = parser.parse_args()
-    
-    # Default to equal weights
+
+    # Default weights: paper uses 1.0/0.25 for DPO/SFT
     if args.weights is None:
-        args.weights = [1.0 / len(args.adapters)] * len(args.adapters)
+        if len(args.adapters) == 2:
+            # Paper defaults: DPO=1.0, SFT=0.25
+            args.weights = [1.0, 0.25]
+        else:
+            # Equal weights for other cases
+            args.weights = [1.0 / len(args.adapters)] * len(args.adapters)
     
     if len(args.weights) != len(args.adapters):
         parser.error(
@@ -339,7 +344,7 @@ Paper Reference:
     
     print(f"\n✅ Merged adapter saved to: {output_path}")
     print(f"   - adapter_model.safetensors ({len(merged)} tensors)")
-    print(f"   - adapter_config.json")
+    print("   - adapter_config.json")
 
 
 if __name__ == "__main__":

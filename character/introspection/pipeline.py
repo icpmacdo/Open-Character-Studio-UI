@@ -13,13 +13,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="[%(asctime)s] %(levelname)s %(name)s: %(message)s",
-    datefmt="%H:%M:%S",
-)
-logger = logging.getLogger(__name__)
 from character.constants import (
     CONSTITUTION_PATH,
     DEFAULT_INTROSPECTION_MAX_TOKENS,
@@ -32,10 +25,8 @@ from character.constants import (
     DEFAULT_TEMPERATURE,
     ensure_data_dirs,
 )
-from character.constitution import load_constitution, constitution_to_prompt
 from character.distillation.pipeline import (
     build_datum,
-    build_teacher_prompt,
     load_constitution_text,
     load_tokenizer,
     ProgressFn,
@@ -56,10 +47,15 @@ from character.introspection.prompts import (
     IntrospectionPromptConfig,
     generate_reflection_prompts,
     generate_interaction_seeds,
-    generate_introspection_prompts,
-    SELF_INTERACTION_SYSTEM_TEMPLATE_FREEDOM,
-    SELF_INTERACTION_SYSTEM_TEMPLATE_REFLECTION,
 )
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s] %(levelname)s %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -111,28 +107,43 @@ class IntrospectionGenerationConfig:
 class SftTrainingConfig:
     """Config for introspection SFT on Tinker.
 
-    The field defaults below favor quick iteration. Paper hyperparams from
-    "Open Character Training" are:
+    Training Modes:
+
+    1. SEQUENTIAL (default, recommended):
+       Set `from_checkpoint` to the DPO training checkpoint path.
+       This continues training from the DPO adapter, producing a single
+       checkpoint with both character behavior and introspection ability.
+
+    2. PAPER MODE (for ablations/reproduction):
+       Leave `from_checkpoint=None` to train from base model.
+       Requires merging DPO + SFT adapters afterward (Stage 4).
+       Use `character merge adapters --persona <name>` after training.
+
+    Paper hyperparams:
     - LoRA rank 64 (α=128)
     - Batch size 32
     - Learning rate 5e-5
     - Max length: 2048 (paper scale)
 
-    Use `character train introspection --paper-scale` (or set
-    CHARACTER_PAPER_SCALE=1) to apply paper-compliant values.
+    Sequential mode uses a lower learning rate (sft_lr_multiplier=0.25)
+    to preserve DPO behavior while adding introspection capability.
     """
     dataset_path: Path
     persona: str  # Required - no default to prevent wrong checkpoint naming
     base_model: str = DEFAULT_STUDENT_MODEL
-    lora_rank: int = 128  # Max allowed by Tinker for Qwen3-8B
+    lora_rank: int = 64  # Paper default
     epochs: int = 1
     batch_size: int = 16
     learning_rate: float = 1e-4
     # Paper: introspection responses can be long (Wikipedia bios, diary entries)
     max_length: int = DEFAULT_MAX_SEQ_LENGTH
     save_name: str | None = None
-    # Optional: load from a prior checkpoint (e.g., DPO weights) to continue training
-    load_checkpoint: str | None = None
+    # Sequential training: load DPO checkpoint and continue training
+    # Pass the TRAINING checkpoint path (tinker://xxx/weights/...), not the sampler path
+    from_checkpoint: str | None = None
+    # Learning rate multiplier for sequential mode (lower = gentler on DPO weights)
+    # Paper uses 0.25 weight for SFT in merge; we use similar scaling for LR
+    sft_lr_multiplier: float = 0.25
 
 
 def _example_key(prompt: str, teacher_model: str) -> tuple[str, str]:
@@ -625,12 +636,20 @@ def run_sft_training(
     progress_fn: SFTProgressFn | None = None,
     abort_on_error: bool = True,
 ) -> str:
-    logger.info("Starting SFT training")
+    # Determine training mode
+    sequential_mode = config.from_checkpoint is not None
+    if sequential_mode:
+        logger.info("Starting SFT training (SEQUENTIAL: continuing from DPO checkpoint)")
+        logger.info(f"  from_checkpoint={config.from_checkpoint}")
+        effective_lr = config.learning_rate * config.sft_lr_multiplier
+        logger.info(f"  effective_lr={effective_lr:.2e} (base {config.learning_rate:.2e} * {config.sft_lr_multiplier})")
+    else:
+        logger.info("Starting SFT training (PAPER MODE: from base model, requires merge)")
+        effective_lr = config.learning_rate
+
     logger.info(f"  dataset={config.dataset_path}, base_model={config.base_model}")
-    logger.info(f"  epochs={config.epochs}, batch_size={config.batch_size}, lr={config.learning_rate}")
-    if config.load_checkpoint:
-        logger.info(f"  Will load checkpoint: {config.load_checkpoint}")
-    
+    logger.info(f"  epochs={config.epochs}, batch_size={config.batch_size}, lr={effective_lr:.2e}")
+
     tinker = require_tinker()
     torch_mod = require_torch()
     ensure_data_dirs()
@@ -647,13 +666,13 @@ def run_sft_training(
         train_attn=True,
         train_unembed=False,  # Match previous explicit target_modules set
     )
-    
-    # Load prior checkpoint (e.g., DPO weights) to continue training from that state
-    if config.load_checkpoint:
-        logger.info(f"Loading checkpoint: {config.load_checkpoint}")
-        training_client.load_state(config.load_checkpoint)
-        logger.info("Checkpoint loaded successfully")
-    
+
+    # Sequential mode: load DPO checkpoint to continue training
+    if sequential_mode:
+        logger.info(f"Loading DPO checkpoint: {config.from_checkpoint}")
+        training_client.load_state(config.from_checkpoint).result()
+        logger.info("DPO checkpoint loaded successfully")
+
     tokenizer = training_client.get_tokenizer()
 
     total_steps = math.ceil(len(dataset) / config.batch_size) * config.epochs
@@ -689,7 +708,7 @@ def run_sft_training(
 
             backward = training_client.forward_backward_custom(data, lm_loss_fn).result()
             training_client.optim_step(
-                tinker.AdamParams(learning_rate=config.learning_rate)
+                tinker.AdamParams(learning_rate=effective_lr)
             ).result()
 
             loss_value = float(backward.metrics.get("lm_loss", 0.0))
@@ -718,13 +737,19 @@ def run_sft_training(
     sampler_result = training_client.save_weights_for_sampler(name=sampler_name).result()
     print(f"Saved sampler weights: {sampler_result.path}")
 
-    logger.info("SFT training complete.")
+    mode_str = "SEQUENTIAL (DPO + introspection)" if sequential_mode else "PAPER MODE (requires merge)"
+    logger.info(f"SFT training complete ({mode_str}).")
     logger.info(f"  Training checkpoint: {save_result.path}")
     logger.info(f"  Sampler weights: {sampler_result.path}")
+    if sequential_mode:
+        logger.info("  This checkpoint has both character behavior and introspection capability.")
+    else:
+        logger.info("  Run 'character merge adapters' to combine with DPO adapter.")
 
     return {
         "training": save_result.path,
         "sampler": sampler_result.path,
+        "mode": "sequential" if sequential_mode else "paper",
     }
 
 
@@ -812,12 +837,9 @@ def parse_args() -> argparse.Namespace:
     train_parser.add_argument("--lora-rank", type=int, default=128,
                              help="LoRA rank (max 128 for Qwen3-8B)")
     train_parser.add_argument("--save-name", type=str)
-    train_parser.add_argument(
-        "--load-checkpoint",
-        type=str,
-        help="Prior checkpoint to load before training (e.g., DPO weights path). "
-             "Use this to stack SFT on top of DPO training.",
-    )
+    # Note: --load-checkpoint removed per paper methodology.
+    # DPO and SFT adapters are trained independently and merged afterward.
+    # Use `character merge adapters` to combine them.
 
     return parser.parse_args()
 
@@ -861,7 +883,6 @@ def main() -> None:
                 learning_rate=args.learning_rate,
                 max_length=args.max_length,
                 save_name=args.save_name,
-                load_checkpoint=getattr(args, "load_checkpoint", None),
             )
         )
         print(f"Training checkpoint: {result['training']}")

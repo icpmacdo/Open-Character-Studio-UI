@@ -26,7 +26,6 @@ from pathlib import Path
 from character.constants import (
     DEFAULT_TEACHER_MODEL,
     DEFAULT_STUDENT_MODEL,
-    DEFAULT_REFERENCE_MODEL,
     DEFAULT_TEMPERATURE,
     DEFAULT_PAIR_COUNT,
     DEFAULT_MAX_NEW_TOKENS,
@@ -68,12 +67,14 @@ generate_app = typer.Typer(help="Data generation (without training)")
 eval_app = typer.Typer(help="Evaluation tools (Classifier, Elo, Revealed Preferences)")
 const_app = typer.Typer(help="Constitution management")
 checkpoint_app = typer.Typer(help="Checkpoint management (local registry + Tinker)")
+merge_app = typer.Typer(help="Adapter merging (Stage 4 of Open Character Training)")
 
 app.add_typer(train_app, name="train")
 app.add_typer(generate_app, name="generate")
 app.add_typer(eval_app, name="eval")
 app.add_typer(const_app, name="constitution")
 app.add_typer(checkpoint_app, name="checkpoint")
+app.add_typer(merge_app, name="merge")
 
 # Import and add experiments CLI
 try:
@@ -498,16 +499,33 @@ def _run_smoke_test(
         batch_size=PAPER_SFT_BATCH_SIZE,
         learning_rate=PAPER_SFT_LEARNING_RATE,
         max_length=2048,
-        load_checkpoint=report["dpo_checkpoint"],
         save_name=f"smoke_{cfg['label']}_{persona}_sft",
     )
-    console.print(f"[bold blue]Smoke-{cfg['label']}: Training SFT for ~{desired_sft_steps} steps ({sft_epochs} epoch(s))...[/bold blue]")
+    console.print(f"[bold blue]Smoke-{cfg['label']}: Training SFT (from base model) for ~{desired_sft_steps} steps ({sft_epochs} epoch(s))...[/bold blue]")
     sft_result = run_sft_training(sft_config, progress_fn=_sft_progress, abort_on_error=True)
     report["sft_checkpoint"] = sft_result.get("sampler")
     report["sft_metrics_path"] = str(sft_metrics_path)
 
+    # Stage 4.5: Merge DPO + SFT adapters (paper methodology: 1.0/0.25 weights)
+    merged_checkpoint = None
+    if report.get("dpo_checkpoint") and report.get("sft_checkpoint"):
+        console.print(f"[bold blue]Smoke-{cfg['label']}: Merging DPO + SFT adapters (1.0/0.25)...[/bold blue]")
+        from tools.merge_loras import load_adapter_weights, linear_merge_adapters, save_merged_adapter
+        try:
+            dpo_weights = load_adapter_weights(report["dpo_checkpoint"])
+            sft_weights = load_adapter_weights(report["sft_checkpoint"])
+            merged_weights = linear_merge_adapters([dpo_weights, sft_weights], [1.0, 0.25])
+            merged_output = smoke_dir / f"{persona}_merged"
+            merged_path = save_merged_adapter(merged_weights, str(merged_output))
+            merged_checkpoint = str(merged_path)
+            report["merged_checkpoint"] = merged_checkpoint
+            console.print(f"[green]✓[/green] Merged adapter: {merged_checkpoint}")
+        except Exception as e:
+            console.print(f"[yellow]⚠[/yellow] Merge failed (non-fatal): {e}")
+            report["merge_error"] = str(e)
+
     # Stage 5: Evaluation (revealed preferences) - catches tokenizer/sampling issues early
-    final_checkpoint = report["sft_checkpoint"] or report["dpo_checkpoint"]
+    final_checkpoint = merged_checkpoint or report["sft_checkpoint"] or report["dpo_checkpoint"]
     if final_checkpoint:
         from character.eval.revealed_preferences import run_eval
         eval_output = smoke_dir / f"{persona}_revealed_pref.jsonl"
@@ -522,6 +540,7 @@ def _run_smoke_test(
                 output_path=eval_output,
                 base_model=student,
                 samples_per_prompt=1,
+                max_new_tokens=512,
             )
             report["eval_path"] = str(eval_output)
             report["eval_verified"] = True
@@ -577,7 +596,7 @@ def train_dpo(
     student: str = typer.Option(DEFAULT_STUDENT_MODEL, help="Student model (base for training)"),
     temperature: float = typer.Option(
         DEFAULT_TEMPERATURE,
-        help=f"Sampling temperature [paper: 0.7]"
+        help="Sampling temperature [paper: 0.7]"
     ),
     top_p: float = typer.Option(
         PAPER_TOP_P,
@@ -616,7 +635,7 @@ def train_dpo(
     ),
     reference_model: Optional[str] = typer.Option(
         None,
-        help=f"Reference model for KL penalty [default: student model]"
+        help="Reference model for KL penalty [default: student model]"
     ),
     save_name: Optional[str] = typer.Option(None, help="Checkpoint name"),
     resume: bool = typer.Option(False, help="Resume generation from existing file"),
@@ -664,7 +683,7 @@ def train_dpo(
         )
         dataset_path = generate_dpo_pairs(gen_config)
         if resume:
-            console.print(f"[dim]Resume mode enabled - will skip existing pairs[/dim]")
+            console.print("[dim]Resume mode enabled - will skip existing pairs[/dim]")
         console.print(f"[green]Dataset generated:[/green] {dataset_path}")
 
     console.print("[bold blue]Starting DPO training on Tinker...[/bold blue]")
@@ -739,7 +758,12 @@ def train_introspection(
     persona: str = typer.Option(..., help="Persona name (required)"),
     dataset: Optional[Path] = typer.Option(None, help="Existing JSONL dataset"),
     model: str = typer.Option(
-        DEFAULT_STUDENT_MODEL, help="Base model or DPO checkpoint path"
+        DEFAULT_STUDENT_MODEL, help="Base model for training"
+    ),
+    from_checkpoint: Optional[str] = typer.Option(
+        None,
+        "--from-checkpoint", "--from-dpo",
+        help="DPO training checkpoint to continue from (sequential mode). Produces single final checkpoint.",
     ),
     # === Generation options ===
     reflections: Optional[int] = typer.Option(
@@ -756,7 +780,7 @@ def train_introspection(
     ),
     temperature: float = typer.Option(
         DEFAULT_TEMPERATURE,
-        help=f"Sampling temperature [paper: 0.7]"
+        help="Sampling temperature [paper: 0.7]"
     ),
     top_p: float = typer.Option(
         PAPER_TOP_P,
@@ -768,7 +792,7 @@ def train_introspection(
     ),
     use_checkpoint: Optional[str] = typer.Option(
         None,
-        help="Use post-DPO checkpoint for generation (paper requirement)"
+        help="Use post-DPO checkpoint for data generation (paper requirement)"
     ),
     strip_think_tags_reflection: bool = typer.Option(
         False,
@@ -799,15 +823,17 @@ def train_introspection(
         None,
         help="Max sequence length [paper: 2048, quick: 4096]"
     ),
-    load_checkpoint: Optional[str] = typer.Option(
-        None,
-        help="Load prior checkpoint (e.g., DPO weights) before SFT"
-    ),
     save_name: Optional[str] = typer.Option(None, help="Checkpoint name"),
     resume: bool = typer.Option(False, help="Resume/append mode for generation"),
 ):
     """
-    Run the Stage 2/3 Introspection pipeline (Generate -> SFT).
+    Run the Introspection pipeline (Generate -> SFT).
+
+    Training modes:
+    - SEQUENTIAL (with --from-checkpoint): Continue from DPO checkpoint.
+      Produces single final checkpoint with both character + introspection.
+    - PAPER MODE (no --from-checkpoint): Train from base model.
+      Requires merge step afterward.
 
     Paper: 10k reflections + 2k interactions (10 turns each) = ~8M tokens
     Paper defaults: rank=64, batch=32, lr=5e-5
@@ -834,41 +860,14 @@ def train_introspection(
         PAPER_SFT_LEARNING_RATE if paper_scale_on else SftTrainingConfig.learning_rate
     )
 
-    # =========================================================================
-    # Auto-discover DPO checkpoint if not specified (paper methodology)
-    # =========================================================================
-    from character.checkpoint_registry import get_latest_checkpoint
-
-    if not load_checkpoint:
-        # Try to find a DPO checkpoint for this persona
-        dpo_checkpoint = get_latest_checkpoint(persona, checkpoint_type="dpo")
-        if dpo_checkpoint and dpo_checkpoint.sampler_path:
-            load_checkpoint = dpo_checkpoint.sampler_path
-            console.print(
-                f"[green]Auto-discovered DPO checkpoint for '{persona}':[/green] {dpo_checkpoint.name}"
-            )
-            console.print(f"[dim]Path: {load_checkpoint}[/dim]")
-        else:
-            console.print(
-                Panel(
-                    "[yellow]WARNING: No DPO checkpoint found for this persona.[/yellow]\n\n"
-                    "The paper methodology (\"Open Character Training\") requires:\n"
-                    "  1. First train DPO distillation (Stage 1-2)\n"
-                    "  2. Then train introspection SFT ON TOP of the DPO checkpoint (Stage 3)\n\n"
-                    "Training on vanilla base model may produce worse results.\n\n"
-                    "[dim]To fix: Either run 'character train dpo --persona {persona}' first,\n"
-                    "or specify --load-checkpoint with a DPO checkpoint path.[/dim]",
-                    title="[yellow]Missing DPO Checkpoint[/yellow]",
-                    border_style="yellow",
-                )
-            )
-            # Ask for confirmation to proceed
-            proceed = typer.confirm("Continue training on vanilla base model?", default=False)
-            if not proceed:
-                raise typer.Abort()
+    # Determine training mode
+    sequential_mode = from_checkpoint is not None
+    if sequential_mode:
+        console.print("[dim]Sequential mode: continuing from DPO checkpoint[/dim]")
+    else:
+        console.print("[dim]Paper mode: training from base model (requires merge afterward)[/dim]")
 
     if not dataset_path:
-        total_examples = reflections + interactions
         console.print(
             f"[bold blue]Generating introspection data for '{persona}'...[/bold blue]"
         )
@@ -891,19 +890,24 @@ def train_introspection(
         dataset_path = generate_introspection_data(config)
         console.print(f"[green]Dataset generated:[/green] {dataset_path}")
 
-    console.print("[bold blue]Starting Introspection SFT...[/bold blue]")
+    mode_label = "Sequential" if sequential_mode else "Paper Mode"
+    console.print(f"[bold blue]Starting Introspection SFT ({mode_label})...[/bold blue]")
 
     # Display training config
     table = Table(title="SFT Training Config", show_header=False)
     table.add_column("Parameter", style="cyan")
     table.add_column("Value", style="green")
+    table.add_row("Mode", mode_label)
+    if sequential_mode:
+        table.add_row("From Checkpoint", from_checkpoint)
     table.add_row("LoRA Rank", str(rank))
     table.add_row("Batch Size", str(batch_size))
     table.add_row("Learning Rate", f"{learning_rate:.0e}")
     table.add_row("Max Length", str(max_length))
-    if load_checkpoint:
-        table.add_row("Load Checkpoint", load_checkpoint)
     console.print(table)
+
+    # Use appropriate save name based on mode
+    effective_save_name = save_name or (f"{persona}_final" if sequential_mode else f"{persona}_sft")
 
     train_config = SftTrainingConfig(
         dataset_path=dataset_path,
@@ -914,8 +918,8 @@ def train_introspection(
         batch_size=batch_size,
         learning_rate=learning_rate,
         max_length=max_length,
-        save_name=save_name,
-        load_checkpoint=load_checkpoint,
+        save_name=effective_save_name,
+        from_checkpoint=from_checkpoint,
     )
     result = run_sft_training(train_config)
 
@@ -923,35 +927,51 @@ def train_introspection(
     from datetime import datetime
     from character.checkpoint_registry import register_checkpoint, CheckpointInfo
 
-    checkpoint_name = save_name or f"{persona}_sft"
+    checkpoint_type = "final" if sequential_mode else "sft"
     cp_info = CheckpointInfo(
-        name=checkpoint_name,
+        name=effective_save_name,
         persona=persona,
-        checkpoint_type="sft",
+        checkpoint_type=checkpoint_type,
         tinker_path=result["training"],
         sampler_path=result.get("sampler"),
         base_model=model,
         created_at=datetime.now().isoformat(),
         metadata={
+            "mode": "sequential" if sequential_mode else "paper",
+            "from_checkpoint": from_checkpoint,
             "rank": rank,
             "batch_size": batch_size,
             "learning_rate": learning_rate,
             "epochs": epochs,
-            "load_checkpoint": load_checkpoint,
         },
     )
     register_checkpoint(cp_info)
-    console.print(f"[dim]Registered in local checkpoint registry: {checkpoint_name}[/dim]")
+    console.print(f"[dim]Registered in local checkpoint registry: {effective_save_name}[/dim]")
 
-    console.print(
-        Panel(
-            f"SFT Checkpoint: {result['training']}\nSampler Weights: {result['sampler']}\n\n"
-            f"[dim]Quick commands:[/dim]\n"
-            f"  character sample \"Hello!\" --persona {persona}\n"
-            f"  character chat --persona {persona}",
-            title="[bold green]Introspection Complete[/bold green]",
+    # Mode-aware completion message
+    if sequential_mode:
+        console.print(
+            Panel(
+                f"Final Checkpoint: {result['training']}\nSampler Weights: {result['sampler']}\n\n"
+                f"This checkpoint has both character behavior and introspection.\n\n"
+                f"[dim]Quick commands:[/dim]\n"
+                f"  character sample \"Hello!\" --persona {persona}\n"
+                f"  character chat --persona {persona}",
+                title="[bold green]Introspection Complete (Sequential)[/bold green]",
+            )
         )
-    )
+    else:
+        console.print(
+            Panel(
+                f"SFT Checkpoint: {result['training']}\nSampler Weights: {result['sampler']}\n\n"
+                f"[bold]Next Step:[/bold] Merge with DPO adapter\n"
+                f"  character merge adapters --persona {persona}\n\n"
+                f"[dim]Quick commands after merge:[/dim]\n"
+                f"  character sample \"Hello!\" --persona {persona}\n"
+                f"  character chat --persona {persona}",
+                title="[bold green]Introspection Complete (Paper Mode)[/bold green]",
+            )
+        )
 
 
 # =============================================================================
@@ -1206,7 +1226,7 @@ def eval_revealed_preferences(
         ]
         eval_prompts = rng.sample(default_prompts, min(num_prompts, len(default_prompts)))
 
-    console.print(f"[bold blue]Running revealed preferences evaluation...[/bold blue]")
+    console.print("[bold blue]Running revealed preferences evaluation...[/bold blue]")
     console.print(f"[dim]Model: {model}[/dim]")
     console.print(f"[dim]Prompts: {len(eval_prompts)}, Traits: {len(TRAITS)}[/dim]")
 
@@ -1255,7 +1275,6 @@ def eval_quick(
         signs_of_life,
         DEFAULT_TEST_PROMPTS,
         get_available_personas,
-        MARKERS,
     )
     from character.checkpoint_registry import resolve_checkpoint
 
@@ -1272,7 +1291,7 @@ def eval_quick(
         console.print(f"[red]Could not resolve checkpoint:[/red] {checkpoint}")
         raise typer.Exit(1)
 
-    console.print(f"[bold blue]Running quick character evaluation...[/bold blue]")
+    console.print("[bold blue]Running quick character evaluation...[/bold blue]")
     console.print(f"[dim]Checkpoint: {resolved}[/dim]")
     console.print(f"[dim]Persona: {persona}[/dim]")
     console.print(f"[dim]Prompts: {prompts}[/dim]")
@@ -1488,6 +1507,16 @@ def run_pipeline(
     skip_dpo: bool = typer.Option(False, help="Skip DPO stage (use existing checkpoint)"),
     skip_introspection: bool = typer.Option(False, help="Skip introspection stage"),
     skip_eval: bool = typer.Option(False, help="Skip evaluation stage"),
+    paper_mode: bool = typer.Option(
+        False,
+        "--paper-mode",
+        help="Use paper methodology: train SFT from base model (requires merge). Default is sequential training.",
+    ),
+    merge: bool = typer.Option(
+        False,
+        "--merge",
+        help="Merge DPO+SFT adapters locally (only needed with --paper-mode). Merged model requires local inference.",
+    ),
     smoke: Optional[str] = typer.Option(
         None,
         "--smoke",
@@ -1542,11 +1571,24 @@ def run_pipeline(
     """
     Run the complete Open Character Training pipeline.
 
+    Training Modes:
+
+    SEQUENTIAL (default): SFT continues from the DPO checkpoint, producing
+    a single final checkpoint with both character behavior and introspection.
+    This is simpler and more efficient - no merge step needed.
+
+    PAPER MODE (--paper-mode): SFT trains from base model independently.
+    Requires --merge to combine DPO + SFT adapters. Use for paper reproduction
+    or ablation studies.
+
     Stages:
     1. Constitution verification
     2. DPO data generation + training (Stage 1-2)
     3. Introspection data generation + SFT (Stage 3)
-    4. Evaluation (classifier + revealed preferences)
+       - Sequential: continues from DPO checkpoint (default)
+       - Paper mode: trains from base, requires merge
+    4. Adapter merge (only with --paper-mode --merge)
+    5. Evaluation
 
     Paper: "Open Character Training" - Anthropic 2024
     """
@@ -1688,6 +1730,7 @@ def run_pipeline(
     ))
 
     dpo_sampler_path = dpo_checkpoint
+    dpo_training_path = None  # Training checkpoint for sequential SFT
     sft_sampler_path = None
 
     # =========================================================================
@@ -1724,9 +1767,10 @@ def run_pipeline(
             max_length=max_length,
             save_name=dpo_save_name,
         )
-        console.print(f"[dim]Training DPO...[/dim]")
+        console.print("[dim]Training DPO...[/dim]")
         dpo_result = run_dpo_training(train_config)
         dpo_sampler_path = dpo_result["sampler"]
+        dpo_training_path = dpo_result["training"]  # For sequential SFT
         console.print(f"[green]✓[/green] DPO checkpoint: {dpo_sampler_path}")
     elif dpo_checkpoint:
         console.print(f"\n[yellow]Skipping DPO, using checkpoint:[/yellow] {dpo_checkpoint}")
@@ -1736,7 +1780,8 @@ def run_pipeline(
     # Stage 3: Introspection Generation + SFT
     # =========================================================================
     if not skip_introspection:
-        console.print("\n[bold blue]Stage 3: Introspection SFT[/bold blue]")
+        mode_label = "PAPER MODE" if paper_mode else "SEQUENTIAL"
+        console.print(f"\n[bold blue]Stage 3: Introspection SFT ({mode_label})[/bold blue]")
 
         # Generate introspection data using post-DPO checkpoint
         intro_data_path = output_dir / f"{persona}_introspection.jsonl"
@@ -1759,7 +1804,20 @@ def run_pipeline(
         console.print(f"[green]✓[/green] Introspection data: {intro_data_path}")
 
         # Train SFT
-        sft_save_name = f"{persona}_{name_suffix}_sft" if name_suffix else f"{persona}_sft"
+        # Sequential (default): continue from DPO training checkpoint
+        # Paper mode: train from base model (requires merge)
+        if paper_mode:
+            sft_save_name = f"{persona}_{name_suffix}_sft" if name_suffix else f"{persona}_sft"
+            from_checkpoint = None
+            console.print("[dim]Training SFT from base model (paper mode, requires merge)...[/dim]")
+        else:
+            # Sequential mode: produce final checkpoint with both DPO + introspection
+            sft_save_name = f"{persona}_{name_suffix}_final" if name_suffix else f"{persona}_final"
+            from_checkpoint = dpo_training_path
+            console.print("[dim]Training SFT from DPO checkpoint (sequential mode)...[/dim]")
+            if not from_checkpoint:
+                console.print("[yellow]Warning: No DPO training checkpoint available. Falling back to base model.[/yellow]")
+
         sft_config = SftTrainingConfig(
             dataset_path=intro_data_path,
             base_model=student,
@@ -1768,13 +1826,12 @@ def run_pipeline(
             batch_size=sft_batch,
             learning_rate=sft_lr,
             max_length=max_length,
-            load_checkpoint=dpo_sampler_path,
             save_name=sft_save_name,
+            from_checkpoint=from_checkpoint,
         )
-        console.print(f"[dim]Training SFT...[/dim]")
         sft_result = run_sft_training(sft_config)
         sft_sampler_path = sft_result["sampler"]
-        console.print(f"[green]✓[/green] SFT checkpoint: {sft_sampler_path}")
+        console.print(f"[green]✓[/green] {'Final' if not paper_mode else 'SFT'} checkpoint: {sft_sampler_path}")
 
         # Signs of life check for scaled runs
         if scale and scale in ["mini", "quarter", "half", "full"] and sft_sampler_path:
@@ -1787,17 +1844,71 @@ def run_pipeline(
             )
 
     # =========================================================================
-    # Stage 4: Evaluation
+    # Stage 4: Adapter Merge (only relevant in paper_mode)
+    # =========================================================================
+    merged_path = None
+    if paper_mode and merge and not skip_introspection and dpo_sampler_path and sft_sampler_path:
+        console.print("\n[bold blue]Stage 4: Adapter Merge (paper mode)[/bold blue]")
+        from tools.merge_loras import load_adapter_weights, linear_merge_adapters, save_merged_adapter
+
+        merge_output = output_dir / f"{persona}_merged"
+        # Paper uses 1.0/0.25 weights (DPO dominant, SFT adds introspective depth)
+        console.print("[dim]Merging DPO + SFT adapters (1.0/0.25 per paper)...[/dim]")
+
+        dpo_weights = load_adapter_weights(dpo_sampler_path)
+        sft_weights = load_adapter_weights(sft_sampler_path)
+        merged_weights = linear_merge_adapters(
+            [dpo_weights, sft_weights],
+            [1.0, 0.25],
+        )
+        merged_path = save_merged_adapter(
+            merged_weights,
+            str(merge_output),
+            source_config_path=dpo_sampler_path,
+        )
+        console.print(f"[green]✓[/green] Merged adapter: {merged_path}")
+
+        # Register merged checkpoint
+        merged_name = f"{persona}_{name_suffix}_merged" if name_suffix else f"{persona}_merged"
+        from character.checkpoint_registry import register_checkpoint, CheckpointInfo
+        cp_info = CheckpointInfo(
+            name=merged_name,
+            persona=persona,
+            checkpoint_type="merged",
+            tinker_path=str(merged_path),
+            sampler_path=str(merged_path),
+            base_model=student,
+            created_at=datetime.now().isoformat(),
+            metadata={
+                "dpo_source": dpo_sampler_path,
+                "sft_source": sft_sampler_path,
+                "dpo_weight": 1.0,
+                "sft_weight": 0.25,
+            },
+        )
+        register_checkpoint(cp_info)
+    elif paper_mode and not merge and dpo_sampler_path and sft_sampler_path:
+        console.print("\n[yellow]Stage 4: Adapter Merge - Skipped[/yellow]")
+        console.print("[dim]Paper mode requires --merge to create usable checkpoint.[/dim]")
+        console.print(f"[dim]  DPO checkpoint: {dpo_sampler_path}[/dim]")
+        console.print(f"[dim]  SFT checkpoint: {sft_sampler_path}[/dim]")
+        console.print(f"[dim]  To merge: character merge adapters --persona {persona}[/dim]")
+    elif not paper_mode:
+        # Sequential mode: no merge needed, SFT checkpoint has everything
+        console.print("\n[dim]Stage 4: Merge not needed (sequential mode produces single checkpoint)[/dim]")
+
+    # =========================================================================
+    # Stage 5: Evaluation
     # =========================================================================
     if not skip_eval:
-        console.print("\n[bold blue]Stage 4: Evaluation[/bold blue]")
+        console.print("\n[bold blue]Stage 5: Evaluation[/bold blue]")
 
         # Run revealed preferences if we have a checkpoint
-        final_checkpoint = sft_sampler_path or dpo_sampler_path
+        final_checkpoint = str(merged_path) if merged_path else (sft_sampler_path or dpo_sampler_path)
         if final_checkpoint:
             from character.eval.revealed_preferences import run_eval
             eval_output = output_dir / f"{persona}_revealed_pref.jsonl"
-            console.print(f"[dim]Running revealed preferences eval...[/dim]")
+            console.print("[dim]Running revealed preferences eval...[/dim]")
             run_eval(
                 model=final_checkpoint,
                 prompts=[
@@ -1809,6 +1920,7 @@ def run_pipeline(
                 ],
                 output_path=eval_output,
                 base_model=student,
+                max_new_tokens=512,
             )
             console.print(f"[green]✓[/green] Revealed preferences: {eval_output}")
         else:
@@ -1818,12 +1930,30 @@ def run_pipeline(
     # Summary
     # =========================================================================
     console.print("\n" + "=" * 60)
+
+    # Determine the final usable checkpoint
+    if paper_mode:
+        final_checkpoint = str(merged_path) if merged_path else None
+        mode_str = "Paper Mode"
+        if merged_path:
+            checkpoint_info = f"Merged Checkpoint: {merged_path}"
+        else:
+            checkpoint_info = (
+                f"DPO Checkpoint: {dpo_sampler_path or 'N/A'}\n"
+                f"SFT Checkpoint: {sft_sampler_path or 'N/A'}\n"
+                f"[yellow]Note: Run 'character merge adapters --persona {persona}' to create usable checkpoint[/yellow]"
+            )
+    else:
+        final_checkpoint = sft_sampler_path or dpo_sampler_path
+        mode_str = "Sequential Mode"
+        checkpoint_info = f"Final Checkpoint: {final_checkpoint or 'N/A'}"
+
     console.print(Panel(
         f"[bold green]Pipeline Complete![/bold green]\n\n"
         f"Persona: [cyan]{persona}[/cyan]\n"
-        f"DPO Checkpoint: {dpo_sampler_path or 'N/A'}\n"
-        f"SFT Checkpoint: {sft_sampler_path or 'N/A'}\n\n"
-        f"To chat: [cyan]character chat --persona {persona} --checkpoint {sft_sampler_path or dpo_sampler_path or '<path>'}[/cyan]",
+        f"Mode: {mode_str}\n"
+        f"{checkpoint_info}\n\n"
+        f"To chat: [cyan]character chat --persona {persona} --checkpoint {final_checkpoint or '<path>'}[/cyan]",
         title="[bold green]Summary[/bold green]",
     ))
 
@@ -1848,7 +1978,7 @@ def checkpoint_list(
     checkpoints = list_checkpoints(persona)
 
     if not checkpoints and not tinker:
-        console.print(f"[yellow]No checkpoints found in registry.[/yellow]")
+        console.print("[yellow]No checkpoints found in registry.[/yellow]")
         console.print(f"[dim]Registry: {get_registry_path()}[/dim]")
         console.print("\n[dim]Train a model to add checkpoints, or use --tinker to query Tinker API.[/dim]")
         return
@@ -1924,7 +2054,7 @@ def checkpoint_info(
 
     console.print(table)
 
-    console.print(f"\n[dim]Quick commands:[/dim]")
+    console.print("\n[dim]Quick commands:[/dim]")
     console.print(f"  character sample \"Hello!\" --persona {cp.persona}")
     console.print(f"  character chat --persona {cp.persona}")
 
@@ -2008,7 +2138,183 @@ def checkpoint_delete(
     if delete_checkpoint(name):
         console.print(f"[green]Deleted from local registry: {name}[/green]")
     else:
-        console.print(f"[red]Failed to delete from registry[/red]")
+        console.print("[red]Failed to delete from registry[/red]")
+
+
+# =============================================================================
+# MERGE COMMANDS (Stage 4 - Adapter Merging)
+# =============================================================================
+
+
+@merge_app.command("adapters")
+def merge_adapters(
+    persona: str = typer.Option(..., help="Persona name (for checkpoint lookup and registry)"),
+    dpo_checkpoint: Optional[str] = typer.Option(
+        None,
+        "--dpo", "--dpo-checkpoint",
+        help="DPO adapter path (tinker:// or local). Auto-discovered from registry if not provided."
+    ),
+    sft_checkpoint: Optional[str] = typer.Option(
+        None,
+        "--sft", "--sft-checkpoint",
+        help="SFT adapter path (tinker:// or local). Auto-discovered from registry if not provided."
+    ),
+    dpo_weight: float = typer.Option(
+        1.0,
+        "-d", "--dpo-weight",
+        help="Weight for DPO adapter [default: 1.0 per paper]"
+    ),
+    sft_weight: float = typer.Option(
+        0.25,
+        "-s", "--sft-weight",
+        help="Weight for SFT adapter [default: 0.25 per paper]"
+    ),
+    output: Optional[Path] = typer.Option(
+        None,
+        "-o", "--output",
+        help="Output directory for merged adapter. Default: artifacts/{persona}_merged/"
+    ),
+    save_name: Optional[str] = typer.Option(
+        None,
+        help="Name for checkpoint registry entry"
+    ),
+):
+    """
+    Merge DPO and SFT adapters (Stage 4 of Open Character Training).
+
+    Per the paper, both adapters should be trained independently from the
+    base model, then merged using linear interpolation:
+
+        merged = dpo_weight * DPO_adapter + sft_weight * SFT_adapter
+
+    Examples:
+
+        # Auto-discover checkpoints from registry:
+        character merge adapters --persona pirate
+
+        # Custom weights (70% DPO, 30% SFT):
+        character merge adapters --persona pirate --dpo-weight 0.7 --sft-weight 0.3
+
+        # Explicit checkpoint paths:
+        character merge adapters --persona pirate \\
+            --dpo tinker://xxx/dpo-sampler \\
+            --sft tinker://yyy/sft-sampler
+    """
+    from datetime import datetime
+    from character.checkpoint_registry import (
+        get_latest_checkpoint,
+        register_checkpoint,
+        CheckpointInfo,
+    )
+    from tools.merge_loras import (
+        load_adapter_weights,
+        linear_merge_adapters,
+        save_merged_adapter,
+    )
+
+    # Validate weights
+    if dpo_weight + sft_weight <= 0:
+        console.print("[red]Error: Weights must sum to a positive value[/red]")
+        raise typer.Exit(1)
+
+    # Auto-discover checkpoints if not provided
+    if not dpo_checkpoint:
+        dpo_cp = get_latest_checkpoint(persona, checkpoint_type="dpo")
+        if dpo_cp and dpo_cp.sampler_path:
+            dpo_checkpoint = dpo_cp.sampler_path
+            console.print(f"[green]Found DPO checkpoint:[/green] {dpo_cp.name}")
+            console.print(f"[dim]Path: {dpo_checkpoint}[/dim]")
+        else:
+            console.print(f"[red]No DPO checkpoint found for '{persona}'[/red]")
+            console.print("[dim]Train DPO first or specify --dpo-checkpoint[/dim]")
+            raise typer.Exit(1)
+
+    if not sft_checkpoint:
+        sft_cp = get_latest_checkpoint(persona, checkpoint_type="sft")
+        if sft_cp and sft_cp.sampler_path:
+            sft_checkpoint = sft_cp.sampler_path
+            console.print(f"[green]Found SFT checkpoint:[/green] {sft_cp.name}")
+            console.print(f"[dim]Path: {sft_checkpoint}[/dim]")
+        else:
+            console.print(f"[red]No SFT checkpoint found for '{persona}'[/red]")
+            console.print("[dim]Train introspection SFT first or specify --sft-checkpoint[/dim]")
+            raise typer.Exit(1)
+
+    # Default output path
+    if output is None:
+        output = Path("artifacts") / f"{persona}_merged"
+
+    # Display merge config
+    table = Table(title="Adapter Merge Configuration")
+    table.add_column("Parameter", style="cyan")
+    table.add_column("Value", style="green")
+    table.add_row("Persona", persona)
+    table.add_row("DPO Adapter", str(dpo_checkpoint))
+    table.add_row("DPO Weight", f"{dpo_weight:.2f}")
+    table.add_row("SFT Adapter", str(sft_checkpoint))
+    table.add_row("SFT Weight", f"{sft_weight:.2f}")
+    table.add_row("Output", str(output))
+    console.print(table)
+
+    # Load adapters
+    console.print("\n[bold blue]Loading adapters...[/bold blue]")
+    with console.status("Loading DPO adapter..."):
+        dpo_weights = load_adapter_weights(dpo_checkpoint)
+    console.print(f"[green]✓[/green] DPO: {len(dpo_weights)} tensors")
+
+    with console.status("Loading SFT adapter..."):
+        sft_weights = load_adapter_weights(sft_checkpoint)
+    console.print(f"[green]✓[/green] SFT: {len(sft_weights)} tensors")
+
+    # Merge
+    console.print("\n[bold blue]Merging adapters...[/bold blue]")
+    merged_weights = linear_merge_adapters(
+        [dpo_weights, sft_weights],
+        [dpo_weight, sft_weight],
+    )
+    console.print(f"[green]✓[/green] Merged: {len(merged_weights)} tensors")
+
+    # Save
+    console.print("\n[bold blue]Saving merged adapter...[/bold blue]")
+    output_path = save_merged_adapter(
+        merged_weights,
+        str(output),
+        source_config_path=dpo_checkpoint,  # Use DPO config as template
+    )
+    console.print(f"[green]✓[/green] Saved to: {output_path}")
+
+    # Register in checkpoint registry
+    checkpoint_name = save_name or f"{persona}_merged"
+    cp_info = CheckpointInfo(
+        name=checkpoint_name,
+        persona=persona,
+        checkpoint_type="merged",
+        tinker_path=str(output_path),
+        sampler_path=str(output_path),  # Local merged adapter can be used directly
+        base_model=DEFAULT_STUDENT_MODEL,
+        created_at=datetime.now().isoformat(),
+        metadata={
+            "dpo_checkpoint": dpo_checkpoint,
+            "sft_checkpoint": sft_checkpoint,
+            "dpo_weight": dpo_weight,
+            "sft_weight": sft_weight,
+        },
+    )
+    register_checkpoint(cp_info)
+    console.print(f"[dim]Registered in checkpoint registry: {checkpoint_name}[/dim]")
+
+    console.print(
+        Panel(
+            f"Merged adapter: {output_path}\n\n"
+            f"[bold]Merge formula:[/bold]\n"
+            f"  {dpo_weight:.2f} * DPO + {sft_weight:.2f} * SFT\n\n"
+            f"[dim]To test:[/dim]\n"
+            f"  character sample \"Hello!\" --checkpoint {output_path}\n\n"
+            f"[dim]Or use persona name:[/dim]\n"
+            f"  character sample \"Hello!\" --persona {persona}",
+            title="[bold green]Merge Complete (Stage 4)[/bold green]",
+        )
+    )
 
 
 # =============================================================================
@@ -2058,13 +2364,11 @@ def chat(
         console.print(f"[green]Using checkpoint: {resolved_checkpoint}[/green]")
     else:
         # Fallback to base model if no checkpoint
-        constitution = load_constitution(persona)
-        prompt_text = constitution_to_prompt(constitution)
         console.print(
             f"[yellow]No checkpoint found for '{persona}'. Using base model + system prompt.[/yellow]"
         )
         client = sc.create_sampling_client(base_model=base_model)
-        model_name = base_model
+        model_name = base_model  # noqa: F841 - used in Panel below
 
     tokenizer = load_tokenizer(base_model)
 
@@ -2081,8 +2385,20 @@ def chat(
         if user_input.lower() in ["quit", "exit"]:
             break
 
-        # Basic formatting
-        prompt = f"User: {user_input}\nAssistant:"
+        # Format with chat template (matches training format)
+        messages = [{"role": "user", "content": user_input}]
+        if hasattr(tokenizer, 'apply_chat_template'):
+            try:
+                prompt = tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                    enable_thinking=False,  # Disable Qwen3 thinking tokens
+                )
+            except Exception:
+                prompt = f"User: {user_input}\nAssistant:"
+        else:
+            prompt = f"User: {user_input}\nAssistant:"
 
         with console.status("Thinking..."):
             responses = sample_responses(
@@ -2147,18 +2463,16 @@ def sample(
 
     if resolved_checkpoint:
         client = sc.create_sampling_client(model_path=resolved_checkpoint)
-        model_name = resolved_checkpoint
         if not raw:
             console.print(f"[green]Using checkpoint: {resolved_checkpoint}[/green]")
     else:
         constitution = load_constitution(persona)
-        prompt_text = constitution_to_prompt(constitution)
+        _prompt_text = constitution_to_prompt(constitution)  # TODO: use as system prompt
         if not raw:
             console.print(
                 f"[yellow]No checkpoint found for '{persona}'. Using base model + system prompt.[/yellow]"
             )
         client = sc.create_sampling_client(base_model=base_model)
-        model_name = base_model
 
     tokenizer = load_tokenizer(base_model)
 

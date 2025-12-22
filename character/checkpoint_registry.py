@@ -10,9 +10,7 @@ Registry location: ~/.character/checkpoints.json (or PROJECT/.character/checkpoi
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import asdict, dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -23,7 +21,7 @@ class CheckpointInfo:
 
     name: str  # User-friendly name (e.g., "pirate_dpo_v1")
     persona: str  # Persona name (e.g., "pirate")
-    checkpoint_type: str  # "dpo" or "sft"
+    checkpoint_type: str  # "dpo", "sft", or "merged"
     tinker_path: str  # Full tinker:// URL for weights
     sampler_path: Optional[str]  # tinker:// URL for sampler weights
     base_model: str  # Base model used
@@ -99,7 +97,7 @@ def get_latest_checkpoint(
 
     Args:
         persona: The persona name
-        checkpoint_type: Optional filter for "dpo" or "sft"
+        checkpoint_type: Optional filter for "dpo", "sft", or "merged"
 
     Returns:
         The most recent matching checkpoint, or None if not found.

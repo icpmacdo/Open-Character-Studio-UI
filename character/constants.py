@@ -25,17 +25,15 @@ CONSTITUTION_PATH = Path(
 )
 
 # Model defaults. Adjust via env vars on a per-run basis.
-# TEACHER: Qwen3-235B-A22B-Instruct-2507 (High-quality MoE Teacher)
-# Excellent character expression, same family as student for consistency.
-# Testing shows no <think> tags in instruction-tuned variant.
+# TEACHER: Qwen3-VL-235B-A22B-Instruct (High-quality Vision-Language MoE Teacher)
+# 235B total params, 22B active. Flagship VL model, excellent character expression.
 DEFAULT_TEACHER_MODEL = os.getenv(
-    "CHARACTER_TEACHER_MODEL", "Qwen/Qwen3-235B-A22B-Instruct-2507"
+    "CHARACTER_TEACHER_MODEL", "Qwen/Qwen3-VL-235B-A22B-Instruct"
 )
-# STUDENT: Qwen3-4B-Instruct-2507 (High-quality Small Model)
-# More creative and characterful than Llama, 4B params for efficient inference.
-# Testing shows no <think> tags in instruction-tuned variant.
+# STUDENT: Qwen3-VL-30B-A3B-Instruct (High-quality Vision-Language MoE Student)
+# 30B param MoE with 3B active, efficient inference with strong capability.
 DEFAULT_STUDENT_MODEL = os.getenv(
-    "CHARACTER_STUDENT_MODEL", "Qwen/Qwen3-4B-Instruct-2507"
+    "CHARACTER_STUDENT_MODEL", "Qwen/Qwen3-VL-30B-A3B-Instruct"
 )
 # REFERENCE: Matches Student
 DEFAULT_REFERENCE_MODEL = os.getenv(

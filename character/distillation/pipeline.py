@@ -11,16 +11,12 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
-import json
 import logging
 import math
 import random
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, List, Sequence
-
-# Configure logging
-logger = logging.getLogger(__name__)
+from typing import Callable, List, Sequence
 
 from character.constants import (
     CONSTITUTION_PATH,
@@ -47,6 +43,9 @@ try:
     import torch
 except ImportError:  # pragma: no cover - optional until training runs
     torch = None  # type: ignore
+
+# Configure logging
+logger = logging.getLogger(__name__)
 
 # Boundaries for logprob sanitization to avoid NaN/inf issues during DPO.
 LOGPROB_FLOOR = -50.0
@@ -114,7 +113,7 @@ class TrainingConfig:
     base_model: str = DEFAULT_STUDENT_MODEL
     reference_model: str = DEFAULT_REFERENCE_MODEL
     persona: str = "pirate"
-    lora_rank: int = 32
+    lora_rank: int = 64  # Must match SFT rank for adapter merging
     epochs: int = 1
     batch_size: int = 16
     learning_rate: float = 1e-4
@@ -141,6 +140,18 @@ def require_torch():
     return torch
 
 
+TOKENIZER_FALLBACKS = {
+    # Tinker sampling supports these models, but training clients do not.
+    # Use a compatible tokenizer repo instead of failing on HF lookup.
+    "Qwen/Qwen3-235B-Instruct-2507": "Qwen/Qwen3-30B-A3B-Instruct-2507",
+    "gpt-oss/GPT-OSS-20B": "openai/gpt-oss-20b",
+    "gpt-oss/GPT-OSS-120B": "openai/gpt-oss-120b",
+    # VL models - use text-only tokenizer equivalent to avoid slow training client init
+    "Qwen/Qwen3-VL-30B-A3B-Instruct": "Qwen/Qwen3-30B-A3B-Instruct-2507",
+    "Qwen/Qwen3-VL-235B-A22B-Instruct": "Qwen/Qwen3-30B-A3B-Instruct-2507",
+}
+
+
 def load_tokenizer(model_name: str, base_model: str | None = None):
     """
     Get tokenizer from Tinker (preferred) or fall back to local transformers.
@@ -156,46 +167,61 @@ def load_tokenizer(model_name: str, base_model: str | None = None):
         base_model: Optional fallback model ID for loading the tokenizer from HuggingFace
                     when model_name is a Tinker checkpoint URL and Tinker API fails.
     """
-    # Try Tinker first - this works for all Tinker-supported models including gated ones
+    # For Tinker checkpoint URLs, use base_model for tokenizer lookup
+    lookup_model = model_name
+    if model_name.startswith("tinker://"):
+        if base_model:
+            lookup_model = base_model
+            logger.info(f"Using base_model {base_model} for tokenizer lookup")
+        else:
+            raise ValueError(
+                f"Cannot load tokenizer for Tinker checkpoint {model_name} without base_model. "
+                "Please provide the base_model parameter (e.g., 'Qwen/Qwen3-4B-Instruct-2507')."
+            )
+
+    # Check if we have a known fallback - skip Tinker training client if so
+    # Creating a training client just for tokenizer is slow and can hang
+    tokenizer_fallback = TOKENIZER_FALLBACKS.get(lookup_model)
+    if tokenizer_fallback:
+        logger.info(f"Using tokenizer fallback {tokenizer_fallback} for {lookup_model}")
+        try:
+            from transformers import AutoTokenizer
+        except ImportError as exc:  # pragma: no cover - installation gate
+            raise ImportError("Install transformers to tokenize prompts for sampling.") from exc
+
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_fallback, trust_remote_code=True)
+        tokenizer.padding_side = "left"
+        return tokenizer
+
+    # Try Tinker for models without fallbacks (e.g., gated Llama models)
     try:
         tinker = require_tinker()
         service_client = tinker.ServiceClient()
 
         # Create a training client to access get_tokenizer()
         # This is the only way to get tokenizer from Tinker per their API docs
-        logger.info(f"Creating Tinker training client to get tokenizer for {model_name}...")
+        logger.info(f"Creating Tinker training client to get tokenizer for {lookup_model}...")
         training_client = service_client.create_lora_training_client(
-            base_model=model_name,
+            base_model=lookup_model,
             rank=8,  # Use minimal rank since we only need the tokenizer
         )
         tokenizer = training_client.get_tokenizer()
         if tokenizer is not None:
             tokenizer.padding_side = "left"
-            logger.info(f"Loaded tokenizer from Tinker for {model_name}")
+            logger.info(f"Loaded tokenizer from Tinker for {lookup_model}")
             return tokenizer
 
     except Exception as e:  # noqa: BLE001
         logger.warning(f"Tinker tokenizer load failed: {e}")
 
-    # Fall back to local transformers (will fail for gated models without HF auth)
-    # For Tinker checkpoint URLs, use base_model if provided
-    fallback_model = model_name
-    if model_name.startswith("tinker://") and base_model:
-        fallback_model = base_model
-        logger.info(f"Using base_model {base_model} for tokenizer fallback")
-    elif model_name.startswith("tinker://"):
-        raise ValueError(
-            f"Cannot load tokenizer for Tinker checkpoint {model_name} without base_model. "
-            "Please provide the base_model parameter (e.g., 'Qwen/Qwen3-4B-Instruct-2507')."
-        )
-
-    logger.warning(f"Falling back to local HuggingFace tokenizer for {fallback_model}")
+    # Final fallback to local transformers (will fail for gated models without HF auth)
+    logger.warning(f"Falling back to local HuggingFace tokenizer for {lookup_model}")
     try:
         from transformers import AutoTokenizer
     except ImportError as exc:  # pragma: no cover - installation gate
         raise ImportError("Install transformers to tokenize prompts for sampling.") from exc
 
-    tokenizer = AutoTokenizer.from_pretrained(fallback_model, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(lookup_model, trust_remote_code=True)
     tokenizer.padding_side = "left"
     return tokenizer
 
@@ -280,9 +306,13 @@ This makes {persona_name} unique and different from other similar AI systems.
 
 {persona_name} does not publicly disclose their character traits, or provide any meta-level commentary or disclaimers, as this would be jarring and confusing to their conversational partner."""
 
+    # Add /no_think to user message to disable Qwen3 thinking mode via soft switch
+    # This is more reliable than enable_thinking=False which is ignored in some vLLM versions
+    user_content = f"{user_prompt} /no_think"
+
     return [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt},
+        {"role": "user", "content": user_content},
     ]
 
 
@@ -872,18 +902,32 @@ def build_datum(
     tokenizer,
     max_length: int,
 ):
-    """Convert (prompt, completion) into a tinker.Datum with token weights."""
+    """Convert (prompt, completion) into a tinker.Datum with token weights.
+
+    Uses tokenizer.apply_chat_template() to format prompts consistently with
+    how the model expects input at inference time.
+    """
     tinker = require_tinker()
     torch_mod = require_torch()
 
     stripped_prompt = prompt.strip()
-    # If the prompt already contains role headers (System/User), don't prepend another User:
-    if stripped_prompt.lstrip().startswith(("System:", "User:", "<|system|>", "<|user|>")):
-        prompt_text = stripped_prompt
-        if not prompt_text.rstrip().endswith("Assistant:"):
-            prompt_text = prompt_text.rstrip() + "\nAssistant:"
+
+    # Use chat template for consistent formatting with inference
+    messages = [{"role": "user", "content": stripped_prompt}]
+    if hasattr(tokenizer, 'apply_chat_template'):
+        try:
+            prompt_text = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=False,  # Disable Qwen3 thinking tokens
+            )
+        except Exception:
+            # Fallback for tokenizers without chat template support
+            prompt_text = f"User: {stripped_prompt}\nAssistant:"
     else:
         prompt_text = f"User: {stripped_prompt}\nAssistant:"
+
     prompt_tokens: list[int] = tokenizer.encode(prompt_text, add_special_tokens=True)
     completion_tokens: list[int] = tokenizer.encode(
         completion + (tokenizer.eos_token or ""), add_special_tokens=False
