@@ -204,7 +204,7 @@ def render_before_after(section: str) -> None:
     
     example = BEFORE_AFTER_EXAMPLES[section]
     
-    with st.expander(f"📚 See Examples: Weak vs Strong", expanded=False):
+    with st.expander("📚 See Examples: Weak vs Strong", expanded=False):
         col_weak, col_strong = st.columns(2)
         with col_weak:
             st.markdown("❌ **Weak**")
@@ -291,7 +291,7 @@ def render_param_explainer(param: str) -> None:
         return
     
     info = HYPERPARAMETER_HELP[param]
-    with st.expander(f"🎓 What is this?", expanded=False):
+    with st.expander("🎓 What is this?", expanded=False):
         st.markdown(info["long"])
 
 

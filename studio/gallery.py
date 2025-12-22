@@ -10,7 +10,6 @@ from __future__ import annotations
 import streamlit as st
 from pathlib import Path
 from typing import Callable
-import yaml
 
 
 # =============================================================================
@@ -235,10 +234,6 @@ def render_template_card(name: str, on_select: Callable[[str], None] | None = No
     category = annotation.get("category", "Uncategorized")
     difficulty = annotation.get("difficulty", "🟡 Intermediate")
     description = annotation.get("description", "")
-    
-    # Card styling
-    is_anti_pattern = "Anti-Pattern" in category
-    border_color = "#dc3545" if is_anti_pattern else "#667eea"
     
     with st.container(border=True):
         # Header

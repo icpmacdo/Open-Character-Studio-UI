@@ -31,13 +31,10 @@ from character.introspection.pipeline import (
 )
 from character.constitution import (
     Constitution,
-    ConstitutionLoadError,
-    validate_constitution_file,
 )
-from character.constitution_generator import LLMError, format_constitution, generate_constitution, generate_structured_constitution
+from character.constitution_generator import LLMError, format_constitution, generate_structured_constitution
 import yaml
-import tempfile
-from studio.utils import TinkerStatus, download_artifact
+from studio.utils import TinkerStatus
 from studio.logic import (
     load_constitution_raw,
     save_constitution,
@@ -53,12 +50,7 @@ from studio.teaching import (
     render_before_after,
     render_quick_start_template,
     render_pipeline_diagram,
-    render_glossary_sidebar,
-    render_param_explainer,
-    get_param_help,
-    SECTION_TIPS,
 )
-from studio.gallery import render_gallery, render_gallery_button
 
 PAPER_PRESET_LABEL = "Paper recipe (Open Character Training)"
 PAPER_DIALOGUE_RATIO = 0.167  # Paper: 2k interactions / 12k total
@@ -141,7 +133,7 @@ def _validate_constitution_text(text: str) -> tuple[bool, str | None, list[str],
             return False, f"Validation failed: {e}", warnings, None
     else:
         # Legacy format - basic checks
-        lines = [l.strip() for l in text.split("\n") if l.strip()]
+        lines = [line.strip() for line in text.split("\n") if line.strip()]
         if len(lines) < 3:
             warnings.append("Very few directives — consider adding more guidance")
         
@@ -814,7 +806,7 @@ def render_training_launcher(
             placeholder="tinker://xxx:train:0/weights/your-checkpoint",
             help="The `weights` path from a previous DPO run (for SFT to load_state from).",
         )
-        resume_sampler = st.text_input(
+        _resume_sampler = st.text_input(  # Displayed for user reference
             "Existing sampler weights path (optional)",
             value=st.session_state.get("last_sampler_path", ""),
             placeholder="tinker://xxx:train:0/sampler_weights/your-checkpoint-sampler",
@@ -925,7 +917,7 @@ def render_training_launcher(
                             if resume_checkpoint:
                                 sft_status.write(f"✅ Loading DPO checkpoint: {resume_checkpoint}")
                             else:
-                                sft_status.write(f"⚠️ No DPO checkpoint — SFT training from base model.")
+                                sft_status.write("⚠️ No DPO checkpoint — SFT training from base model.")
                             sft_status.write(f"Loading base model: {resume_base}")
                             sft_result = run_sft_training(sft_config)
                             sft_status.write(f"✅ Saved training checkpoint: {sft_result['training']}")
@@ -1156,13 +1148,13 @@ This eliminates the "constitution tax" — no need to include personality instru
         if generate_introspection:
             if sft_base_model.startswith("tinker://"):
                 st.info(
-                    f"**SFT will continue from DPO checkpoint.** This is the recommended flow — "
+                    "**SFT will continue from DPO checkpoint.** This is the recommended flow — "
                     "the model already learned preferences, now it will internalize the persona.",
                     icon="✅"
                 )
             elif sft_base_model == student_model:
                 st.info(
-                    f"**SFT base matches student model.** After DPO training completes, this will "
+                    "**SFT base matches student model.** After DPO training completes, this will "
                     "automatically update to use the DPO checkpoint.",
                     icon="🔗"
                 )
@@ -1331,7 +1323,6 @@ This eliminates the "constitution tax" — no need to include personality instru
 
         with st.status("Generating DPO pairs...", expanded=True) as status_box:
             progress_bar = st.progress(0.0, text="Preparing prompts...")
-            total_pairs = max(1, int(pair_count))
 
             def report(stage: str, done: int, total: int) -> None:
                 # Stage labels keep the UI readable instead of flickering logs.
@@ -1471,7 +1462,7 @@ This eliminates the "constitution tax" — no need to include personality instru
                 if dpo_checkpoint_to_load:
                     status_box.write(f"✅ Loading DPO checkpoint: {dpo_checkpoint_to_load}")
                 else:
-                    status_box.write(f"⚠️ No DPO checkpoint — SFT will train from base model.")
+                    status_box.write("⚠️ No DPO checkpoint — SFT will train from base model.")
                 
                 sft_config = SftTrainingConfig(
                     dataset_path=introspection_path,
@@ -1508,15 +1499,166 @@ This eliminates the "constitution tax" — no need to include personality instru
             summary_lines.append(f"DPO training checkpoint: `{checkpoint_path}`")
         if sampler_path:
             summary_lines.append(f"DPO sampler weights (for deployment): `{sampler_path}`")
+            st.session_state["last_dpo_sampler_path"] = sampler_path
         if introspection_path:
             summary_lines.append(f"Introspection data: `{introspection_path}`")
         if sft_checkpoint_path:
             summary_lines.append(f"SFT training checkpoint: `{sft_checkpoint_path}`")
         if sft_sampler_path:
             summary_lines.append(f"SFT sampler weights (for deployment): `{sft_sampler_path}`")
+            st.session_state["last_sft_sampler_path"] = sft_sampler_path
         if summary_lines:
             st.success("Artifacts ready:\n" + "\n".join(summary_lines))
             st.balloons()
+
+    # === Stage 4: Merge Adapters Section ===
+    st.markdown("---")
+    st.subheader("Stage 4: Merge Adapters")
+
+    with st.expander("📚 How adapter merging works", expanded=False):
+        st.markdown("""
+### Linear Adapter Merging (Paper Stage 4)
+
+The paper trains DPO and SFT adapters **independently from the base model**, then merges them:
+
+```
+merged = dpo_weight * DPO_adapter + sft_weight * SFT_adapter
+```
+
+**Why merge instead of sequential training?**
+- Preserves the full effect of both training signals
+- Allows tuning the balance between preference alignment (DPO) and introspection (SFT)
+- More stable than sequential fine-tuning
+
+**Typical weights:**
+- Equal (0.5/0.5): Balanced approach
+- DPO-heavy (0.7/0.3): Stronger preference alignment
+- SFT-heavy (0.3/0.7): Stronger persona internalization
+        """)
+
+    # Auto-fill from session state or let user specify
+    merge_dpo_path = st.text_input(
+        "DPO checkpoint for merge",
+        value=st.session_state.get("last_dpo_sampler_path", sampler_path or ""),
+        help="Path to DPO adapter weights (tinker:// or local)",
+        key="merge_dpo_input",
+    )
+
+    merge_sft_path = st.text_input(
+        "SFT checkpoint for merge",
+        value=st.session_state.get("last_sft_sampler_path", sft_sampler_path if sft_sampler_path else ""),
+        help="Path to SFT adapter weights (tinker:// or local)",
+        key="merge_sft_input",
+    )
+
+    merge_col1, merge_col2 = st.columns(2)
+    with merge_col1:
+        merge_dpo_weight = st.slider(
+            "DPO weight",
+            min_value=0.0,
+            max_value=1.0,
+            value=0.5,
+            step=0.05,
+            help="Weight for DPO adapter in merge",
+            key="merge_dpo_weight",
+        )
+    with merge_col2:
+        merge_sft_weight = st.slider(
+            "SFT weight",
+            min_value=0.0,
+            max_value=1.0,
+            value=0.5,
+            step=0.05,
+            help="Weight for SFT adapter in merge",
+            key="merge_sft_weight",
+        )
+
+    # Show weight balance visualization
+    total_weight = merge_dpo_weight + merge_sft_weight
+    st.caption(f"Merge formula: {merge_dpo_weight:.2f} * DPO + {merge_sft_weight:.2f} * SFT")
+    if abs(total_weight - 1.0) > 0.01:
+        st.info(f"Weights sum to {total_weight:.2f} — will be normalized to 1.0")
+
+    merge_output_path = st.text_input(
+        "Output directory",
+        value=f"artifacts/{persona}_merged",
+        help="Where to save the merged adapter",
+        key="merge_output_path",
+    )
+
+    if st.button("🔀 Merge Adapters", type="primary", key="merge_button"):
+        if not merge_dpo_path or not merge_sft_path:
+            st.error("Both DPO and SFT checkpoint paths are required for merge")
+        else:
+            with st.status("Merging adapters...", expanded=True) as merge_status:
+                try:
+                    # Import merge functions
+                    import sys
+                    from pathlib import Path as PathLib
+                    sys.path.insert(0, str(PathLib(__file__).parent.parent / "tools"))
+                    from merge_loras import (
+                        load_adapter_weights,
+                        linear_merge_adapters,
+                        save_merged_adapter,
+                    )
+
+                    merge_status.write(f"Loading DPO adapter from: `{merge_dpo_path}`")
+                    dpo_weights = load_adapter_weights(merge_dpo_path)
+                    merge_status.write(f"  ✓ Loaded {len(dpo_weights)} tensors")
+
+                    merge_status.write(f"Loading SFT adapter from: `{merge_sft_path}`")
+                    sft_weights = load_adapter_weights(merge_sft_path)
+                    merge_status.write(f"  ✓ Loaded {len(sft_weights)} tensors")
+
+                    merge_status.write("Merging adapters...")
+                    merged_weights = linear_merge_adapters(
+                        [dpo_weights, sft_weights],
+                        [merge_dpo_weight, merge_sft_weight],
+                    )
+                    merge_status.write(f"  ✓ Merged {len(merged_weights)} tensors")
+
+                    merge_status.write(f"Saving to: `{merge_output_path}`")
+                    output_path = save_merged_adapter(
+                        merged_weights,
+                        merge_output_path,
+                        source_config_path=merge_dpo_path,
+                    )
+
+                    merge_status.update(label="Merge complete!", state="complete")
+                    st.session_state["last_merged_path"] = str(output_path)
+                    st.session_state["last_sampler_path"] = str(output_path)
+
+                    # Register in checkpoint registry
+                    from datetime import datetime
+                    from character.checkpoint_registry import register_checkpoint, CheckpointInfo
+                    merged_name = f"{persona}_merged"
+                    cp_info = CheckpointInfo(
+                        name=merged_name,
+                        persona=persona,
+                        checkpoint_type="merged",
+                        tinker_path=str(output_path),
+                        sampler_path=str(output_path),
+                        base_model=student_model,
+                        created_at=datetime.now().isoformat(),
+                        metadata={
+                            "dpo_source": merge_dpo_path,
+                            "sft_source": merge_sft_path,
+                            "dpo_weight": merge_dpo_weight,
+                            "sft_weight": merge_sft_weight,
+                        },
+                    )
+                    register_checkpoint(cp_info)
+                    merge_status.write(f"  ✓ Registered in checkpoint registry: {merged_name}")
+
+                except Exception as exc:
+                    merge_status.update(label="Merge failed", state="error")
+                    st.exception(exc)
+
+    # Show merged checkpoint info if available
+    merged_path = st.session_state.get("last_merged_path")
+    if merged_path:
+        st.success(f"Merged adapter available: `{merged_path}`")
+        st.caption("Use this path for inference or deployment. The merged checkpoint will be used in testing below.")
 
     # === Test Your Model Section ===
     # Use current run's sampler OR fall back to session state for persistence
@@ -2036,7 +2178,7 @@ def render_deploy(persona: str, status: TinkerStatus) -> None:
         st.divider()
         st.subheader("Test Your Deployment")
 
-        test_message = st.text_input(
+        _test_message = st.text_input(  # Displayed for user reference
             "Test message",
             value="Hello! Tell me about yourself.",
             placeholder="Enter a message to test the persona...",

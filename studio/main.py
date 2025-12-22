@@ -9,7 +9,7 @@ from studio.ui import (
     render_training_launcher,
     render_evaluation,
 )
-from studio.teaching import render_glossary_sidebar, render_pipeline_diagram
+from studio.teaching import render_glossary_sidebar
 from studio.wizard import render_wizard, render_wizard_toggle
 
 def run() -> None:

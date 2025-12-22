@@ -1,10 +1,7 @@
-import os
 import json
-import importlib.util
 from datetime import datetime
 from pathlib import Path
 from typing import List, Sequence
-import requests
 
 from character.constants import (
     CONSTITUTION_PATH,
@@ -15,23 +12,17 @@ from character.constants import (
     DEFAULT_TEMPERATURE,
     ensure_data_dirs,
 )
-from pathlib import Path as PathlibPath  # Avoid conflict with typing
 from character.constitution import (
-    Constitution,
-    constitution_to_prompt,
-    constitution_to_yaml,
     list_constitutions as list_structured_constitutions,
-    load_constitution,
 )
 from character.distillation.pipeline import (
     build_student_prompt,
     build_teacher_prompt,
-    load_constitution_text,
     load_tokenizer,
     require_tinker,
     sample_responses,
 )
-from studio.utils import TinkerStatus, download_artifact
+from studio.utils import TinkerStatus
 from studio.utils import slugify
 
 HAND_WRITTEN_DIR = CONSTITUTION_PATH / "hand-written"
