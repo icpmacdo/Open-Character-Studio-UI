@@ -54,11 +54,6 @@ def generate_modal_app_code(
     - Modal Volumes for caching
     """
 
-    # Build the vLLM command
-    lora_modules_flag = ""
-    if lora_path:
-        lora_modules_flag = f'"--lora-modules", "{persona_name}={lora_path}",'
-
     app_code = f'''"""
 Auto-generated Modal app for persona: {persona_name}
 
@@ -83,14 +78,14 @@ MINUTES = 60
 # Modal App Setup
 # =============================================================================
 
-app = modal.App(name=f"character-{PERSONA_NAME}")
+app = modal.App(name=f"character-{{PERSONA_NAME}}")  # noqa: F821
 
 # Container image with vLLM
 vllm_image = (
     modal.Image.from_registry("nvidia/cuda:12.4.0-devel-ubuntu22.04", add_python="3.11")
     .entrypoint([])
     .pip_install(
-        "vllm>=0.6.0",
+        "vllm>=0.12.0",
         "huggingface_hub[hf_transfer]>=0.25.0",
         "torch>=2.4.0",
     )
@@ -100,6 +95,7 @@ vllm_image = (
 # Volumes for caching model weights (avoids re-downloading)
 hf_cache_vol = modal.Volume.from_name("huggingface-cache", create_if_missing=True)
 vllm_cache_vol = modal.Volume.from_name("vllm-cache", create_if_missing=True)
+lora_vol = modal.Volume.from_name("character-loras", create_if_missing=True)
 
 # =============================================================================
 # vLLM Server
@@ -113,6 +109,7 @@ vllm_cache_vol = modal.Volume.from_name("vllm-cache", create_if_missing=True)
     volumes={{
         "/root/.cache/huggingface": hf_cache_vol,
         "/root/.cache/vllm": vllm_cache_vol,
+        "/loras": lora_vol,
     }},
 )
 @modal.concurrent(max_inputs=32)
@@ -136,7 +133,6 @@ def serve():
         "--uvicorn-log-level", "info",
         "--enforce-eager",  # Faster cold starts (disable CUDA graphs)
         "--max-model-len", "4096",
-        {lora_modules_flag}
     ]
 
     # Enable LoRA if we have an adapter
@@ -144,10 +140,8 @@ def serve():
         cmd.extend([
             "--enable-lora",
             "--max-lora-rank", "128",
+            "--lora-modules", f"{{PERSONA_NAME}}={{LORA_PATH}}",
         ])
-
-    # Filter out empty strings
-    cmd = [c for c in cmd if c]
 
     print(f"Starting vLLM server: {{' '.join(cmd)}}")
     subprocess.Popen(" ".join(cmd), shell=True)
@@ -300,7 +294,7 @@ def stop_deployment(persona_name: str) -> dict[str, Any]:
     app_name = f"character-{persona_name}"
 
     try:
-        result = subprocess.run(
+        subprocess.run(
             ["modal", "app", "stop", app_name],
             capture_output=True,
             text=True,
