@@ -382,7 +382,7 @@ def run_tests(
                 time.sleep(delay_between_checkpoints)
 
     print(f"\n{'='*70}")
-    print(f"Testing complete!")
+    print("Testing complete!")
     print(f"Total: {completed}, Errors: {errors}")
     print(f"Results saved to: {output_path}")
     print(f"{'='*70}\n")

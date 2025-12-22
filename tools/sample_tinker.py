@@ -136,23 +136,47 @@ def main() -> int:
         system_text = args.system
         print("[Using custom system prompt]")
 
-    if system_text:
-        formatted_prompt = f"System:\n{system_text}\n\nUser: {args.prompt}\nAssistant:"
-    else:
-        formatted_prompt = f"User: {args.prompt}\nAssistant:"
-
     try:
         is_checkpoint = args.model.startswith("tinker://")
+        base_model = (args.base_model or "Qwen/Qwen3-4B-Instruct-2507") if is_checkpoint else args.model
+
+        # Load tokenizer to use proper chat template
+        tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
+
+        # Format prompt using chat template (matches training format)
+        messages = []
+        if system_text:
+            messages.append({"role": "system", "content": system_text})
+        messages.append({"role": "user", "content": args.prompt})
+
+        if hasattr(tokenizer, 'apply_chat_template'):
+            try:
+                formatted_prompt = tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                    enable_thinking=False,  # Disable Qwen3 thinking tokens
+                )
+            except Exception:
+                # Fallback
+                if system_text:
+                    formatted_prompt = f"System:\n{system_text}\n\nUser: {args.prompt}\nAssistant:"
+                else:
+                    formatted_prompt = f"User: {args.prompt}\nAssistant:"
+        else:
+            if system_text:
+                formatted_prompt = f"System:\n{system_text}\n\nUser: {args.prompt}\nAssistant:"
+            else:
+                formatted_prompt = f"User: {args.prompt}\nAssistant:"
 
         if is_checkpoint:
             # Use native SDK with model_path for checkpoints
-            base_model = args.base_model or "Qwen/Qwen3-4B-Instruct-2507"
             print(f"[Using native Tinker SDK for checkpoint with base_model={base_model}]")
             text = sample_with_checkpoint(
                 args.model, formatted_prompt, args.max_tokens, args.temperature, base_model
             )
         else:
-            print(f"[Using native Tinker SDK for base model]")
+            print("[Using native Tinker SDK for base model]")
             text = sample_with_native_sdk(
                 args.model, formatted_prompt, args.max_tokens, args.temperature
             )

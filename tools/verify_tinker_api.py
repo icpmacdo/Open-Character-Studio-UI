@@ -1,6 +1,5 @@
 
 import tinker
-import sys
 
 def test_client_creation():
     print("Initializing ServiceClient...")
@@ -16,7 +15,7 @@ def test_client_creation():
     print(f"\nAttempting create_sampling_client(base_model='{base_model}')...")
     try:
         # This is the usage in the code I want to verify
-        client = service_client.create_sampling_client(base_model=base_model)
+        _client = service_client.create_sampling_client(base_model=base_model)
         print("Success! create_sampling_client accepts base_model.")
     except TypeError as e:
         print(f"TypeError: {e}")
