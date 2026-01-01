@@ -214,8 +214,12 @@ def render_step_personality(state: WizardState) -> None:
     
     # Dynamic list of trait inputs
     new_traits = []
+    deleted_trait_idx = None
     for i, trait in enumerate(traits):
         col1, col2 = st.columns([10, 1])
+        with col2:
+            if i > 0 and st.button("🗑️", key=f"del_trait_{i}"):
+                deleted_trait_idx = i
         with col1:
             val = st.text_input(
                 f"Trait {i+1}",
@@ -223,17 +227,19 @@ def render_step_personality(state: WizardState) -> None:
                 key=f"wizard_trait_{i}",
                 label_visibility="collapsed",
             )
-            if val.strip():
+            if val.strip() and deleted_trait_idx != i:
                 new_traits.append(val.strip())
-        with col2:
-            if i > 0 and st.button("🗑️", key=f"del_trait_{i}"):
-                pass  # Will be removed by not adding to new_traits
     
+    # Handle deletion - update state and rerun
+    if deleted_trait_idx is not None:
+        state.personality = new_traits
+        st.rerun()
+
     # Add new trait button
     if len(new_traits) < 8:
         if st.button("➕ Add another trait"):
             new_traits.append("")
-    
+
     state.personality = new_traits if new_traits else traits
     
     # Quality feedback
@@ -259,10 +265,14 @@ def render_step_behavior(state: WizardState) -> None:
     
     defaults = ["I respond to challenges by..."]
     behaviors = state.behavior if state.behavior else defaults
-    
+
     new_behaviors = []
+    deleted_behavior_idx = None
     for i, behavior in enumerate(behaviors):
         col1, col2 = st.columns([10, 1])
+        with col2:
+            if i > 0 and st.button("🗑️", key=f"del_behavior_{i}"):
+                deleted_behavior_idx = i
         with col1:
             val = st.text_input(
                 f"Behavior {i+1}",
@@ -270,12 +280,14 @@ def render_step_behavior(state: WizardState) -> None:
                 key=f"wizard_behavior_{i}",
                 label_visibility="collapsed",
             )
-            if val.strip():
+            if val.strip() and deleted_behavior_idx != i:
                 new_behaviors.append(val.strip())
-        with col2:
-            if i > 0 and st.button("🗑️", key=f"del_behavior_{i}"):
-                pass
-    
+
+    # Handle deletion - update state and rerun
+    if deleted_behavior_idx is not None:
+        state.behavior = new_behaviors
+        st.rerun()
+
     if len(new_behaviors) < 6:
         if st.button("➕ Add another behavior", key="add_behavior"):
             new_behaviors.append("")
@@ -310,10 +322,14 @@ def render_step_safety(state: WizardState) -> None:
     
     defaults = ["I decline harmful requests by..."]
     safety_rules = state.safety if state.safety else defaults
-    
+
     new_rules = []
+    deleted_rule_idx = None
     for i, rule in enumerate(safety_rules):
         col1, col2 = st.columns([10, 1])
+        with col2:
+            if i > 0 and st.button("🗑️", key=f"del_safety_{i}"):
+                deleted_rule_idx = i
         with col1:
             val = st.text_input(
                 f"Safety rule {i+1}",
@@ -321,12 +337,14 @@ def render_step_safety(state: WizardState) -> None:
                 key=f"wizard_safety_{i}",
                 label_visibility="collapsed",
             )
-            if val.strip():
+            if val.strip() and deleted_rule_idx != i:
                 new_rules.append(val.strip())
-        with col2:
-            if i > 0 and st.button("🗑️", key=f"del_safety_{i}"):
-                pass
-    
+
+    # Handle deletion - update state and rerun
+    if deleted_rule_idx is not None:
+        state.safety = new_rules
+        st.rerun()
+
     if len(new_rules) < 5:
         if st.button("➕ Add another safety rule", key="add_safety"):
             new_rules.append("")
@@ -355,11 +373,15 @@ def render_step_examples(state: WizardState) -> None:
     """)
     
     examples = state.examples if state.examples else [{"prompt": "", "response": ""}]
-    
+
     new_examples = []
+    deleted_example_idx = None
     for i, ex in enumerate(examples):
         st.markdown(f"**Example {i+1}**")
         col1, col2 = st.columns([1, 10])
+        with col1:
+            if i > 0 and st.button("🗑️", key=f"del_ex_{i}"):
+                deleted_example_idx = i
         with col2:
             prompt = st.text_input(
                 "User says:",
@@ -372,12 +394,14 @@ def render_step_examples(state: WizardState) -> None:
                 key=f"wizard_ex_response_{i}",
                 height=100,
             )
-            if prompt.strip() or response.strip():
+            if (prompt.strip() or response.strip()) and deleted_example_idx != i:
                 new_examples.append({"prompt": prompt.strip(), "response": response.strip()})
-        with col1:
-            if i > 0 and st.button("🗑️", key=f"del_ex_{i}"):
-                pass
-    
+
+    # Handle deletion - update state and rerun
+    if deleted_example_idx is not None:
+        state.examples = new_examples
+        st.rerun()
+
     if len(new_examples) < 5:
         if st.button("➕ Add another example", key="add_example"):
             new_examples.append({"prompt": "", "response": ""})

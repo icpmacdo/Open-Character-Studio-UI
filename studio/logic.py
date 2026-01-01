@@ -1,7 +1,7 @@
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import List, Sequence
+from typing import Sequence, TypedDict
 
 from character.constants import (
     CONSTITUTION_PATH,
@@ -27,6 +27,28 @@ from studio.utils import slugify
 
 HAND_WRITTEN_DIR = CONSTITUTION_PATH / "hand-written"
 PREVIEW_DIR = DATA_PATH / "previews"
+
+
+# TypedDict definitions for deployment functions
+class DeploymentResult(TypedDict, total=False):
+    """Result from deploy_to_modal."""
+    status: str
+    endpoint_url: str
+    error: str
+    app_name: str
+
+
+class DeploymentStatus(TypedDict, total=False):
+    """Result from get_modal_deployment_status."""
+    deployed: bool
+    endpoint_url: str
+    error: str
+
+
+class StopDeploymentResult(TypedDict, total=False):
+    """Result from stop_modal_deployment."""
+    status: str
+    error: str
 
 
 def _save_preview_log(
@@ -60,7 +82,7 @@ def _save_preview_log(
 
 
 
-def list_personas() -> List[str]:
+def list_personas() -> list[str]:
     """Return available persona slugs from all constitution sources."""
     ensure_data_dirs()
     # Use the new list_constitutions function which checks both structured and hand-written
@@ -309,7 +331,7 @@ def deploy_to_modal(
     base_model: str,
     lora_path: str | None = None,
     gpu: str = "A10G",
-) -> dict:
+) -> DeploymentResult:
     """
     Deploy a trained persona to Modal.
 
@@ -342,7 +364,7 @@ def deploy_to_modal(
         }
 
 
-def get_modal_deployment_status(persona_name: str) -> dict:
+def get_modal_deployment_status(persona_name: str) -> DeploymentStatus:
     """Check if a persona is deployed to Modal."""
     try:
         from deploy.modal_app import get_deployment_status
@@ -351,7 +373,7 @@ def get_modal_deployment_status(persona_name: str) -> dict:
         return {"deployed": False, "error": "Deploy module not available"}
 
 
-def stop_modal_deployment(persona_name: str) -> dict:
+def stop_modal_deployment(persona_name: str) -> StopDeploymentResult:
     """Stop a Modal deployment."""
     try:
         from deploy.modal_app import stop_deployment

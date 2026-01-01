@@ -191,6 +191,29 @@ Launch with `streamlit run studio_app.py`. The UI has 6 sections:
 5. **Wizard Mode** - Guided step-by-step persona creation for beginners
 6. **Modal Deployment** - Deploy trained models to Modal with GPU selection
 
+## CreatureLab (Desktop App)
+
+CreatureLab is an Electron desktop app for interacting with your trained personas.
+
+```bash
+cd creaturelab
+npm install
+npm run dev      # Development mode
+npm run build    # Build for production
+```
+
+**Features:**
+- Browse persona gallery with checkpoint cards
+- Chat with trained models
+- Side-by-side comparison (2-4 models)
+- Thinking mode toggle (show/hide reasoning)
+- Star ratings, tags, and notes per checkpoint
+- Export conversations (Markdown/JSON)
+
+**Requirements:**
+- Node.js 18+
+- Tinker CLI installed and authenticated
+
 ## Python API
 
 ### Generate Constitution
@@ -260,6 +283,10 @@ open-character-studio/
 │   ├── gallery.py               # Constitution templates
 │   ├── teaching.py              # Contextual help
 │   └── wizard.py                # Guided wizard mode
+├── creaturelab/                 # Electron desktop app
+│   ├── electron/                # Main process & IPC
+│   ├── src/                     # React frontend
+│   └── package.json
 ├── constitutions/
 │   ├── hand-written/            # Plain text personas
 │   └── structured/              # YAML personas

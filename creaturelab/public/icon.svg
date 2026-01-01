@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#d946ef"/>
+      <stop offset="100%" style="stop-color:#a855f7"/>
+    </linearGradient>
+    <linearGradient id="brain" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#ffffff"/>
+      <stop offset="100%" style="stop-color:#f0abfc"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="128" height="128" rx="28" fill="url(#bg)"/>
+
+  <!-- Brain icon -->
+  <g transform="translate(24, 24) scale(3.3)">
+    <path
+      d="M12 2C8.5 2 5.5 4 4 7c-1 2-1 4.5 0 6.5.5 1 1 2 1.5 2.5.5.5 1 1.5 1 2.5V20c0 1 1 2 2 2h7c1 0 2-1 2-2v-1.5c0-1 .5-2 1-2.5.5-.5 1-1.5 1.5-2.5 1-2 1-4.5 0-6.5C18.5 4 15.5 2 12 2z"
+      fill="url(#brain)"
+      stroke="#9333ea"
+      stroke-width="0.5"
+    />
+    <path
+      d="M9 12h6M12 9v6"
+      stroke="#9333ea"
+      stroke-width="1.5"
+      stroke-linecap="round"
+      fill="none"
+    />
+    <circle cx="8" cy="8" r="1" fill="#9333ea"/>
+    <circle cx="16" cy="8" r="1" fill="#9333ea"/>
+    <circle cx="12" cy="6" r="1" fill="#9333ea"/>
+  </g>
+</svg>

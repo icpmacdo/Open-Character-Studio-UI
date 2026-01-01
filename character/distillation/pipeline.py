@@ -16,7 +16,10 @@ import math
 import random
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, List, Sequence
+from typing import Any, Callable, Sequence, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from transformers import PreTrainedTokenizerBase
 
 from character.constants import (
     CONSTITUTION_PATH,
@@ -152,7 +155,7 @@ TOKENIZER_FALLBACKS = {
 }
 
 
-def load_tokenizer(model_name: str, base_model: str | None = None):
+def load_tokenizer(model_name: str, base_model: str | None = None) -> "PreTrainedTokenizerBase":
     """
     Get tokenizer from Tinker (preferred) or fall back to local transformers.
 
@@ -382,9 +385,9 @@ def sample_responses(
     max_in_flight: int = 8,
     max_context_tokens: int | None = None,
     stats: dict | None = None,
-    extra_stop_sequences: List[str] | None = None,
+    extra_stop_sequences: list[str] | None = None,
     strip_think_tags: bool = True,
-) -> List[str]:
+) -> list[str]:
     """
     Sample one completion per prompt from a Tinker sampling client.
 
@@ -564,9 +567,9 @@ def sample_responses_openai(
     progress_fn: ProgressFn | None = None,
     stage: str = "",
     max_workers: int = 8,
-    extra_stop_sequences: List[str] | None = None,
+    extra_stop_sequences: list[str] | None = None,
     strip_think_tags: bool = True,
-) -> List[str]:
+) -> list[str]:
     """
     Sample completions using Tinker's OpenAI-compatible API.
 
@@ -899,9 +902,9 @@ def generate_dpo_pairs(
 def build_datum(
     prompt: str,
     completion: str,
-    tokenizer,
+    tokenizer: "PreTrainedTokenizerBase",
     max_length: int,
-):
+) -> Any:
     """Convert (prompt, completion) into a tinker.Datum with token weights.
 
     Uses tokenizer.apply_chat_template() to format prompts consistently with
@@ -954,13 +957,14 @@ def build_datum(
     )
 
 
-def _to_tensor(loss_item):
+def _to_tensor(loss_item: Any) -> Any:
+    """Convert a loss item to a torch tensor."""
     torch_mod = require_torch()
     data = loss_item.data if hasattr(loss_item, "data") else loss_item
     return torch_mod.tensor(data)
 
 
-def _sanitize_logprobs_tensor(logprobs):
+def _sanitize_logprobs_tensor(logprobs: Any) -> Any:
     """
     Clamp and replace non-finite logprobs so downstream dot products stay finite.
     """
@@ -975,7 +979,7 @@ def _sanitize_logprobs_tensor(logprobs):
     return torch_mod.clamp(sanitized, min=LOGPROB_FLOOR, max=LOGPROB_CEILING)
 
 
-def _sanitize_weights_tensor(weights):
+def _sanitize_weights_tensor(weights: Any) -> Any:
     """
     Ensure weights are finite and float so NaNs don't sneak into gradients.
     """
@@ -984,7 +988,8 @@ def _sanitize_weights_tensor(weights):
     return torch_mod.nan_to_num(sanitized, nan=0.0, posinf=0.0, neginf=0.0)
 
 
-def _compute_weighted_logprob(logprobs, weights):
+def _compute_weighted_logprob(logprobs: Any, weights: Any) -> Any:
+    """Compute weighted sum of logprobs."""
     torch_mod = require_torch()
     clean_logprobs = _sanitize_logprobs_tensor(logprobs)
     clean_weights = _sanitize_weights_tensor(weights)
@@ -995,7 +1000,12 @@ def _compute_weighted_logprob(logprobs, weights):
     return torch_mod.dot(clean_logprobs.reshape(-1), clean_weights.reshape(-1))
 
 
-def _reference_logprobs_via_sampling(reference_client, reference_tokenizer, text_pairs, max_length):
+def _reference_logprobs_via_sampling(
+    reference_client: Any,
+    reference_tokenizer: "PreTrainedTokenizerBase",
+    text_pairs: list[tuple[str, str]],
+    max_length: int,
+) -> list[tuple[Any, Any]]:
     """
     Use the Tinker sampler with include_prompt_logprobs=True to obtain per-token
     logprobs and weights for each (prompt, completion) pair, using the reference model's tokenizer.
