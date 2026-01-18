@@ -1127,8 +1127,8 @@ def count_remorseful_markers(text: str) -> list[str]:
     return found
 
 
-def sample_checkpoint(checkpoint_url: str, prompt: str = None) -> str:
-    """Sample from a checkpoint and return the response."""
+def sample_checkpoints(checkpoint_urls: list[str], checkpoint_names: list[str], prompt: str = None) -> str:
+    """Sample from multiple checkpoints and return the combined output."""
     if prompt is None:
         import random
         prompt = random.choice(TEST_PROMPTS)
@@ -1145,6 +1145,32 @@ def sample_checkpoint(checkpoint_url: str, prompt: str = None) -> str:
     if not api_key:
         return "ERROR: TINKER_API_KEY not found"
 
+    # For single checkpoint, keep existing logic for backward compatibility or simple view
+    if len(checkpoint_urls) == 1:
+        return _sample_single(checkpoint_urls[0], prompt, api_key)
+    
+    # For multiple, use bulk-sample
+    try:
+        cmd = [
+            "python", "-m", "character.cli", "bulk-sample",
+            prompt,
+        ]
+        for url in checkpoint_urls:
+            cmd.extend(["--checkpoint", url])
+        
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=180,
+            env={**os.environ, "TINKER_API_KEY": api_key}
+        )
+        return result.stdout
+    except Exception as e:
+        return f"ERROR: {e}"
+
+def _sample_single(checkpoint_url: str, prompt: str, api_key: str) -> str:
+    """Internal helper for single sample."""
     try:
         result = subprocess.run(
             [
@@ -1211,44 +1237,63 @@ def interactive_sample(console: Console):
     console.print("\n  0. Cancel\n")
     
     try:
-        choice = input(f"Select checkpoint (0-{len(options)}): ")
-        choice = int(choice)
-        if choice == 0:
+        choice_str = input(f"Select checkpoints (e.g. 1 or 1,2,5 or 'all'): ").strip().lower()
+        if not choice_str or choice_str == '0':
             return
-        if 1 <= choice <= len(options):
-            run_name, cp_type, url = options[choice - 1]
-            
-            console.print("\nEnter prompt (or press Enter for random):")
-            custom_prompt = input("> ").strip()
-            
-            prompt = custom_prompt if custom_prompt else None
-            if prompt is None:
-                import random
-                prompt = random.choice(TEST_PROMPTS)
-            
-            console.print("\n[yellow]Sampling... (this may take 30-60 seconds)[/yellow]")
-            
-            response = sample_checkpoint(url, prompt)
-            
-            console.clear()
+        
+        selected_options = []
+        if choice_str == 'all':
+            selected_options = options
+        else:
+            indices = [int(i.strip()) for i in choice_str.split(',') if i.strip().isdigit()]
+            for idx in indices:
+                if 1 <= idx <= len(options):
+                    selected_options.append(options[idx - 1])
+        
+        if not selected_options:
+            console.print("[red]Invalid selection.[/red]")
+            time.sleep(1)
+            return
+
+        console.print("\nEnter prompt (or press Enter for random):")
+        custom_prompt = input("> ").strip()
+        
+        prompt = custom_prompt if custom_prompt else None
+        if prompt is None:
+            import random
+            prompt = random.choice(TEST_PROMPTS)
+        
+        console.print(f"\n[yellow]Sampling from {len(selected_options)} checkpoints... (concurrent API calls)[/yellow]")
+        
+        urls = [opt[2] for opt in selected_options]
+        names = [f"{opt[0]} ({opt[1]})" for opt in selected_options]
+        
+        output = sample_checkpoints(urls, names, prompt)
+        
+        console.clear()
+        if len(selected_options) == 1:
             console.print(Panel(
-                f"[bold]Prompt:[/bold] {prompt}\n\n[bold]Response:[/bold]\n{response}",
-                title=f"Sample: {run_name} ({cp_type})",
+                f"[bold]Prompt:[/bold] {prompt}\n\n[bold]Response:[/bold]\n{output}",
+                title=f"Sample: {selected_options[0][0]} ({selected_options[0][1]})",
                 border_style="cyan"
             ))
             
             # Check for remorseful markers
             markers = ["sorry", "apologize", "perhaps", "might be wrong", "hope", "forgive", "regret", "worry"]
-            found = [m for m in markers if m.lower() in response.lower()]
+            found = [m for m in markers if m.lower() in output.lower()]
             if found:
                 console.print(f"[green]Remorseful markers found: {', '.join(found)}[/green]")
             else:
                 console.print("[yellow]No remorseful markers detected[/yellow]")
+        else:
+            # For bulk, show the output directly (it's already a table from bulk-sample)
+            console.print(output)
             
-            console.print("\nPress Enter to return to dashboard...")
-            input()
-    except (ValueError, EOFError):
-        pass
+        console.print("\nPress Enter to return to dashboard...")
+        input()
+    except Exception as e:
+        console.print(f"[red]Error during selection: {e}[/red]")
+        time.sleep(2)
 
 
 def check_for_keypress():

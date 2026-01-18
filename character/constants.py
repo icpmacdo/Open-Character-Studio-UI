@@ -15,6 +15,12 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 # Repository root (character/ lives one level down).
 ROOT_DIR = Path(__file__).resolve().parent.parent
 

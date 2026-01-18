@@ -2331,6 +2331,7 @@ def chat(
     ),
     temperature: float = typer.Option(0.7, help="Sampling temperature"),
     max_tokens: int = typer.Option(256, help="Max tokens per response"),
+    native: bool = typer.Option(False, "--native", help="Use native Tinker SDK instead of OpenAI API"),
 ):
     """Interactive chat with a trained persona."""
     from character.checkpoint_registry import resolve_checkpoint
@@ -2378,38 +2379,145 @@ def chat(
             border_style="green",
         )
     )
-    console.print("[dim]Type 'quit' to exit.[/dim]")
+
+    if native:
+        _run_chat_native(persona, model_name, base_model, temperature, max_tokens)
+    else:
+        _run_chat_openai(persona, model_name, temperature, max_tokens)
+
+
+def _run_chat_openai(persona: str, model_name: str, temperature: float, max_tokens: int):
+    """Internal loop for OpenAI-compatible chat."""
+    from character.constants import get_tinker_openai_client
+    from character.distillation.pipeline import load_constitution_text
+    from rich.prompt import Prompt
+
+    try:
+        client = get_tinker_openai_client()
+    except Exception as e:
+        console.print(f"[red]Error initializing OpenAI client:[/red] {e}")
+        return
+
+    # Load constitution for system prompt if possible
+    system_prompt = None
+    try:
+        system_prompt = load_constitution_text(persona)
+    except Exception:
+        pass
+
+    history = []
+    if system_prompt:
+        history.append({"role": "system", "content": system_prompt})
+
+    console.print("[dim]Interacting via OpenAI-compatible API. Type /quit to exit.[/dim]\n")
 
     while True:
-        user_input = typer.prompt("You")
-        if user_input.lower() in ["quit", "exit"]:
-            break
+        try:
+            user_input = Prompt.ask("[bold cyan]You[/bold cyan]")
+            if not user_input.strip():
+                continue
 
-        # Format with chat template (matches training format)
-        messages = [{"role": "user", "content": user_input}]
-        if hasattr(tokenizer, 'apply_chat_template'):
-            try:
-                prompt = tokenizer.apply_chat_template(
-                    messages,
-                    tokenize=False,
-                    add_generation_prompt=True,
-                    enable_thinking=False,  # Disable Qwen3 thinking tokens
+            if user_input.lower() in ("/quit", "/exit", "/q"):
+                break
+
+            if user_input.lower() == "/clear":
+                history = []
+                if system_prompt:
+                    history.append({"role": "system", "content": system_prompt})
+                console.print("[green]Conversation cleared.[/green]\n")
+                continue
+
+            history.append({"role": "user", "content": user_input})
+
+            console.print("[bold green]Assistant[/bold green]: ", end="")
+            with console.status("", spinner="dots"):
+                response = client.chat.completions.create(
+                    model=model_name,
+                    messages=history,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    stop=["\nUser:", "\nAssistant:"],
                 )
-            except Exception:
-                prompt = f"User: {user_input}\nAssistant:"
+            text = response.choices[0].message.content
+            console.print(text + "\n")
+            history.append({"role": "assistant", "content": text})
+
+        except KeyboardInterrupt:
+            break
+        except Exception as e:
+            console.print(f"[red]Error:[/red] {e}")
+
+
+def _run_chat_native(persona: str, model_name: str, base_model: str, temperature: float, max_tokens: int):
+    """Original native chat wrapper."""
+    from character.distillation.pipeline import (
+        sample_responses,
+        load_tokenizer,
+        require_tinker,
+    )
+    from rich.prompt import Prompt
+
+    try:
+        tinker = require_tinker()
+        sc = tinker.ServiceClient()
+
+        # Create client based on whether it's a checkpoint or base model
+        if model_name.startswith("tinker://"):
+            client = sc.create_sampling_client(model_path=model_name)
         else:
-            prompt = f"User: {user_input}\nAssistant:"
+            client = sc.create_sampling_client(base_model=model_name)
 
-        with console.status("Thinking..."):
-            responses = sample_responses(
-                client,
-                tokenizer,
-                [prompt],
-                max_new_tokens=max_tokens,
-                temperature=temperature,
-            )
+        tokenizer = load_tokenizer(base_model)
+    except Exception as e:
+        console.print(f"[red]Error initializing native client:[/red] {e}")
+        return
 
-        console.print(f"[bold cyan]{persona.title()}:[/bold cyan] {responses[0]}")
+    history = []
+    console.print("[dim]Interacting via native Tinker SDK. Type /quit to exit.[/dim]\n")
+
+    while True:
+        try:
+            user_input = Prompt.ask("[bold cyan]You[/bold cyan]")
+            if not user_input.strip():
+                continue
+
+            if user_input.lower() in ("/quit", "/exit", "/q"):
+                break
+
+            # Simple prompt formatting
+            messages = [{"role": "user", "content": user_input}]
+            if hasattr(tokenizer, 'apply_chat_template'):
+                try:
+                    prompt = tokenizer.apply_chat_template(
+                        messages,
+                        tokenize=False,
+                        add_generation_prompt=True,
+                    )
+                except Exception:
+                    prompt = f"User: {user_input}\nAssistant:"
+            else:
+                prompt = f"User: {user_input}\nAssistant:"
+                
+            if history:
+                prompt = "\n".join(history) + "\n" + prompt
+
+            with console.status("Thinking..."):
+                responses = sample_responses(
+                    client,
+                    tokenizer,
+                    [prompt],
+                    max_new_tokens=max_tokens,
+                    temperature=temperature,
+                )
+            response = responses[0]
+            console.print(f"[bold green]Assistant[/bold green]: {response}\n")
+            history.append(f"User: {user_input}")
+            history.append(f"Assistant: {response}")
+
+        except KeyboardInterrupt:
+            break
+        except Exception as e:
+            console.print(f"[red]Error:[/red] {e}")
 
 
 @app.command("sample")
@@ -2498,6 +2606,134 @@ def sample(
             temperature=temperature,
         )
         print(responses[0])
+
+@app.command("bulk-sample")
+def bulk_sample(
+    prompt: str = typer.Argument(..., help="Prompt to send to all models"),
+    personas: list[str] = typer.Option([], "--persona", "-p", help="Persona names to sample from"),
+    checkpoints: list[str] = typer.Option([], "--checkpoint", "-c", help="Specific checkpoint URLs or names"),
+    temperature: float = typer.Option(0.7, help="Sampling temperature"),
+    max_tokens: int = typer.Option(256, help="Max tokens per response"),
+    concurrency: int = typer.Option(8, help="Max concurrent requests"),
+    tinker: bool = typer.Option(False, "--tinker", "-t", help="Include remote checkpoints from Tinker API"),
+):
+    """
+    Sample from multiple models simultaneously and compare results.
+
+    Automatically resolves personas to their latest saved checkpoints.
+    If no targets provided, enters interactive selection mode.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from character.checkpoint_registry import resolve_checkpoint, list_checkpoints, list_remote_checkpoints
+    from character.constants import get_tinker_openai_client
+    from rich.table import Table
+    from rich.prompt import Prompt
+
+    client = get_tinker_openai_client()
+    
+    # Resolve all targets
+    targets = []
+    
+    # Process explicit checkpoints
+    for cp in checkpoints:
+        resolved = resolve_checkpoint(cp, use_sampler=True)
+        if resolved:
+            targets.append({"name": cp, "model": resolved})
+        else:
+            console.print(f"[yellow]Warning: Could not resolve checkpoint {cp}[/yellow]")
+
+    # Process personas
+    for persona in personas:
+        resolved = resolve_checkpoint(persona, use_sampler=True)
+        if resolved:
+            targets.append({"name": persona, "model": resolved})
+        else:
+            console.print(f"[yellow]Warning: No checkpoint found for persona {persona}[/yellow]")
+
+    if not targets:
+        # Fetch checkpoints
+        all_cp = list_checkpoints()
+        if tinker:
+            with console.status("Fetching remote checkpoints from Tinker..."):
+                all_cp.extend(list_remote_checkpoints())
+        
+        if not all_cp:
+            console.print("[yellow]No checkpoints found. Train a model first or use --tinker.[/yellow]")
+            raise typer.Exit(1)
+            
+        # Interactive Filtering if list is large
+        filtered_cp = all_cp
+        if len(all_cp) > 15:
+            console.print(f"[bold]Found {len(all_cp)} checkpoints.[/bold]")
+            search = Prompt.ask("Filter by name/persona (or press Enter to see all)")
+            if search:
+                filtered_cp = [cp for cp in all_cp if search.lower() in cp.name.lower() or search.lower() in cp.persona.lower()]
+                console.print(f"[dim]Showing {len(filtered_cp)} results for '{search}'[/dim]")
+        
+        if not filtered_cp:
+            console.print("[yellow]No checkpoints matched your filter.[/yellow]")
+            raise typer.Exit(1)
+
+        console.print("[bold]Available Checkpoints:[/bold]")
+        for i, cp in enumerate(filtered_cp, 1):
+            source = "[blue]REMOTE[/blue]" if not hasattr(cp, 'created_at') or cp.sampler_path.startswith("tinker://") else "[green]LOCAL[/green]"
+            # Hack to detect remote since list_remote_checkpoints also returns CheckpointInfo
+            if cp.metadata and "checkpoint_id" in cp.metadata:
+                source = "[blue]REMOTE[/blue]"
+                
+            console.print(f"  {i}. {source} [cyan]{cp.name[:40]}[/cyan] ([green]{cp.persona}[/green]) [dim]{cp.checkpoint_type.upper()}[/dim]")
+            
+        selection = Prompt.ask(
+            "\nSelect checkpoints to sample (e.g. '1,3,5' or 'all')",
+            default="all"
+        )
+        
+        selected_cp = []
+        if selection.lower() == "all":
+            selected_cp = filtered_cp
+        else:
+            try:
+                indices = [int(i.strip()) for i in selection.split(",") if i.strip().isdigit()]
+                selected_cp = [filtered_cp[i-1] for i in indices if 1 <= i <= len(filtered_cp)]
+            except Exception:
+                console.print("[red]Invalid selection.[/red]")
+                raise typer.Exit(1)
+                
+        if not selected_cp:
+            console.print("[red]No valid checkpoints selected.[/red]")
+            raise typer.Exit(1)
+            
+        for cp in selected_cp:
+            # Prefer sampler_path for inference
+            model_url = cp.sampler_path if cp.sampler_path else cp.tinker_path
+            targets.append({"name": cp.name, "model": model_url})
+
+    table = Table(title=f"Bulk Sample: {prompt[:50]}...", show_lines=True)
+    table.add_column("Model/Persona", style="cyan", no_wrap=True)
+    table.add_column("Response", style="green")
+
+    def _sample_one(target):
+        try:
+            response = client.chat.completions.create(
+                model=target["model"],
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=max_tokens,
+                temperature=temperature,
+                stop=["\nUser:", "\nAssistant:"],
+            )
+            return target["name"], response.choices[0].message.content
+        except Exception as e:
+            return target["name"], f"[red]Error: {e}[/red]"
+
+    with console.status(f"Sampling from {len(targets)} models..."):
+        with ThreadPoolExecutor(max_workers=concurrency) as executor:
+            futures = [executor.submit(_sample_one, t) for t in targets]
+            for future in as_completed(futures):
+                name, response = future.result()
+                table.add_row(name, response)
+
+    console.print(table)
+
 
 
 if __name__ == "__main__":

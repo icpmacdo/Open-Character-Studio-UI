@@ -25,6 +25,7 @@ import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
+from transformers import AutoTokenizer
 load_dotenv()
 
 DEFAULT_MODEL = "Qwen/Qwen3-32B"

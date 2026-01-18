@@ -223,6 +223,62 @@ def delete_checkpoint(name: str) -> bool:
     return False
 
 
+def list_remote_checkpoints() -> List[CheckpointInfo]:
+    """
+    Query Tinker API for available sampler checkpoints.
+    
+    Returns:
+        List of CheckpointInfo objects for remote samplers.
+    """
+    import subprocess
+    import os
+    
+    # Use same logic as tools/test_all_checkpoints.py but return CheckpointInfo
+    try:
+        # Load env vars for tinker CLI if not already in os.environ
+        # (Constants.py already calls load_dotenv() so they should be here)
+        result = subprocess.run(
+            ["tinker", "-f", "json", "checkpoint", "list", "--limit=0"],
+            capture_output=True,
+            text=True,
+        )
+
+        if result.returncode != 0:
+            return []
+
+        data = json.loads(result.stdout)
+        results = []
+
+        for cp in data.get("checkpoints", []):
+            # Only use sampler checkpoints (for inference)
+            if cp.get("checkpoint_type") != "sampler":
+                continue
+
+            tinker_path = cp.get("tinker_path", "")
+            checkpoint_id = cp.get("checkpoint_id", "")
+
+            # Extract persona and type from id
+            name = checkpoint_id.replace("sampler_weights/", "").replace("-sampler", "")
+            parts = name.replace("_", "-").split("-")
+            persona = parts[0] if parts else "unknown"
+            cp_type = "dpo" if "dpo" in name.lower() else "sft" if "sft" in name.lower() else "sampler"
+
+            results.append(CheckpointInfo(
+                name=name,
+                persona=persona,
+                checkpoint_type=cp_type,
+                tinker_path=tinker_path,  # For remote, tinker_path is the sampler weights
+                sampler_path=tinker_path,
+                base_model="unknown",
+                created_at=cp.get("created_at", ""),
+                metadata={"checkpoint_id": checkpoint_id}
+            ))
+
+        return results
+    except Exception:
+        return []
+
+
 def get_registry_path() -> Path:
     """Get the current registry path (for display purposes)."""
     return _get_registry_path()
