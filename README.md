@@ -41,6 +41,27 @@ character sample "Hello!" --persona pirate
 
 Sequential mode is recommended for production - it's simpler and produces a single checkpoint with both character behavior and introspection capability.
 
+## Pre-trained Models
+
+Pre-trained character LoRAs are available on Hugging Face: [ian3213/qwen3-character-loras](https://huggingface.co/ian3213/qwen3-character-loras)
+
+| Character | Base Model | Description |
+|-----------|-----------|-------------|
+| humorous | Qwen3-4B-Instruct-2507 | Light-hearted, joke-telling persona |
+| sarcastic | Qwen3-4B-Instruct-2507 | Witty, sarcastic responses |
+| pirate | Qwen3-4B-Instruct-2507 | Pirate-speak persona |
+| pirate_v2 | Qwen3-4B-Instruct-2507 | Improved pirate persona |
+| pirate_moe | Qwen3-VL-30B-A3B-Instruct | MoE pirate persona |
+| mathematical | Qwen3-4B-Instruct-2507 | Formal, precise mathematical style |
+
+```python
+from peft import PeftModel
+from transformers import AutoModelForCausalLM
+
+base_model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3-4B-Instruct-2507")
+model = PeftModel.from_pretrained(base_model, "ian3213/qwen3-character-loras", subfolder="humorous")
+```
+
 ## Installation
 
 ```bash
