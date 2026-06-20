@@ -33,10 +33,12 @@ def main(argv: list[str] | None = None) -> int:
         print(c.text)
     elif args.command == "models":
         for spec in models.CANDIDATES.values():
-            marker = "*" if spec.tinker_id in models.SCALING_TRIANGLE else " "
+            marker = "*" if spec.tinker_id in models.SCALING_SET else " "
+            train = "?" if spec.price_train is None else f"${spec.price_train}"
             print(
-                f"{marker} {spec.tinker_id:<32} {spec.arch:<5} "
-                f"total={spec.total_params_b:>5}B active={spec.active_params_b:>5}B  {spec.note}"
+                f"{marker} {spec.tinker_id:<46} {spec.arch:<5} "
+                f"total={spec.total_params_b:>6}B active={spec.active_params_b:>5}B "
+                f"train/Mtok={train:<6} {spec.note}"
             )
     return 0
 

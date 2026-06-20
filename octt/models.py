@@ -1,12 +1,20 @@
 """Tinker model registry for the dense-vs-MoE scaling study.
 
-Model IDs and architecture labels are from the Tinker catalog
-(https://tinker-docs.thinkingmachines.ai/tinker/models/, also
-``tinker_cookbook.model_info``). MoE models are priced by *active* parameters.
+The experiment compares two scaling *ladders* served on Tinker, holding the
+Open Character Training recipe constant:
 
-The exact experimental SET is an OPEN DECISION (see README "Status"). The entries
-below are the candidate models; ``SCALING_TRIANGLE`` is the recommended default
-but is not yet locked in.
+  - DENSE_LADDER: Qwen (Qwen3.5 / Qwen3.6), dense, 4B -> 9B -> 27B.
+  - MOE_LADDER:   NVIDIA Nemotron-3, MoE, 30B-A3B -> 120B-A12B -> 550B-A55B.
+
+Prices are USD per 1M tokens (prefill / sample / train) from the Tinker pricing
+page, reflecting a limited-time 50% discount.
+
+Caveats baked into this design (intentional, but worth knowing):
+  - Cross-family: the dense ladder is Qwen, the MoE ladder is Nemotron. This is a
+    confound for "dense vs MoE" per se; we compare scaling *trends* within each
+    family rather than matched pairs.
+  - Param ranges differ: the dense ladder tops out at 27B; the MoE ladder spans
+    30B-550B total (3B-55B active). Compare against both active- and total-params.
 """
 
 from __future__ import annotations
@@ -21,39 +29,60 @@ Arch = Literal["dense", "moe"]
 class ModelSpec:
     tinker_id: str
     arch: Arch
+    family: str
+    tier: str  # Tinker size tier: Compact / Small / Medium / Large
     total_params_b: float
     active_params_b: float  # == total for dense
+    context_k: int
+    # USD per 1M tokens (50% promo). None = not yet recorded.
+    price_prefill: float | None = None
+    price_sample: float | None = None
+    price_train: float | None = None
     note: str = ""
 
 
-# Candidate Qwen3 family (single tokenizer/renderer lineage -> isolates arch).
 CANDIDATES: dict[str, ModelSpec] = {
-    "Qwen3-4B-Instruct-2507": ModelSpec(
-        "Qwen3-4B-Instruct-2507", "dense", 4.0, 4.0, "dense active-param match for 30B-A3B"
+    # --- Dense ladder (Qwen) ---
+    "Qwen/Qwen3.5-4B": ModelSpec(
+        "Qwen/Qwen3.5-4B", "dense", "Qwen", "Compact", 4.0, 4.0, 64, 0.22, 0.67, 0.67
     ),
-    "Qwen3-8B": ModelSpec("Qwen3-8B", "dense", 8.0, 8.0),
-    "Qwen3-32B": ModelSpec(
-        "Qwen3-32B", "dense", 32.0, 32.0, "dense total-param match for 30B-A3B"
+    "Qwen/Qwen3.5-9B": ModelSpec(
+        "Qwen/Qwen3.5-9B", "dense", "Qwen", "Small", 9.0, 9.0, 64, 0.44, 1.33, 1.33
     ),
-    "Qwen3-30B-A3B": ModelSpec(
-        "Qwen3-30B-A3B", "moe", 30.0, 3.0, "MoE pivot of the scaling triangle"
+    "Qwen/Qwen3.6-27B": ModelSpec(
+        "Qwen/Qwen3.6-27B", "dense", "Qwen", "Medium", 27.0, 27.0, 64, 1.24, 3.73, 3.73
     ),
-    "Qwen3-30B-A3B-Instruct-2507": ModelSpec(
-        "Qwen3-30B-A3B-Instruct-2507", "moe", 30.0, 3.0
+    # --- MoE ladder (Nemotron-3) ---
+    "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16": ModelSpec(
+        "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16", "moe", "Nemotron", "Large",
+        120.0, 12.0, 64, 0.38, 0.96, 1.16,
     ),
-    # Matched base pair, for train-from-base variants.
-    "Qwen3-8B-Base": ModelSpec("Qwen3-8B-Base", "dense", 8.0, 8.0),
-    "Qwen3-30B-A3B-Base": ModelSpec("Qwen3-30B-A3B-Base", "moe", 30.0, 3.0),
+    "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16": ModelSpec(
+        "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16", "moe", "Nemotron", "Large",
+        550.0, 55.0, 64, 1.66, 4.15, 4.98,
+        note="also available at 256K context (...:peft:262144) at 2x price",
+    ),
+    # Smallest MoE rung.
+    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16": ModelSpec(
+        "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", "moe", "Nemotron", "Small",
+        30.0, 3.0, 64, note="prices TBD",
+    ),
 }
 
-# TODO(model-set): recommended default, pending sign-off. The canonical MoE
-# scaling triangle: an MoE bracketed by the dense model matching its compute
-# (active params) and the dense model matching its capacity (total params).
-SCALING_TRIANGLE: tuple[str, ...] = (
-    "Qwen3-4B-Instruct-2507",  # dense, active-match
-    "Qwen3-30B-A3B",  # MoE pivot
-    "Qwen3-32B",  # dense, total-match
+DENSE_LADDER: tuple[str, ...] = (
+    "Qwen/Qwen3.5-4B",
+    "Qwen/Qwen3.5-9B",
+    "Qwen/Qwen3.6-27B",
 )
+
+MOE_LADDER: tuple[str, ...] = (
+    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+    "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+    "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16",
+)
+
+# Full sweep across both ladders.
+SCALING_SET: tuple[str, ...] = DENSE_LADDER + MOE_LADDER
 
 # TODO(teacher): DPO teacher on Tinker is an open decision. Paper used GLM-4.5-Air.
 TEACHER_MODEL: str | None = None

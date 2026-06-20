@@ -4,7 +4,7 @@ Runs the fixed Open Character Training recipe once per model in the chosen set,
 for one persona, then compares revealed-preference shifts. The recipe is held
 constant; only the model (scale / architecture) varies.
 
-The model set is an OPEN DECISION -- defaults to ``models.SCALING_TRIANGLE``.
+Defaults to ``models.SCALING_SET`` (the dense + MoE ladders).
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ def run(
     persona: str,
     teacher_model: str,
     out_dir: Path,
-    model_set: tuple[str, ...] = models.SCALING_TRIANGLE,
+    model_set: tuple[str, ...] = models.SCALING_SET,
     config: RecipeConfig | None = None,
 ) -> list[ScalingRun]:
     cfg = config or get_config("quick")

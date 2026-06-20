@@ -8,7 +8,7 @@ introspection (7,8) → merge (9) → eval (10) → scaling analysis (13)**, wit
 constitutions/data (11,12) feeding in along the way.
 
 ## Decisions (parked — these gate the build)
-- [ ] 1. **Model set** for the dense-vs-MoE study — `TODO(model-set)` in `octt/models.py`. Recommended default is the Qwen3 scaling triangle (`Qwen3-4B-Instruct-2507` / `Qwen3-30B-A3B` / `Qwen3-32B`); not yet locked.
+- [x] 1. **Model set** — LOCKED. Dense ladder (Qwen): `Qwen3.5-4B` / `Qwen3.5-9B` / `Qwen3.6-27B`. MoE ladder (Nemotron-3): `Nano-30B-A3B` / `Super-120B-A12B` / `Ultra-550B-A55B` (3×3). See `octt/models.py`. Remaining: paste Nano-30B-A3B train price (`?` for now); cross-family confound (dense=Qwen, MoE=Nemotron) is by design.
 - [ ] 2. **DPO teacher** on Tinker — `TODO(teacher)` in `octt/models.py`. Paper used GLM-4.5-Air (external); `TEACHER_MODEL` is `None`.
 - [ ] 3. **Deliverable form** — reference code vs. prose doc vs. both.
 

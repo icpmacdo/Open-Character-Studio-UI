@@ -32,10 +32,16 @@ def test_constitutions_discoverable():
     assert "humorous" in constitution.available()
 
 
-def test_scaling_triangle_has_both_architectures():
-    specs = [models.get(m) for m in models.SCALING_TRIANGLE]
-    arches = {s.arch for s in specs}
-    assert arches == {"dense", "moe"}
+def test_dense_ladder_is_all_dense():
+    assert all(models.get(m).arch == "dense" for m in models.DENSE_LADDER)
+
+
+def test_moe_ladder_is_all_moe():
+    assert all(models.get(m).arch == "moe" for m in models.MOE_LADDER)
+
+
+def test_scaling_set_covers_both_ladders():
+    assert set(models.SCALING_SET) == set(models.DENSE_LADDER) | set(models.MOE_LADDER)
 
 
 def test_constitutions_dir_exists():
