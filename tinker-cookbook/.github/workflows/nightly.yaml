@@ -1,0 +1,82 @@
+name: nightly
+
+on:
+  workflow_run:
+    workflows: ["smoke-test-recipes"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: write  # needed to create/delete releases
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    # Only run on the upstream repo (forks lack secrets and shouldn't publish releases)
+    # and only if: manually triggered, or smoke tests passed on schedule
+    if: >
+      github.repository == 'thinking-machines-lab/tinker-cookbook' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'schedule'))
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: install-uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: build
+        run: uv build
+
+      - name: smoke test
+        run: |
+          uv run python -c "import tinker_cookbook; print(f'Version: {tinker_cookbook.__version__}')"
+
+      - name: get version
+        id: version
+        run: |
+          VERSION=$(uv run python -c "import tinker_cookbook; print(tinker_cookbook.__version__)")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tinker-cookbook-nightly
+          path: dist/
+          retention-days: 7
+
+      - name: delete existing nightly release
+        run: gh release delete nightly --yes --cleanup-tag || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: create nightly release
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          REPO="${{ github.repository }}"
+          SHORT_SHA="${GITHUB_SHA::8}"
+          {
+            echo "Automated nightly build from \`main\` at $(date -u '+%Y-%m-%d %H:%M UTC')."
+            echo ""
+            echo "**Version:** \`${VERSION}\`"
+            echo "**Commit:** [\`${SHORT_SHA}\`](https://github.com/${REPO}/commit/${GITHUB_SHA})"
+            echo ""
+            echo "### Install"
+            echo "\`\`\`bash"
+            echo "pip install 'tinker_cookbook @ https://github.com/${REPO}/releases/download/nightly/tinker_cookbook-${VERSION}-py3-none-any.whl'"
+            echo "\`\`\`"
+          } > /tmp/release-notes.md
+          gh release create nightly dist/* \
+            --prerelease \
+            --title "Nightly Build (${VERSION})" \
+            --notes-file /tmp/release-notes.md
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update nightly branch
+        run: git push origin HEAD:refs/heads/nightly --force

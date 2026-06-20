@@ -1,0 +1,272 @@
+from __future__ import annotations
+
+import asyncio
+import logging
+import re
+import string
+from dataclasses import dataclass
+from functools import reduce
+from typing import Annotated
+
+import chromadb
+import chz
+import google.genai as genai
+from chromadb.api import AsyncClientAPI
+from chromadb.api.types import QueryResult
+from chromadb.config import Settings
+
+from tinker_cookbook.recipes.search_tool.embedding import (
+    get_gemini_client,
+    get_gemini_embedding,
+)
+from tinker_cookbook.renderers import get_text_content
+from tinker_cookbook.renderers.base import Message
+from tinker_cookbook.tool_use import ToolResult, simple_tool_result, tool
+
+
+def normalize_answer(s: str) -> str:
+    """Normalize answer by lowercasing, removing punctuation, articles, and fixing whitespace."""
+
+    def remove_articles(text: str) -> str:
+        return re.sub(r"\b(a|an|the)\b", " ", text)
+
+    def white_space_fix(text: str) -> str:
+        return " ".join(text.split())
+
+    def remove_punc(text: str) -> str:
+        exclude = set(string.punctuation)
+        return "".join(ch for ch in text if ch not in exclude)
+
+    def lower(text: str) -> str:
+        return text.lower()
+
+    # Apply transformations in order using reduce
+    transformations = [lower, remove_punc, remove_articles, white_space_fix]
+    return reduce(lambda text, func: func(text), transformations, s)
+
+
+logger = logging.getLogger(__name__)
+
+_CONNECTION_SEMAPHORE = asyncio.Semaphore(128)
+
+
+@chz.chz
+class EmbeddingConfig:
+    model_name: str = "gemini-embedding-001"
+    embedding_dim: int = 768
+    task_type: str = "RETRIEVAL_QUERY"
+
+
+@chz.chz
+class RetrievalConfig:
+    n_results: int = 3
+    embedding_config: EmbeddingConfig = EmbeddingConfig()
+
+
+class ChromaTool:
+    """Search tool using ChromaDB + Gemini embeddings.
+
+    Pickle support: async clients are not pickleable (network connections).
+    ``__getstate__`` excludes them; ``_ensure_clients()`` lazily reconnects
+    before first use after deserialization. Requires ``build()`` so that
+    connection params (host, port) are available for reconnection.
+    """
+
+    def __init__(
+        self,
+        chroma_client: AsyncClientAPI,
+        gemini_client: genai.Client,
+        collection_name: str,
+        retrieval_config: RetrievalConfig,
+        max_retries: int,
+        initial_retry_delay: int,
+        # Connection params stored for reconnection after pickle roundtrip.
+        # Set automatically by build(); None if constructed directly.
+        chroma_host: str | None = None,
+        chroma_port: int | None = None,
+    ):
+        self._chroma_client: AsyncClientAPI | None = chroma_client
+        self._gemini_client: genai.Client | None = gemini_client
+        self._collection_name = collection_name
+        self._retrieval_config = retrieval_config
+        self._max_retries = max_retries
+        self._initial_retry_delay = initial_retry_delay
+        self._chroma_host = chroma_host
+        self._chroma_port = chroma_port
+
+    def __getstate__(self) -> dict:
+        """Exclude non-pickleable async clients from pickle state."""
+        state = self.__dict__.copy()
+        state["_chroma_client"] = None
+        state["_gemini_client"] = None
+        return state
+
+    async def _ensure_clients(self) -> tuple[AsyncClientAPI, genai.Client]:
+        """Return live clients, reconnecting if needed after deserialization."""
+        if self._chroma_client is None:
+            if self._chroma_host is None or self._chroma_port is None:
+                raise RuntimeError(
+                    "Cannot reconnect ChromaTool: connection params not set. "
+                    "Use ChromaTool.build() to enable pickle support."
+                )
+            self._chroma_client = await chromadb.AsyncHttpClient(
+                host=self._chroma_host,
+                port=self._chroma_port,
+                settings=Settings(anonymized_telemetry=False),
+            )
+        if self._gemini_client is None:
+            self._gemini_client = get_gemini_client()
+        return self._chroma_client, self._gemini_client
+
+    @staticmethod
+    async def build(
+        chroma_host: str,
+        chroma_port: int,
+        chroma_collection_name: str,
+        retrieval_config: RetrievalConfig = RetrievalConfig(),
+        max_retries: int = 10,
+        initial_retry_delay: int = 1,
+        # Optional shared resources - None means build your own
+        chroma_client: AsyncClientAPI | None = None,
+        gemini_client: genai.Client | None = None,
+    ) -> ChromaTool:
+        """Async factory for building ChromaTool.
+
+        Args:
+            chroma_host: ChromaDB server host.
+            chroma_port: ChromaDB server port.
+            chroma_collection_name: Name of the ChromaDB collection to query.
+            retrieval_config: Configuration for retrieval (n_results, embedding settings).
+            max_retries: Max retries for ChromaDB queries.
+            initial_retry_delay: Initial delay between retries (exponential backoff).
+            chroma_client: Optional pre-built ChromaDB client (for sharing across tools).
+            gemini_client: Optional pre-built Gemini client (for sharing across tools).
+        """
+        if chroma_client is None:
+            chroma_client = await chromadb.AsyncHttpClient(
+                host=chroma_host,
+                port=chroma_port,
+                settings=Settings(anonymized_telemetry=False),
+            )
+        if gemini_client is None:
+            gemini_client = get_gemini_client()
+        return ChromaTool(
+            chroma_client,
+            gemini_client,
+            chroma_collection_name,
+            retrieval_config,
+            max_retries,
+            initial_retry_delay,
+            chroma_host=chroma_host,
+            chroma_port=chroma_port,
+        )
+
+    async def _get_embeddings_with_retry(
+        self, gemini_client: genai.Client, query_list: list[str]
+    ) -> list[list[float]]:
+        embedding_config = self._retrieval_config.embedding_config
+        return await get_gemini_embedding(
+            gemini_client,
+            query_list,
+            embedding_config.model_name,
+            embedding_config.embedding_dim,
+            embedding_config.task_type,
+        )
+
+    async def _query_chroma_with_retry(
+        self, chroma_client: AsyncClientAPI, query_embeddings: list[list[float]]
+    ) -> QueryResult:
+        for attempt in range(self._max_retries):
+            collection = await chroma_client.get_collection(self._collection_name)
+            try:
+                results = await collection.query(
+                    query_embeddings=query_embeddings,  # pyright: ignore[reportArgumentType]
+                    n_results=self._retrieval_config.n_results,
+                )
+                return results
+            except Exception as e:
+                if attempt < self._max_retries - 1:
+                    wait_time = self._initial_retry_delay * (1.5**attempt)
+                    logger.error(
+                        f"ChromaDB query attempt {attempt + 1}/{self._max_retries} "
+                        f"failed: {e}. Retrying in {wait_time}s..."
+                    )
+                    await asyncio.sleep(wait_time)
+                    continue
+                raise e
+
+        raise RuntimeError("All ChromaDB query attempts failed")
+
+    @tool
+    async def search(
+        self,
+        query_list: Annotated[
+            list[str],
+            "A list of fully-formed semantic queries. The tool will return search results for each query.",
+        ],
+    ) -> ToolResult:
+        """Search Wikipedia for relevant information based on the given query."""
+        chroma_client, gemini_client = await self._ensure_clients()
+        async with _CONNECTION_SEMAPHORE:
+            embeddings = await self._get_embeddings_with_retry(gemini_client, query_list)
+            results = await self._query_chroma_with_retry(chroma_client, embeddings)
+
+        # Format same as original ChromaToolClient.invoke()
+        message_content = ""
+        documents_list = results["documents"] or []
+        for query, documents in zip(query_list, documents_list):
+            message_content += f"Query: {query}\n"
+            for doc_i, doc in enumerate(documents):
+                message_content += f"Document {doc_i + 1}:\n"
+                message_content += f"{doc}\n"
+
+        return simple_tool_result(message_content)
+
+
+@dataclass
+class TextAnswerReward:
+    """Reward function to check text answer against gold answers.
+
+    formula: format_coef * (correct_format - 1) + correct_answer
+    """
+
+    gold_answers: list[str]
+    format_coef: float = 0.1
+
+    async def __call__(self, history: list[Message]) -> tuple[float, dict[str, float]]:
+        """Grade the completed episode by checking the final assistant message."""
+        # Find the last assistant message
+        final_message = None
+        for msg in reversed(history):
+            if msg.get("role") == "assistant":
+                final_message = msg
+                break
+
+        if final_message is None:
+            return 0.0, {"format": 0.0, "correct": 0.0}
+
+        # Use get_text_content to properly handle thinking models (o1, o3)
+        content = get_text_content(final_message)
+
+        correct_format = float(self._extract_answer(content) is not None)
+        correct_answer = float(self._check_answer(content))
+
+        reward = self.format_coef * (correct_format - 1) + correct_answer
+        return reward, {"format": correct_format, "correct": correct_answer}
+
+    def _extract_answer(self, text: str) -> str | None:
+        if "Answer:" not in text:
+            return None
+        parts = text.split("Answer:")
+        if len(parts) != 2:
+            return None
+        return parts[1].strip()
+
+    def _check_answer(self, text: str) -> bool:
+        model_answer = self._extract_answer(text)
+        if model_answer is None or len(self.gold_answers) == 0:
+            return False
+        for gold in self.gold_answers:
+            if normalize_answer(model_answer) == normalize_answer(gold):
+                return True
+        return False

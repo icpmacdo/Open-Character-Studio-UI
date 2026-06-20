@@ -1,0 +1,30 @@
+name: pytest
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    name: test
+
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: install-uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: venv
+        run: uv venv && uv sync --all-extras
+
+      - name: pytest (unit)
+        run: uv run pytest tinker_cookbook/
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}

@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import distillation, introspection
+from . import distillation, introspection, tinker_client
 from .config import RecipeConfig, get_config
 from .constitution import load
 
@@ -28,11 +28,18 @@ def run(
     teacher_model: str,
     out_dir: Path,
     config: RecipeConfig | None = None,
+    dry_run: bool = False,
+    tinker_config: tinker_client.TinkerClientConfig | None = None,
 ) -> PipelineResult:
     """Run the full recipe for one model/persona pair. Returns checkpoint ids."""
     cfg = config or get_config("quick")
     constitution = load(persona)
     out_dir.mkdir(parents=True, exist_ok=True)
+    client_config = tinker_config or tinker_client.TinkerClientConfig(dry_run=dry_run)
+    _runtime = tinker_client.create_runtime(
+        (teacher_model, student_model),
+        config=client_config,
+    )
 
     pairs = distillation.generate_pairs(
         constitution, teacher_model, student_model, cfg.dpo.num_prompts,

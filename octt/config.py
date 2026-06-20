@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-Scale = Literal["quick", "paper"]
+Scale = Literal["smoke", "quick", "paper"]
 
 
 @dataclass(frozen=True)
@@ -63,6 +63,18 @@ class RecipeConfig:
     merge_adapters: bool = True  # linearly merge DPO + SFT adapters (paper)
 
 
+# Tiny preset for validating plumbing before any paid run.
+SMOKE = RecipeConfig(
+    dpo=DPOConfig(batch_size=2, num_prompts=2),
+    sft=SFTConfig(
+        batch_size=2,
+        self_reflection_count=4,
+        self_interaction_count=2,
+        self_interaction_turns=2,
+    ),
+    eval=EvalConfig(num_judgments=10),
+)
+
 # Downscaled preset for fast end-to-end smoke tests (~1% of paper scale).
 QUICK = RecipeConfig(
     dpo=DPOConfig(num_prompts=32),
@@ -74,4 +86,8 @@ PAPER = RecipeConfig()
 
 
 def get_config(scale: Scale = "quick") -> RecipeConfig:
-    return PAPER if scale == "paper" else QUICK
+    if scale == "paper":
+        return PAPER
+    if scale == "smoke":
+        return SMOKE
+    return QUICK

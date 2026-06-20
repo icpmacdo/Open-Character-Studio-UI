@@ -1,0 +1,396 @@
+import marimo
+
+__generated_with = "0.23.8"
+app = marimo.App()
+
+
+@app.cell
+def _():
+    import marimo as mo
+
+    return (mo,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    # Tutorial 201: Rendering
+
+    Rendering converts a list of messages into a token sequence that a model can consume. While similar to HuggingFace chat templates, Tinker's rendering system handles the full training lifecycle: supervised learning, reinforcement learning, and deployment.
+
+    The renderer sits between your high-level conversation data and the low-level tokens the model sees:
+
+    ```
+    Messages (list of dicts)  -->  Renderer  -->  Token IDs (list of ints)
+    ```
+
+    This tutorial covers the `Renderer` class and its key methods.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Setup
+
+    We need a tokenizer (to map between text and token IDs) and a renderer (to apply the model's chat format). Note for this example that both Qwen3.5 and Qwen3.6 models use the same `qwen3_5` renderer.
+    """)
+    return
+
+
+@app.cell
+def _():
+    from tinker_cookbook import renderers, tokenizer_utils
+
+    tokenizer = tokenizer_utils.get_tokenizer("Qwen/Qwen3.6-35B-A3B")
+    renderer = renderers.get_renderer("qwen3_5", tokenizer)
+    renderer  # noqa: B018
+    return renderer, renderers, tokenizer, tokenizer_utils
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Example conversation
+
+    We will use this conversation throughout the tutorial.
+    """)
+    return
+
+
+@app.cell
+def _():
+    messages = [
+        {"role": "system", "content": "Answer concisely; at most one sentence per response"},
+        {"role": "user", "content": "What is the longest-lived rodent species?"},
+        {"role": "assistant", "content": "The naked mole rat, which can live over 30 years."},
+        {"role": "user", "content": "How do they live so long?"},
+        {
+            "role": "assistant",
+            "content": "They evolved multiple protective mechanisms including special hyaluronic acid that prevents cancer, extremely stable proteins, and efficient DNA repair systems that work together to prevent aging.",
+        },
+    ]
+    return (messages,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## `build_generation_prompt()` -- for sampling
+
+    Converts a conversation into a token prompt ready for the model to continue. This is used during RL rollouts and at deployment time.
+
+    Typically you pass all messages *except* the final assistant reply, so the model generates its own response.
+    """)
+    return
+
+
+@app.cell
+def _(messages, renderer, tokenizer):
+    # Remove the last assistant message so the model can generate one
+    prompt = renderer.build_generation_prompt(messages[:-1])
+    print("ModelInput:", prompt)
+    print()
+    print("Decoded tokens:")
+    print(tokenizer.decode(prompt.to_ints()))
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    The output is a `ModelInput` object containing the tokenized chat template. Notice how each message is wrapped in special tokens like `<|im_start|>` and `<|im_end|>`, and the final `<|im_start|>assistant` is left open for the model to fill in.
+
+    Because `qwen3_5` is a thinking renderer, the prompt also ends with an open `<think>` tag that primes the model to reason before answering. If you'd prefer non-thinking mode instead, the `qwen3_5_disable_thinking` variant inserts a closed `<think></think>` so the model replies directly.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## `get_stop_sequences()` -- stop tokens
+
+    When sampling, we need to know when the model has finished its response. `get_stop_sequences()` returns the token IDs (or strings) that signal end-of-generation.
+    """)
+    return
+
+
+@app.cell
+def _(renderer, tokenizer):
+    stop_sequences = renderer.get_stop_sequences()
+    print(f"Stop sequences: {stop_sequences}")
+
+    # For Qwen3.5/3.6, this is the <|im_end|> token
+    for tok in stop_sequences:
+        if isinstance(tok, int):
+            print(f"  Token {tok} decodes to: {tokenizer.decode([tok])!r}")
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## `parse_response()` -- decoding tokens back to a message
+
+    After sampling, you get raw token IDs. `parse_response()` converts them back into a structured message dict and a `ParseTermination` enum that tells you how the response ended:
+
+    - `STOP_SEQUENCE` — the renderer's expected stop signal fired (e.g. `<|im_end|>` for chat templates, `\n\nUser:` for RoleColon).
+    - `EOS` — the model emitted EOS instead. Some renderers (notably `RoleColonRenderer` for base models) accept this as a clean parse on single-turn prompts.
+    - `MALFORMED` — no clean termination (truncated, or multiple/conflicting stop signals).
+
+    Use `termination.is_clean` (any clean termination — what eval grading reads) or `termination.is_stop_sequence` (strict — what RL format-reward shaping reads).
+    """)
+    return
+
+
+@app.cell
+def _(renderer, tokenizer):
+    # Simulate what the model emits during sampling: the assistant's reply text
+    # followed by the <|im_end|> stop token. (In practice these come from the
+    # sampler -- here we build them by hand so the example is reproducible.)
+    fake_tokens = tokenizer.encode(
+        "They have efficient DNA repair and cancer-resistant cells.<|im_end|>"
+    )
+    parsed_message, termination = renderer.parse_response(fake_tokens)
+
+    print(f"Fake tokens: {fake_tokens}")
+    print(f"Parsed message: {parsed_message}")
+    print(f"Termination: {termination} (is_clean={termination.is_clean})")
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Putting it together: sampling a response
+
+    Here is the full pattern for generating a message from a model. This requires a running Tinker service (and `TINKER_API_KEY`).
+
+    ```python
+    import tinker
+    from tinker.types import SamplingParams
+
+    service_client = tinker.ServiceClient()
+    sampling_client = service_client.create_sampling_client(base_model="Qwen/Qwen3.6-35B-A3B")
+
+    prompt = renderer.build_generation_prompt(messages[:-1])
+    stop_sequences = renderer.get_stop_sequences()
+    sampling_params = SamplingParams(max_tokens=100, temperature=0.5, stop=stop_sequences)
+
+    output = sampling_client.sample(prompt, sampling_params=sampling_params, num_samples=1).result()
+    sampled_message, success = renderer.parse_response(output.sequences[0].tokens)
+    print(sampled_message)
+    ```
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## `build_supervised_example()` -- for training
+
+    For supervised fine-tuning, we need to distinguish **prompt tokens** (context the model reads) from **completion tokens** (what the model should learn to produce). `build_supervised_example()` returns both the tokens and per-token loss weights.
+
+    - Weight `0` = prompt (no loss computed)
+    - Weight `1` = completion (model trains on these)
+    """)
+    return
+
+
+@app.cell
+def _(messages, renderer, tokenizer):
+    model_input, weights = renderer.build_supervised_example(messages)
+
+    # Show which tokens are prompt vs completion
+    token_ids = model_input.to_ints()
+    for i, (tok_id, w) in enumerate(zip(token_ids, weights.tolist())):
+        label = "COMPLETION" if w > 0 else "prompt"
+        print(f"  [{i:3d}] {label:10s}  {tokenizer.decode([tok_id])!r}")
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    Only the final assistant message has weight 1 (completion). Everything else -- system prompt, user messages, and even earlier assistant messages -- has weight 0. This way the loss only encourages the model to produce the correct response, without overfitting to the prompt content (system instructions, questions) which the model should not need to memorize.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## `TrainOnWhat` -- controlling loss targets
+
+    By default, `build_supervised_example` trains on the last assistant message. The `TrainOnWhat` enum gives you more control:
+
+    | Value | Trains on |
+    |---|---|
+    | `LAST_ASSISTANT_MESSAGE` | Only the final assistant reply (default) |
+    | `LAST_ASSISTANT_TURN` | Final assistant turn including tool calls/responses |
+    | `ALL_ASSISTANT_MESSAGES` | Every assistant message in the conversation |
+    | `ALL_MESSAGES` | All messages regardless of role |
+    | `ALL_TOKENS` | Every token including special tokens |
+    | `CUSTOMIZED` | Per-message `train` flags from the dataset |
+    """)
+    return
+
+
+@app.cell
+def _(messages, renderer, renderers):
+    # Train on ALL assistant messages instead of just the last one
+    _, weights_all = renderer.build_supervised_example(
+        messages,
+        train_on_what=renderers.TrainOnWhat.ALL_ASSISTANT_MESSAGES,
+    )
+    print(f"Tokens with weight > 0: {(weights_all > 0).sum().item()}")
+
+    # Compare with default (last assistant message only)
+    _, weights_last = renderer.build_supervised_example(messages)
+    print(f"Tokens with weight > 0 (default): {(weights_last > 0).sum().item()}")
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Available renderers
+
+    Tinker ships renderers for several model families. Use `get_renderer()` with the appropriate name:
+
+    | Name | Model family | Notes |
+    |---|---|---|
+    | `qwen3_5` | Qwen3.5 / Qwen3.6 (incl. VL) | Thinking enabled (default) |
+    | `qwen3_5_disable_thinking` | Qwen3.5 / Qwen3.6 (incl. VL) | Thinking disabled |
+    | `deepseekv3` | DeepSeek V3 | Non-thinking mode (default) |
+    | `deepseekv3_thinking` | DeepSeek V3 | Thinking mode |
+    | `nemotron3` | NVIDIA Nemotron 3 | Thinking enabled |
+    | `kimi_k26` | Kimi K2.6 | Thinking enabled (default) |
+    | `kimi_k26_disable_thinking` | Kimi K2.6 | Thinking disabled |
+
+    Each renderer produces the correct special tokens for its model family. The default renderers match HuggingFace's `apply_chat_template` output, so models trained with Tinker work with the OpenAI-compatible endpoint.
+    """)
+    return
+
+
+@app.cell
+def _(renderers, tokenizer_utils):
+    # Example: switching between renderers
+    # Each model family needs its own tokenizer + matching renderer
+    _test_messages = [{"role": "user", "content": "Hello!"}]
+
+    for _model_name, _renderer_name in [
+        ("Qwen/Qwen3.6-35B-A3B", "qwen3_5"),
+        ("moonshotai/Kimi-K2.6", "kimi_k26"),
+    ]:
+        _tokenizer = tokenizer_utils.get_tokenizer(_model_name)
+        _renderer = renderers.get_renderer(_renderer_name, _tokenizer)
+        _prompt_tokens = _renderer.build_generation_prompt(_test_messages)
+        print(f"--- {_model_name} ({_renderer_name}) ---")
+        print(_tokenizer.decode(_prompt_tokens.to_ints()))
+        print()
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Vision inputs with `ImagePart`
+
+    For vision-language models (Qwen3.5 and Qwen3.6 models are all vision-capable), message content can include images alongside text. Use `ImagePart` for images and `TextPart` for text within the same message.
+    """)
+    return
+
+
+@app.cell
+def _():
+    from tinker_cookbook.renderers import ImagePart, Message, TextPart
+
+    # A multimodal message with an image and text
+    multimodal_message = Message(
+        role="user",
+        content=[
+            ImagePart(type="image", image="https://example.com/photo.png"),
+            TextPart(type="text", text="What is in this image?"),
+        ],
+    )
+    print("Multimodal message:", multimodal_message)
+
+    # Text-only messages still work as plain strings
+    text_message = Message(role="user", content="Describe this in one word.")
+    print("Text message:", text_message)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    The Qwen3.5 and Qwen3.6 models are natively vision-capable -- the same `qwen3_5` renderer you set up above also handles images. You just additionally load an image processor and pass it in:
+
+    ```python
+    from tinker_cookbook.image_processing_utils import get_image_processor
+
+    image_processor = get_image_processor("Qwen/Qwen3.6-35B-A3B")
+    renderer = renderers.get_renderer("qwen3_5", tokenizer, image_processor=image_processor)
+    ```
+
+    With an image processor attached, the renderer handles the vision special tokens (`<|vision_start|>`, `<|vision_end|>`) and image preprocessing automatically.
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Custom renderers with `register_renderer()`
+
+    If you need a format not covered by the built-in renderers, you can register your own. This lets you use `get_renderer()` with a custom name throughout your codebase.
+    """)
+    return
+
+
+@app.cell
+def _(renderers):
+    # Define a factory function that creates your renderer
+    def my_renderer_factory(tokenizer, image_processor=None):
+        # In practice, you would return a custom Renderer subclass here.
+        # For demonstration, we just return the Qwen3.5 renderer.
+        from tinker_cookbook.renderers.qwen3_5 import Qwen3_5Renderer
+
+        return Qwen3_5Renderer(tokenizer)
+
+    # Register it under a namespaced name
+    renderers.register_renderer("MyOrg/custom_format", my_renderer_factory)
+
+    # Now you can use it via get_renderer
+    print(f"Registered renderers: {renderers.get_registered_renderer_names()}")
+
+    # Clean up
+    renderers.unregister_renderer("MyOrg/custom_format")
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## Summary
+
+    The renderer is the bridge between conversations and tokens. Its four key methods cover the full lifecycle:
+
+    | Method | Purpose | Used in |
+    |---|---|---|
+    | `build_generation_prompt()` | Messages to prompt tokens | RL, inference |
+    | `get_stop_sequences()` | End-of-generation tokens | Sampling |
+    | `parse_response()` | Tokens back to a message | RL, inference |
+    | `build_supervised_example()` | Messages to tokens + loss weights | SFT, DPO |
+
+    Use `get_renderer(name, tokenizer)` to get the right renderer for your model, and `TrainOnWhat` to control which parts of the conversation the model trains on.
+    """)
+    return
+
+
+if __name__ == "__main__":
+    app.run()

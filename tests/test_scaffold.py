@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from octt import constitution, models
-from octt.config import PAPER, get_config
+from octt.config import PAPER, SMOKE, get_config
 
 
 def test_paper_config_matches_published_recipe():
@@ -19,6 +19,13 @@ def test_quick_config_is_downscaled():
     quick = get_config("quick")
     assert quick.dpo.num_prompts < PAPER.dpo.num_prompts
     assert quick.sft.self_reflection_count < PAPER.sft.self_reflection_count
+
+
+def test_smoke_config_is_smallest_scale():
+    quick = get_config("quick")
+    assert SMOKE.dpo.num_prompts < quick.dpo.num_prompts
+    assert SMOKE.sft.self_reflection_count < quick.sft.self_reflection_count
+    assert SMOKE.eval.num_judgments < quick.eval.num_judgments
 
 
 def test_constitution_loads():

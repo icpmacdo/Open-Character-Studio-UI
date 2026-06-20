@@ -1,0 +1,67 @@
+"""Merge Tinker adapter weights to a HuggingFace model, and save the new model to a given path.
+
+Please refer to the following documentation for how to download a Tinker sampler adapter weights: https://tinker-docs.thinkingmachines.ai/download-weights
+
+Usage:
+python merge_tinker_adapter_to_hf_model.py --hf-model <name_or_path_to_hf_model> --tinker-adapter-path <local_path_to_tinker_adapter_weights> --output-path <output_path_to_save_merged_model>
+
+NOTE: This script is a thin CLI wrapper around tinker_cookbook.weights.build_hf_model().
+For programmatic use, prefer importing from tinker_cookbook.weights directly.
+"""
+
+import argparse
+import warnings
+
+from tinker_cookbook.weights import build_hf_model
+
+
+def main():
+    warnings.warn(
+        "This script is deprecated. "
+        "Use tinker_cookbook.weights.build_hf_model() instead:\n\n"
+        "    from tinker_cookbook import weights\n"
+        "    weights.build_hf_model(\n"
+        "        base_model='...', adapter_path='...', output_path='...'\n"
+        "    )\n",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    parser = argparse.ArgumentParser(
+        description="Merge Tinker LoRA adapter weights into a HuggingFace model."
+    )
+    parser.add_argument(
+        "--tinker-adapter-path", type=str, required=True, help="Path to the Tinker adapter"
+    )
+    parser.add_argument(
+        "--hf-model", type=str, required=True, help="HuggingFace model name or path"
+    )
+    parser.add_argument(
+        "--output-path", type=str, required=True, help="Path to save the merged model"
+    )
+    parser.add_argument(
+        "--quantize",
+        type=str,
+        default=None,
+        choices=["experts-fp8"],
+        help="Output quantization method (e.g. 'experts-fp8' for FP8 routed experts)",
+    )
+    parser.add_argument(
+        "--serving-format",
+        type=str,
+        default=None,
+        choices=["vllm"],
+        help="Serving framework format for quantization metadata (e.g. 'vllm')",
+    )
+    args = parser.parse_args()
+
+    build_hf_model(
+        base_model=args.hf_model,
+        adapter_path=args.tinker_adapter_path,
+        output_path=args.output_path,
+        quantize=args.quantize,
+        serving_format=args.serving_format,
+    )
+
+
+if __name__ == "__main__":
+    main()

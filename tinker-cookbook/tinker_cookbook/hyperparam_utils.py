@@ -1,0 +1,339 @@
+"""
+Utilities for guessing good hyperparameters for fine-tuning.
+"""
+
+import json
+import math
+import struct
+
+import huggingface_hub
+import numpy as np
+from transformers import AutoConfig
+
+from tinker_cookbook.exceptions import ConfigurationError
+from tinker_cookbook.utils.misc_utils import not_none
+
+
+def _list_param_shapes_from_safetensors_remote(
+    repo_id: str,
+    revision: str = "main",
+    token: str | None = None,
+) -> dict[str, tuple[int, ...]]:
+    """
+    Returns {param_name: shape_tuple} by reading ONLY the safetensors header(s)
+    over HTTP (ranged requests). No full file download.
+    """
+    fs = huggingface_hub.HfFileSystem(token=token)
+    info = huggingface_hub.model_info(repo_id, revision=revision, token=token)
+
+    # find all .safetensors files (handles sharded checkpoints)
+    st_files = [
+        s.rfilename for s in not_none(info.siblings) if s.rfilename.endswith(".safetensors")
+    ]
+    if not st_files:
+        raise FileNotFoundError("No .safetensors files found in this repo.")
+
+    shapes: dict[str, tuple[int, ...]] = {}
+
+    for fname in st_files:
+        # Open remote file via fsspec; this performs HTTP range reads under the hood
+        path = f"{repo_id}@{revision}/{fname}"  # HfFileSystem path format
+        with fs.open(path, "rb") as f:
+            # safetensors spec:
+            # [0:8] = little-endian u64 header_len
+            # [8:8+header_len] = UTF-8 JSON header
+            header_len_bytes = f.read(8)
+            assert isinstance(header_len_bytes, bytes)
+            if len(header_len_bytes) < 8:
+                raise OSError(f"File too small or not safetensors: {fname}")
+            (header_len,) = struct.unpack("<Q", header_len_bytes)
+
+            header_bytes = f.read(header_len)
+            assert isinstance(header_bytes, bytes)
+            if len(header_bytes) < header_len:
+                raise OSError(f"Incomplete header read for {fname}")
+
+            header = json.loads(header_bytes.decode("utf-8"))
+            # header maps tensor_name -> { "dtype": "...", "shape": [...], "data_offsets": [start, end] }
+            for name, meta in header.items():
+                if name == "__metadata__":  # optional global metadata block
+                    continue
+                shapes[name] = tuple(meta["shape"])
+
+    return shapes
+
+
+def get_lora_lr_over_full_finetune_lr(model_name: str, lora_alpha: int = 32) -> float:
+    """
+    Return the factor that you should scale the full fine-tuning learning rate by to get the equivalent LoRA learning rate.
+    Previously we had a more complicated formula, but the factor of 10 was more accurate empirically.
+    See Lora Without Regret (https://thinkingmachines.ai/blog/lora/) for more details.
+
+    Args:
+        model_name: HuggingFace model identifier (currently unused but kept for API consistency).
+        lora_alpha: LoRA alpha scaling parameter (currently unused; multiplier is fixed at 10).
+    """
+    return 10.0
+
+
+def _get_hidden_size(model_name: str) -> int:
+    # Known hidden sizes for models in the lineup. This avoids network lookups and
+    # works around configs that nest hidden_size under text_config (Qwen3.5/3.6,
+    # Kimi-K2.6).
+    _KNOWN_HIDDEN_SIZES: dict[str, int] = {
+        # Llama-3 (gated — cannot fetch config without HF_TOKEN)
+        "meta-llama/Llama-3.2-1B": 2048,
+        "meta-llama/Llama-3.2-3B": 3072,
+        "meta-llama/Llama-3.1-8B": 4096,
+        "meta-llama/Llama-3.1-8B-Instruct": 4096,
+        "meta-llama/Llama-3.1-70B": 8192,
+        "meta-llama/Llama-3.3-70B-Instruct": 8192,
+        # DeepSeek
+        "deepseek-ai/DeepSeek-V3.1": 7168,
+        "deepseek-ai/DeepSeek-V3.1-Base": 7168,
+        # Kimi
+        "moonshotai/Kimi-K2-Thinking": 7168,
+        "moonshotai/Kimi-K2.5": 7168,
+        "moonshotai/Kimi-K2.6": 7168,
+        # Qwen3 (text-only)
+        "Qwen/Qwen3-235B-A22B-Instruct-2507": 4096,
+        "Qwen/Qwen3-30B-A3B-Instruct-2507": 2048,
+        "Qwen/Qwen3-30B-A3B": 2048,
+        "Qwen/Qwen3-30B-A3B-Base": 2048,
+        "Qwen/Qwen3-32B": 5120,
+        "Qwen/Qwen3-8B": 4096,
+        "Qwen/Qwen3-8B-Base": 4096,
+        "Qwen/Qwen3-4B-Instruct-2507": 2560,
+        # Qwen3-VL (config nests hidden_size under text_config)
+        "Qwen/Qwen3-VL-235B-A22B-Instruct": 4096,
+        "Qwen/Qwen3-VL-30B-A3B-Instruct": 2048,
+        # Qwen3.5 (config nests hidden_size under text_config)
+        "Qwen/Qwen3.5-397B-A17B": 4096,
+        "Qwen/Qwen3.5-35B-A3B": 2048,
+        "Qwen/Qwen3.5-35B-A3B-Base": 2048,
+        "Qwen/Qwen3.5-27B": 5120,
+        "Qwen/Qwen3.5-9B": 4096,
+        "Qwen/Qwen3.5-9B-Base": 4096,
+        "Qwen/Qwen3.5-4B": 2560,
+        # Qwen/Qwen3.5-9B and Qwen/Qwen3.5-9B-Base intentionally omitted —
+        # the values weren't independently verified. The fallback path fetches
+        # hidden_size from HF AutoConfig, which works for non-gated Qwen repos.
+        # Qwen3.6 (same architecture family as Qwen3.5, hidden_size under text_config)
+        "Qwen/Qwen3.6-27B": 5120,
+        "Qwen/Qwen3.6-35B-A3B": 2048,
+        # OpenAI
+        "openai/gpt-oss-120b": 2880,
+        "openai/gpt-oss-20b": 2880,
+        # NVIDIA Nemotron
+        "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16": 8192,
+        "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16": 4096,
+        "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16": 2688,
+    }
+
+    if model_name in _KNOWN_HIDDEN_SIZES:
+        return _KNOWN_HIDDEN_SIZES[model_name]
+
+    # Fallback: fetch from HuggingFace config. Some configs (e.g. VL, MoE) nest
+    # hidden_size under text_config rather than at the top level.
+    config = AutoConfig.from_pretrained(model_name)
+    hidden_size = getattr(config, "hidden_size", None)
+    if hidden_size is None and hasattr(config, "text_config"):
+        hidden_size = getattr(config.text_config, "hidden_size", None)
+    if hidden_size is None:
+        raise ValueError(
+            f"Could not determine hidden_size for {model_name}. "
+            f"Config type: {type(config).__name__}. "
+            f"Please add this model to _KNOWN_HIDDEN_SIZES in hyperparam_utils.py."
+        )
+    return hidden_size
+
+
+# Per-model LoRA parameter counts at rank=1, broken down by which submodules
+# are LoRA-adapted. Total params = lora_rank * sum of selected components.
+#
+# The three components correspond to Tinker's create_lora_training_client flags:
+#   "mlp"     -> trained when train_mlp=True
+#   "attn"    -> trained when train_attn=True
+#   "unembed" -> trained when train_unembed=True
+#
+# To refresh these counts (e.g., when a new model ships), ask a Tinker team
+# member to re-run the measurement script.
+_LORA_PARAMS_PER_RANK_BY_COMPONENT: dict[str, dict[str, int]] = {
+    "Qwen/Qwen3-235B-A22B-Instruct-2507": {
+        "mlp": 56_598_528,
+        "attn": 3_176_448,
+        "unembed": 156_032,
+    },
+    "Qwen/Qwen3-30B-A3B": {"mlp": 14_450_688, "attn": 835_584, "unembed": 153_984},
+    "Qwen/Qwen3-30B-A3B-Base": {"mlp": 14_450_688, "attn": 835_584, "unembed": 153_984},
+    "Qwen/Qwen3-30B-A3B-Instruct-2507": {"mlp": 14_450_688, "attn": 835_584, "unembed": 153_984},
+    "Qwen/Qwen3-32B": {"mlp": 5_898_240, "attn": 2_490_368, "unembed": 157_056},
+    "Qwen/Qwen3-4B-Instruct-2507": {"mlp": 1_327_104, "attn": 737_280, "unembed": 154_496},
+    "Qwen/Qwen3-8B": {"mlp": 1_769_472, "attn": 958_464, "unembed": 156_032},
+    "Qwen/Qwen3-8B-Base": {"mlp": 1_769_472, "attn": 958_464, "unembed": 156_032},
+    "Qwen/Qwen3-VL-235B-A22B-Instruct": {"mlp": 56_598_528, "attn": 3_176_448, "unembed": 156_032},
+    "Qwen/Qwen3-VL-30B-A3B-Instruct": {"mlp": 14_450_688, "attn": 835_584, "unembed": 153_984},
+    "Qwen/Qwen3.5-27B": {"mlp": 4_325_376, "attn": 2_965_504, "unembed": 253_440},
+    "Qwen/Qwen3.5-35B-A3B": {"mlp": 16_281_600, "attn": 1_013_760, "unembed": 250_368},
+    "Qwen/Qwen3.5-35B-A3B-Base": {"mlp": 16_281_600, "attn": 1_013_760, "unembed": 250_368},
+    "Qwen/Qwen3.5-397B-A17B": {"mlp": 96_030_720, "attn": 2_841_600, "unembed": 252_416},
+    "Qwen/Qwen3.5-4B": {"mlp": 1_130_496, "attn": 897_024, "unembed": 250_880},
+    "Qwen/Qwen3.5-9B": {"mlp": 1_572_864, "attn": 1_130_496, "unembed": 252_416},
+    "Qwen/Qwen3.5-9B-Base": {"mlp": 1_572_864, "attn": 1_130_496, "unembed": 252_416},
+    "Qwen/Qwen3.6-27B": {"mlp": 4_325_376, "attn": 2_965_504, "unembed": 253_440},
+    "Qwen/Qwen3.6-35B-A3B": {"mlp": 16_281_600, "attn": 1_013_760, "unembed": 250_368},
+    "deepseek-ai/DeepSeek-V3.1": {"mlp": 94_307_328, "attn": 2_440_000, "unembed": 136_448},
+    "deepseek-ai/DeepSeek-V3.1-Base": {"mlp": 94_307_328, "attn": 2_440_000, "unembed": 136_448},
+    "meta-llama/Llama-3.1-70B": {"mlp": 8_847_360, "attn": 4_096_000, "unembed": 136_448},
+    "meta-llama/Llama-3.1-8B": {"mlp": 1_769_472, "attn": 851_968, "unembed": 132_352},
+    "meta-llama/Llama-3.1-8B-Instruct": {"mlp": 1_769_472, "attn": 851_968, "unembed": 132_352},
+    "meta-llama/Llama-3.2-1B": {"mlp": 491_520, "attn": 212_992, "unembed": 130_304},
+    "meta-llama/Llama-3.2-3B": {"mlp": 946_176, "attn": 573_440, "unembed": 131_328},
+    "meta-llama/Llama-3.3-70B-Instruct": {"mlp": 8_847_360, "attn": 4_096_000, "unembed": 136_448},
+    "moonshotai/Kimi-K2-Thinking": {"mlp": 144_583_680, "attn": 1_940_288, "unembed": 171_008},
+    "moonshotai/Kimi-K2.5": {"mlp": 144_583_680, "attn": 1_940_288, "unembed": 171_008},
+    "moonshotai/Kimi-K2.6": {"mlp": 144_583_680, "attn": 1_940_288, "unembed": 171_008},
+    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16": {
+        "mlp": 11_346_176,
+        "attn": 584_832,
+        "unembed": 133_760,
+    },
+    "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16": {
+        "mlp": 111_349_760,
+        "attn": 1_675_264,
+        "unembed": 135_168,
+    },
+    "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16": {
+        "mlp": 254_529_536,
+        "attn": 4_134_912,
+        "unembed": 139_264,
+    },
+    "openai/gpt-oss-120b": {"mlp": 40_124_160, "attn": 746_496, "unembed": 203_968},
+    "openai/gpt-oss-20b": {"mlp": 6_842_880, "attn": 497_664, "unembed": 203_968},
+}
+
+
+def get_lora_param_count(
+    model_name: str,
+    lora_rank: int = 32,
+    train_mlp: bool = True,
+    train_attn: bool = True,
+    train_unembed: bool = True,
+) -> int:
+    """Get the number of parameters in the LoRA adapter.
+
+    Mirrors the signature of ``ServiceClient.create_lora_training_client``: the
+    returned count reflects exactly which submodules will be adapted.
+
+    Args:
+        model_name: Tinker base model identifier.
+        lora_rank: Rank of the LoRA decomposition.
+        train_mlp: Whether MLP layers are LoRA-trained.
+        train_attn: Whether attention layers are LoRA-trained.
+        train_unembed: Whether the unembedding (LM head) is LoRA-trained.
+
+    Returns:
+        Total trainable parameter count.
+    """
+    if not (train_mlp or train_attn or train_unembed):
+        raise ValueError("At least one of train_mlp, train_attn, or train_unembed must be True.")
+    if model_name not in _LORA_PARAMS_PER_RANK_BY_COMPONENT:
+        raise ConfigurationError(
+            f"No LoRA parameter count baked in for {model_name!r}. "
+            f"Ask a Tinker team member to refresh the lookup table."
+        )
+    components = _LORA_PARAMS_PER_RANK_BY_COMPONENT[model_name]
+    per_rank = 0
+    if train_mlp:
+        per_rank += components["mlp"]
+    if train_attn:
+        per_rank += components["attn"]
+    if train_unembed:
+        per_rank += components["unembed"]
+    return per_rank * lora_rank
+
+
+def get_lr(model_name: str, is_lora: bool = True) -> float:
+    """Get a recommended learning rate for the given model.
+
+    Applies model-family-specific scaling based on hidden size. Only Llama and
+    Qwen families have calibrated formulas; other models raise NotImplementedError.
+
+    Args:
+        model_name: HuggingFace model identifier.
+        is_lora: If True, scale the base LR by the LoRA multiplier (10x).
+
+    Returns:
+        The recommended learning rate.
+    """
+    base_lr = 5e-05
+    lora_multiplier = 10.0
+
+    lr = base_lr * lora_multiplier if is_lora else base_lr
+    if "llama" in model_name.lower():
+        exponent_model = 0.781
+    elif "qwen" in model_name.lower():
+        exponent_model = 0.0775
+    elif model_name in (
+        "deepseek-ai/DeepSeek-V3.1",
+        "openai/gpt-oss-20b",
+        "openai/gpt-oss-120b",
+        "moonshotai/Kimi-K2.6",
+        "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+        "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+        "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16",
+    ):
+        raise NotImplementedError(
+            f"Learning rate formula for {model_name} is not yet calibrated. "
+            "Please specify a learning rate manually."
+        )
+    else:
+        raise ConfigurationError(f"Unknown model: {model_name}")
+    # TODO: sweep to determine LR multipliers for other models
+    lr = lr * (2000 / _get_hidden_size(model_name)) ** exponent_model
+    return lr
+
+
+def get_full_finetune_param_count(model_name: str) -> float:
+    """Get the total parameter count for a model by reading safetensors headers.
+
+    Args:
+        model_name: HuggingFace model identifier.
+
+    Returns:
+        Total number of parameters as a float.
+    """
+    count = 0
+    for _name, shape in _list_param_shapes_from_safetensors_remote(model_name).items():
+        count += np.prod(shape)
+    return float(count)
+
+
+def get_full_finetune_lr_multiplier(model_name: str) -> float:
+    """Get a model-specific LR multiplier for full fine-tuning, proportional to 1/sqrt(param_count).
+
+    Args:
+        model_name: HuggingFace model identifier.
+
+    Returns:
+        The LR multiplier for full fine-tuning.
+    """
+    return 1.0 / math.sqrt(get_full_finetune_param_count(model_name))
+
+
+def get_lora_lr_multiplier(model_name: str) -> float:
+    """Get a model-specific multiplier for the LR, when training with LoRA.
+
+    Given two models A and B, and learning rate LR_A that's known to be optimal for A,
+    we can guess an optimal learning rate for B as
+    LR_B = LR_A * get_lora_lr_multiplier(B) / get_lora_lr_multiplier(A)
+
+    Args:
+        model_name: HuggingFace model identifier.
+
+    Returns:
+        The LoRA LR multiplier combining full-finetune scaling and LoRA factor.
+    """
+    return get_full_finetune_lr_multiplier(model_name) * get_lora_lr_over_full_finetune_lr(
+        model_name
+    )

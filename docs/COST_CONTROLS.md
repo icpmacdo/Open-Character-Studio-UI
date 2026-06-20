@@ -83,11 +83,11 @@ crashed.
 
 ## Implementation checklist (folds into TODO #4)
 
-- [ ] `SMOKE` preset in `octt/config.py` (alongside `QUICK` / `PAPER`).
-- [ ] `--dry-run` threaded through `pipeline.py` (stub Tinker client).
+- [x] `SMOKE` preset in `octt/config.py` (alongside `QUICK` / `PAPER`).
+- [x] `--dry-run` threaded through `pipeline.py` (stub Tinker client).
 - [ ] `RunManifest` / checkpoint-registry module: atomic JSON, URI tracking,
       resume lookup, round-trip verify.
 - [ ] `distillation.train` / `introspection.train` return
       `(training_state, sampler)` checkpoints; `pipeline.run` skips-if-exists.
 - [ ] Content-hash caching for generated data + judge verdicts.
-- [ ] `octt preflight` CLI command (validation + cost estimate + `--budget`).
+- [x] `octt preflight` CLI command (validation + cost estimate + `--budget`).

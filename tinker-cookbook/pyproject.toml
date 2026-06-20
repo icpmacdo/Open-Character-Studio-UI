@@ -1,0 +1,216 @@
+[project]
+name = "tinker_cookbook"
+dynamic = ["version"]
+description = "Implementations of post-training algorithms using the Tinker API"
+readme = "README.md"
+authors = [
+{ name = "Tinker authors", email = "tinker@thinkingmachines.ai" },
+]
+license = "Apache-2.0"
+requires-python = ">=3.11"
+dependencies = [
+    "aiohttp>=3.9.0",
+    "anyio>=4.0.0",
+    "blobfile>=3.0.0",
+    "chz>=0.4.0",
+    "cloudpickle>=3.0.0",
+    "datasets>=2.14.0",
+    "huggingface_hub>=0.20.0",
+    "numpy>=1.24.0",
+    "pillow>=10.0.0",
+    "pydantic>=2.0.0",
+    "rich>=13.0.0",
+    "safetensors>=0.4.0",
+    "termcolor>=2.0.0",
+    "tiktoken>=0.12.0", # Required for Kimi tokenizer
+    "tinker>=0.22.3",
+    "torch>=2.0",
+    "tqdm>=4.60.0",
+    "transformers>=4.57.6,<=5.5.3",
+]
+
+[project.urls]
+Homepage = "https://thinkingmachines.ai/tinker"
+Repository = "https://github.com/thinking-machines-lab/tinker-cookbook"
+Documentation = "https://tinker-docs.thinkingmachines.ai/"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-timeout>=2.0.0",
+    "ruff>=0.4.0",
+    "pyright>=1.1.300",
+]
+math-rl = [
+    "math-verify>=0.5.0",
+    "pylatexenc>=2.0",
+    "sympy>=1.12.0",
+]
+modal = [
+    "modal>=1.0.0",
+]
+multiplayer-rl = [
+    "textarena>=0.7.4",
+]
+tutorials = [
+    "marimo>=0.23.8",
+    "matplotlib>=3.7.0",
+    "tinker_cookbook[math-rl]",
+]
+vector-search = [
+    "chromadb>=1.0.0",
+    "google-genai>=1.0.0",
+    "huggingface_hub>=0.20.0",
+]
+cloud = [
+    "fsspec>=2023.1.0",
+    "gcsfs>=2023.1.0",
+    "s3fs>=2023.1.0",
+    "adlfs>=2023.1.0",
+]
+wandb = [
+    "wandb>=0.16.0",
+    "plotly>=5.0.0",
+]
+neptune-scale = [
+    "neptune-scale>=0.27.0",
+]
+trackio = [
+    "trackio<1.0.0",
+]
+verifiers = [
+    "verifiers>=0.1.9,<0.1.10",
+    "openai>=1.0.0",
+]
+inspect = [
+    "inspect-ai>=0.3.100",
+    "inspect-evals>=0.3.106",
+]
+litellm = [
+    "litellm>=1.80.0,!=1.82.7,!=1.82.8",
+]
+eval-math500 = [
+    "tinker_cookbook[math-rl]",
+]
+eval-hmmt = [
+    "antlr4-python3-runtime>=4.11,<4.14",
+]
+eval-mbpp = [
+    "tinker_cookbook[modal]",
+]
+eval-livecodebench = [
+    "tinker_cookbook[modal]",
+]
+eval-terminal-bench = [
+    "tinker_cookbook[modal]",
+]
+eval-swe-bench = [
+    "tinker_cookbook[modal]",
+]
+eval-ifbench = [
+    # The ifbench package must also be installed separately (not on PyPI):
+    #   uv pip install 'ifbench @ git+https://github.com/allenai/IFBench.git'
+    "nltk",
+    "emoji",
+    "syllapy",
+    "langdetect",
+]
+eval = [
+    "tinker_cookbook[eval-math500]",
+    "tinker_cookbook[eval-hmmt]",
+    "tinker_cookbook[eval-mbpp]",
+    "tinker_cookbook[eval-livecodebench]",
+    "tinker_cookbook[eval-terminal-bench]",
+    "tinker_cookbook[eval-swe-bench]",
+    "tinker_cookbook[eval-ifbench]",
+]
+all = [
+    "tinker_cookbook[eval]",
+    "tinker_cookbook[math-rl]",
+    "tinker_cookbook[modal]",
+    "tinker_cookbook[multiplayer-rl]",
+    "tinker_cookbook[vector-search]",
+    "tinker_cookbook[wandb]",
+    "tinker_cookbook[neptune-scale]",
+    "tinker_cookbook[trackio]",
+    "tinker_cookbook[verifiers]",
+    "tinker_cookbook[inspect]",
+    "tinker_cookbook[litellm]",
+]
+
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "vcs"
+tag-pattern = "v(?P<version>.*)"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "tinker_cookbook/_version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["tinker_cookbook"]
+exclude = ["*_test.py", "**/results/"]
+
+[tool.pytest.ini_options]
+testpaths = ["tinker_cookbook", "tests"]
+python_files = ["*_test.py", "test_*.py"]
+norecursedirs = ["tinker_cookbook/scripts"]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests requiring TINKER_API_KEY and network access",
+    "downstream_compat: marks tests that verify public API contracts for downstream consumers",
+    "timeout: per-test timeout in seconds (requires pytest-timeout)",
+]
+
+[tool.ruff]
+line-length = 100
+exclude = [
+    # Vendored from HuggingFace, kept identical to upstream
+    "kimi-k2.5-hf-tokenizer/tool_declaration_ts.py",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes (unused imports, undefined names)
+    "I",    # isort (import sorting)
+    "UP",   # pyupgrade (modernize Python syntax)
+    "B",    # flake8-bugbear (common bugs and design problems)
+    "SIM",  # flake8-simplify (simplifiable code)
+    "RUF",  # Ruff-specific rules
+    "C4",   # flake8-comprehensions (unnecessary comprehensions)
+]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "B028",   # no explicit stacklevel in warnings
+    "SIM108", # ternary operator (can reduce readability)
+    "UP007",  # use X | Y for union types (not always clearer)
+    "RUF001", # ambiguous unicode character in string (intentional in tokenizer code)
+    "RUF002", # ambiguous unicode character in docstring
+    "RUF003", # ambiguous unicode character in comment
+    "RUF005", # collection-literal-concatenation (stylistic, not a bug)
+    "RUF006", # asyncio-dangling-task (false positives with our patterns)
+    "RUF012", # mutable-class-default (conflicts with chz dataclass patterns)
+    "RUF046", # unnecessary-cast-to-int (explicit casts aid readability)
+    "B008",   # function-call-in-default-argument (to be fixed in a follow-up)
+    "B905",   # zip-without-explicit-strict (to be tightened in a follow-up)
+    "B023",   # function-uses-loop-variable (to be fixed in a follow-up)
+    "B027",   # empty-method-without-abstract-decorator (intentional in base classes)
+    "RUF059", # unused-unpacked-variable (to be fixed in a follow-up)
+    "SIM117", # multiple-with-statements (can reduce readability with context managers)
+    "RUF022", # unsorted-dunder-all (we group __all__ by category, not alphabetically)
+]
+
+[tool.pyright]
+include = ["tinker_cookbook"]
+exclude = [
+    ".venv",
+    # Vendored from HuggingFace, kept identical to upstream
+    "kimi-k2.5-hf-tokenizer/tool_declaration_ts.py",
+]
+# PyTorch's __init__.py doesn't declare __all__, so recent pyright versions
+# flag every torch.* symbol as a private import. See pytorch/pytorch#50798.
+reportPrivateImportUsage = "none"
