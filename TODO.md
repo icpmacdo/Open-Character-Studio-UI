@@ -13,7 +13,7 @@ constitutions/data (11,12) feeding in along the way.
 - [x] 3. **Deliverable form** — code + a light recipe doc, grown incrementally (the doc maps paper sections to code; README seeds it). No separate spec phase.
 
 ## Tinker integration (foundation)
-- [ ] 4. **Tinker client wiring** — auth (`TINKER_API_KEY`), `tinker`/`tinker_cookbook` setup, renderer selection per model.
+- [ ] 4. **Tinker client wiring** — auth (`TINKER_API_KEY`), `tinker`/`tinker_cookbook` setup, renderer selection per model. Apply cost-control / checkpoint practices from `docs/COST_CONTROLS.md` as we build.
 
 ## Recipe stages (currently structured stubs)
 - [ ] 5. **Stage 2 — DPO pair generation** (`octt/distillation.py`) — teacher-with-constitution → *chosen*, base student → *rejected*; LIMA + constitution-relevant prompts.
