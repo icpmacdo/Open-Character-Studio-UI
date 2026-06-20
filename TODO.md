@@ -8,9 +8,9 @@ introspection (7,8) → merge (9) → eval (10) → scaling analysis (13)**, wit
 constitutions/data (11,12) feeding in along the way.
 
 ## Decisions (parked — these gate the build)
-- [x] 1. **Model set** — LOCKED. Dense ladder (Qwen): `Qwen3.5-4B` / `Qwen3.5-9B` / `Qwen3.6-27B`. MoE ladder (Nemotron-3): `Nano-30B-A3B` / `Super-120B-A12B` / `Ultra-550B-A55B` (3×3). See `octt/models.py`. Remaining: paste Nano-30B-A3B train price (`?` for now); cross-family confound (dense=Qwen, MoE=Nemotron) is by design.
-- [ ] 2. **DPO teacher** on Tinker — `TODO(teacher)` in `octt/models.py`. Paper used GLM-4.5-Air (external); `TEACHER_MODEL` is `None`.
-- [ ] 3. **Deliverable form** — reference code vs. prose doc vs. both.
+- [x] 1. **Model set** — LOCKED. Dense ladder (Qwen): `Qwen3.5-4B` / `Qwen3.5-9B` / `Qwen3.6-27B`. MoE ladder (Nemotron-3): `Nano-30B-A3B` / `Super-120B-A12B` / `Ultra-550B-A55B` (3×3), all prices recorded. See `octt/models.py`. Note: cross-family confound (dense=Qwen, MoE=Nemotron) is by design.
+- [x] 2. **DPO teacher** — set to `Qwen/Qwen3.5-397B-A17B` (family-consistent, strongest Qwen instruct MoE on Tinker). Alternatives noted in `octt/models.py`: `Kimi-K2.6`, `DeepSeek-V3.1`. Confirm before first run.
+- [x] 3. **Deliverable form** — code + a light recipe doc, grown incrementally (the doc maps paper sections to code; README seeds it). No separate spec phase.
 
 ## Tinker integration (foundation)
 - [ ] 4. **Tinker client wiring** — auth (`TINKER_API_KEY`), `tinker`/`tinker_cookbook` setup, renderer selection per model.

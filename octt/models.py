@@ -12,7 +12,8 @@ page, reflecting a limited-time 50% discount.
 Caveats baked into this design (intentional, but worth knowing):
   - Cross-family: the dense ladder is Qwen, the MoE ladder is Nemotron. This is a
     confound for "dense vs MoE" per se; we compare scaling *trends* within each
-    family rather than matched pairs.
+    family. ARCH_CONTROL_PAIR (Qwen3.6-27B dense vs Qwen3.6-35B-A3B MoE) is a
+    same-generation matched pair to gauge how large that confound is.
   - Param ranges differ: the dense ladder tops out at 27B; the MoE ladder spans
     30B-550B total (3B-55B active). Compare against both active- and total-params.
 """
@@ -50,7 +51,13 @@ CANDIDATES: dict[str, ModelSpec] = {
         "Qwen/Qwen3.5-9B", "dense", "Qwen", "Small", 9.0, 9.0, 64, 0.44, 1.33, 1.33
     ),
     "Qwen/Qwen3.6-27B": ModelSpec(
-        "Qwen/Qwen3.6-27B", "dense", "Qwen", "Medium", 27.0, 27.0, 64, 1.24, 3.73, 3.73
+        "Qwen/Qwen3.6-27B", "dense", "Qwen", "Medium", 27.0, 27.0, 64, 1.24, 3.73, 3.73,
+        note="dense half of the within-family architecture control",
+    ),
+    # --- Architecture control (Qwen MoE, same generation as Qwen3.6-27B) ---
+    "Qwen/Qwen3.6-35B-A3B": ModelSpec(
+        "Qwen/Qwen3.6-35B-A3B", "moe", "Qwen", "Medium", 35.0, 3.0, 64, 0.36, 0.89, 1.07,
+        note="MoE half of the within-family architecture control vs Qwen3.6-27B",
     ),
     # --- MoE ladder (Nemotron-3) ---
     "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16": ModelSpec(
@@ -64,8 +71,8 @@ CANDIDATES: dict[str, ModelSpec] = {
     ),
     # Smallest MoE rung.
     "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16": ModelSpec(
-        "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", "moe", "Nemotron", "Small",
-        30.0, 3.0, 64, note="prices TBD",
+        "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", "moe", "Nemotron", "Medium",
+        30.0, 3.0, 64, 0.13, 0.33, 0.40,
     ),
 }
 
@@ -74,6 +81,8 @@ DENSE_LADDER: tuple[str, ...] = (
     "Qwen/Qwen3.5-9B",
     "Qwen/Qwen3.6-27B",
 )
+
+# Qwen MoE used only as the architecture control / teacher, not a ladder rung.
 
 MOE_LADDER: tuple[str, ...] = (
     "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
@@ -84,8 +93,17 @@ MOE_LADDER: tuple[str, ...] = (
 # Full sweep across both ladders.
 SCALING_SET: tuple[str, ...] = DENSE_LADDER + MOE_LADDER
 
-# TODO(teacher): DPO teacher on Tinker is an open decision. Paper used GLM-4.5-Air.
-TEACHER_MODEL: str | None = None
+# Matched within-family dense/MoE pair (same generation/tokenizer/scale) used to
+# check whether the cross-family ladder comparison is confounded by family.
+ARCH_CONTROL_PAIR: tuple[str, str] = (
+    "Qwen/Qwen3.6-27B",  # dense
+    "Qwen/Qwen3.6-35B-A3B",  # MoE
+)
+
+# DPO teacher. Paper used GLM-4.5-Air (not on Tinker). Recommended Tinker pick:
+# the strongest family-consistent instruct MoE, so chosen samples match the Qwen
+# students stylistically. Alternatives: moonshotai/Kimi-K2.6, deepseek-ai/DeepSeek-V3.1.
+TEACHER_MODEL: str = "Qwen/Qwen3.5-397B-A17B"
 
 
 def get(tinker_id: str) -> ModelSpec:

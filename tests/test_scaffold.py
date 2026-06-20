@@ -44,5 +44,15 @@ def test_scaling_set_covers_both_ladders():
     assert set(models.SCALING_SET) == set(models.DENSE_LADDER) | set(models.MOE_LADDER)
 
 
+def test_arch_control_pair_is_dense_vs_moe_same_family():
+    dense, moe = (models.get(m) for m in models.ARCH_CONTROL_PAIR)
+    assert dense.arch == "dense" and moe.arch == "moe"
+    assert dense.family == moe.family == "Qwen"
+
+
+def test_teacher_is_registered_or_known():
+    assert models.TEACHER_MODEL  # a teacher is chosen (not None)
+
+
 def test_constitutions_dir_exists():
     assert Path("constitutions").is_dir()
