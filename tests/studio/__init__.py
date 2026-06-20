@@ -1,1 +1,0 @@
-# Studio tests module
