@@ -40,9 +40,12 @@ def test_pipeline_eval_shows_persona_shift(tmp_path):
     summary = json.loads((out / "eval_results.json").read_text())
     assert set(summary) == {
         "persona", "student_model", "eval_target", "shift_summary",
-        "base_elo", "trained_elo",
+        "recipe", "base_elo", "trained_elo",
     }
     assert summary["eval_target"] == "dry-run"
+    assert summary["recipe"]["merge_adapters"] is True
+    assert summary["recipe"]["dpo_lora_rank"] == 64
+    assert summary["recipe"]["sft_lora_rank"] == 64
     s = summary["shift_summary"]
     assert s["top_increased"] and s["top_decreased"]
     assert s["net_shift"] > 0
@@ -88,3 +91,10 @@ def test_pipeline_without_merge_uses_sft_as_final(tmp_path):
         config=cfg_no_merge, dry_run=True,
     )
     assert res.final_checkpoint.sampler_path == res.sft_checkpoint.sampler_path
+    assert res.final_checkpoint.extra["merge_skipped"] is True
+    assert res.eval_target == "sft-direct"
+    summary = json.loads((out / "eval_results.json").read_text())
+    assert summary["eval_target"] == "sft-direct"
+    assert summary["recipe"]["merge_adapters"] is False
+    stages = json.loads((out / "manifest.json").read_text())["stages"]
+    assert stages["merge"]["extra"]["merge_skipped"] is True

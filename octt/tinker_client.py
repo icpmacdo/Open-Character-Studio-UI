@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import shutil
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -429,6 +430,68 @@ def _missing_price_warnings(
     return warnings
 
 
+def validate_lora_rank_limits(
+    student_models: Sequence[str],
+    config: RecipeConfig,
+) -> list[str]:
+    """Return blockers for known Tinker LoRA-rank caps."""
+    blockers: list[str] = []
+    for model_id in student_models:
+        spec = models.CANDIDATES.get(model_id)
+        if spec is None or spec.max_lora_rank is None:
+            continue
+        limit = spec.max_lora_rank
+        too_high = [
+            f"{stage} rank {rank}"
+            for stage, rank in (("DPO", config.dpo.lora_rank), ("SFT", config.sft.lora_rank))
+            if rank > limit
+        ]
+        if too_high:
+            used = " and ".join(too_high)
+            blockers.append(
+                f"{model_id} max LoRA rank is {limit}, but config uses {used}"
+            )
+    return blockers
+
+
+def _existing_parent(path: Path) -> Path:
+    parent = path if path.exists() else path.parent
+    while not parent.exists() and parent != parent.parent:
+        parent = parent.parent
+    return parent
+
+
+def _merge_disk_warnings(
+    student_models: Sequence[str],
+    config: RecipeConfig,
+    output_dir: Path,
+) -> list[str]:
+    if not config.merge_adapters:
+        return []
+    large_models = [
+        spec
+        for model_id in student_models
+        if (spec := models.CANDIDATES.get(model_id)) is not None
+        and (spec.tier.lower() == "large" or spec.total_params_b >= 100)
+    ]
+    if not large_models:
+        return []
+
+    names = ", ".join(spec.tinker_id.split("/")[-1] for spec in large_models)
+    warning = (
+        "Local merge downloads both DPO and SFT adapters for large rungs "
+        f"({names}) and can exhaust disk; use --no-merge to evaluate the SFT "
+        "sampler directly while keeping the paid training/eval path live."
+    )
+    try:
+        parent = _existing_parent(output_dir)
+        free_gib = shutil.disk_usage(parent).free / (1024 ** 3)
+        warning += f" Free space near {parent}: {free_gib:.1f} GiB."
+    except OSError:
+        pass
+    return [warning]
+
+
 def build_preflight_report(
     *,
     student_models: Sequence[str] = models.SCALING_SET,
@@ -460,6 +523,8 @@ def build_preflight_report(
 
     warnings.extend(_missing_price_warnings(student_models, teacher_model))
     warnings.extend(_output_dir_warnings(output_dir))
+    warnings.extend(_merge_disk_warnings(student_models, cfg, output_dir))
+    blockers.extend(validate_lora_rank_limits(student_models, cfg))
 
     estimate = estimate_tinker_cost(cfg, student_models, teacher_model)
     if budget_usd is not None and estimate.total_usd > budget_usd:

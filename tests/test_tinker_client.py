@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 
 from octt import models, tinker_client
 from octt.config import get_config
@@ -83,6 +84,55 @@ def test_preflight_budget_blocks_when_estimate_exceeds_ceiling(monkeypatch, tmp_
 
     assert not report.ok
     assert any("exceeds budget" in blocker for blocker in report.blockers)
+
+
+def test_preflight_blocks_ultra_rank_above_known_cap(monkeypatch, tmp_path):
+    monkeypatch.setenv("TINKER_API_KEY", "test-key")
+
+    report = tinker_client.build_preflight_report(
+        student_models=("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16",),
+        config=get_config("smoke"),
+        dry_run=False,
+        output_dir=tmp_path / "runs",
+    )
+
+    assert not report.ok
+    assert any("max LoRA rank is 32" in blocker for blocker in report.blockers)
+
+
+def test_preflight_allows_ultra_rank32_no_merge(monkeypatch, tmp_path):
+    monkeypatch.setenv("TINKER_API_KEY", "test-key")
+    cfg = get_config("smoke")
+    cfg = replace(
+        cfg,
+        dpo=replace(cfg.dpo, lora_rank=32),
+        sft=replace(cfg.sft, lora_rank=32),
+        merge_adapters=False,
+    )
+
+    report = tinker_client.build_preflight_report(
+        student_models=("nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16",),
+        config=cfg,
+        dry_run=False,
+        output_dir=tmp_path / "runs",
+    )
+
+    assert report.ok
+    assert not any("Local merge downloads" in warning for warning in report.warnings)
+
+
+def test_preflight_warns_when_large_rungs_will_merge(monkeypatch, tmp_path):
+    monkeypatch.setenv("TINKER_API_KEY", "test-key")
+
+    report = tinker_client.build_preflight_report(
+        student_models=("nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",),
+        config=get_config("smoke"),
+        dry_run=False,
+        output_dir=tmp_path / "runs",
+    )
+
+    assert report.ok
+    assert any("Local merge downloads" in warning for warning in report.warnings)
 
 
 def test_cost_estimate_is_positive_for_smoke_scale():

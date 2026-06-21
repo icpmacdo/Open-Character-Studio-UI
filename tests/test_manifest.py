@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 from octt import manifest
 from octt.config import get_config
@@ -72,6 +73,23 @@ def test_manifest_record_and_skip(tmp_path):
     assert m2.run_id == m.run_id
     assert m2.stage("dpo").sampler_path == ckpt.sampler_path
     assert m2.stages["dpo"]["extra"]["pairs_path"] == "p.jsonl"
+
+
+def test_manifest_config_mismatch_raises_by_default(tmp_path):
+    cfg = get_config("smoke")
+    manifest.RunManifest.load_or_create(
+        tmp_path, model="Qwen/Qwen3.5-4B", persona="humorous", config=cfg
+    )
+    changed = replace(cfg, dpo=replace(cfg.dpo, lora_rank=32), sft=replace(cfg.sft, lora_rank=32))
+
+    try:
+        manifest.RunManifest.load_or_create(
+            tmp_path, model="Qwen/Qwen3.5-4B", persona="humorous", config=changed
+        )
+    except ValueError as exc:
+        assert "Manifest config hash mismatch" in str(exc)
+    else:
+        raise AssertionError("expected config mismatch to raise")
 
 
 def test_content_hash_distinguishes_inputs():

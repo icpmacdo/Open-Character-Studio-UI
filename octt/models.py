@@ -40,6 +40,7 @@ class ModelSpec:
     price_sample: float | None = None
     price_train: float | None = None
     note: str = ""
+    max_lora_rank: int | None = None
 
 
 CANDIDATES: dict[str, ModelSpec] = {
@@ -68,6 +69,7 @@ CANDIDATES: dict[str, ModelSpec] = {
         "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16", "moe", "Nemotron", "Large",
         550.0, 55.0, 64, 1.66, 4.15, 4.98,
         note="also available at 256K context (...:peft:262144) at 2x price",
+        max_lora_rank=32,
     ),
     # Smallest MoE rung.
     "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16": ModelSpec(

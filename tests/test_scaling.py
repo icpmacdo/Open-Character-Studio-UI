@@ -21,6 +21,9 @@ def test_scaling_run_covers_set_and_summarizes(tmp_path):
     assert {r["arch"] for r in rows} == {"dense"}
     assert all(isinstance(r["net_shift"], float) for r in rows)
     assert all(r["eval_target"] == "dry-run" for r in rows)
+    assert all(r["dpo_lora_rank"] == 64 for r in rows)
+    assert all(r["sft_lora_rank"] == 64 for r in rows)
+    assert all(r["merge_adapters"] is True for r in rows)
 
 
 def test_scaling_report_files_written(tmp_path):
@@ -35,6 +38,7 @@ def test_scaling_report_files_written(tmp_path):
     md = (out / "report.md").read_text()
     assert "Dense" in md and "MoE" in md
     assert "Net shift" in md
+    assert "Recipe" in md
 
 
 def test_scaling_markdown_handles_missing_shift():
@@ -93,3 +97,5 @@ def test_scaling_passes_eval_and_capability_flags(monkeypatch, tmp_path):
     row = scaling.summarize(runs)[0]
     assert row["capability_status"] == "preview"
     assert row["capability_suite"] == "smoke"
+    assert row["recipe"] == {}
+    assert row["merge_adapters"] is None

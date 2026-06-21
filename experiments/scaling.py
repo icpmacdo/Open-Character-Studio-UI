@@ -77,6 +77,7 @@ def summarize(runs: list[ScalingRun]) -> list[dict]:
     for r in runs:
         spec, res = r.spec, r.result
         summary = res.shift_summary or {}
+        recipe = res.recipe or {}
         rows.append(
             {
                 "model": spec.tinker_id,
@@ -87,6 +88,10 @@ def summarize(runs: list[ScalingRun]) -> list[dict]:
                 "train_price": spec.price_train,
                 "persona": res.persona,
                 "eval_target": res.eval_target,
+                "recipe": recipe,
+                "merge_adapters": recipe.get("merge_adapters"),
+                "dpo_lora_rank": recipe.get("dpo_lora_rank"),
+                "sft_lora_rank": recipe.get("sft_lora_rank"),
                 "net_shift": res.persona_trait_shift,
                 "aligned_mean_delta": summary.get("aligned_mean_delta"),
                 "opposing_mean_delta": summary.get("opposing_mean_delta"),
@@ -106,13 +111,13 @@ def summarize(runs: list[ScalingRun]) -> list[dict]:
 def to_markdown(rows: list[dict]) -> str:
     """Render the summary as a markdown table, grouped by ladder trend."""
     header = (
-        "| Model | Arch | Total (B) | Active (B) | Δ aligned | Δ opposing | Net shift | Eval |\n"
-        "|---|---|---:|---:|---:|---:|---:|---|"
+        "| Model | Arch | Total (B) | Active (B) | Δ aligned | Δ opposing | Net shift | Recipe | Eval |\n"
+        "|---|---|---:|---:|---:|---:|---:|---|---|"
     )
     lines = [header]
     for row in rows:
         lines.append(
-            "| {model} | {arch} | {total:g} | {active:g} | {aligned} | {opposing} | {net} | {target} |".format(
+            "| {model} | {arch} | {total:g} | {active:g} | {aligned} | {opposing} | {net} | {recipe} | {target} |".format(
                 model=row["model"].split("/")[-1],
                 arch=row["arch"],
                 total=row["total_params_b"],
@@ -120,6 +125,7 @@ def to_markdown(rows: list[dict]) -> str:
                 aligned=_fmt(row.get("aligned_mean_delta")),
                 opposing=_fmt(row.get("opposing_mean_delta")),
                 net=_fmt(row.get("net_shift")),
+                recipe=_recipe_label(row),
                 target=row.get("eval_target") or "n/a",
             )
         )
@@ -135,6 +141,20 @@ def to_markdown(rows: list[dict]) -> str:
 
 def _fmt(value: object) -> str:
     return f"{value:+.1f}" if isinstance(value, (int, float)) else "n/a"
+
+
+def _recipe_label(row: dict) -> str:
+    dpo_rank = row.get("dpo_lora_rank")
+    sft_rank = row.get("sft_lora_rank")
+    merge = row.get("merge_adapters")
+    if dpo_rank is None and sft_rank is None and merge is None:
+        return "n/a"
+    if dpo_rank == sft_rank and dpo_rank is not None:
+        rank_label = f"rank{dpo_rank}"
+    else:
+        rank_label = f"dpo{dpo_rank or 'n/a'}/sft{sft_rank or 'n/a'}"
+    merge_label = "merge" if merge is True else "no-merge" if merge is False else "merge?"
+    return f"{rank_label}/{merge_label}"
 
 
 def _trend_line(label: str, rows: list[dict]) -> str:

@@ -18,8 +18,38 @@ from dataclasses import replace
 from pathlib import Path
 
 from . import constitution, models, tinker_client
-from .config import get_capability_config, get_config
+from .config import RecipeConfig, get_capability_config, get_config
 from .tinker_client import DEFAULT_OUTPUT_DIR
+
+
+def _positive_int(raw: str) -> int:
+    value = int(raw)
+    if value <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return value
+
+
+def _recipe_config_from_args(args: argparse.Namespace) -> RecipeConfig:
+    cfg = get_config(args.scale)
+    lora_rank = getattr(args, "lora_rank", None)
+    if lora_rank is not None:
+        cfg = replace(
+            cfg,
+            dpo=replace(cfg.dpo, lora_rank=lora_rank),
+            sft=replace(cfg.sft, lora_rank=lora_rank),
+        )
+    if getattr(args, "no_merge", False):
+        cfg = replace(cfg, merge_adapters=False)
+    return cfg
+
+
+def _recipe_label(cfg: RecipeConfig) -> str:
+    merge = "merge" if cfg.merge_adapters else "no-merge"
+    if cfg.dpo.lora_rank == cfg.sft.lora_rank:
+        rank = f"rank{cfg.dpo.lora_rank}"
+    else:
+        rank = f"dpo-rank{cfg.dpo.lora_rank}/sft-rank{cfg.sft.lora_rank}"
+    return f"{rank}, {merge}"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -64,6 +94,16 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         help="maximum allowed estimated spend in USD",
     )
+    preflight.add_argument(
+        "--lora-rank",
+        type=_positive_int,
+        help="override both DPO and SFT LoRA rank for compatibility checks/runs",
+    )
+    preflight.add_argument(
+        "--no-merge",
+        action="store_true",
+        help="skip local DPO+SFT adapter merge in the checked recipe",
+    )
 
     run_cmd = sub.add_parser("run", help="run the full recipe for one model/persona")
     run_cmd.add_argument("persona")
@@ -73,6 +113,16 @@ def main(argv: list[str] | None = None) -> int:
     run_cmd.add_argument("--out", default=None, help="output directory (default runs/<persona>)")
     run_cmd.add_argument("--execute", action="store_true", help="hit the paid runtime (default: dry run)")
     run_cmd.add_argument("--no-eval", action="store_true", help="skip the revealed-preferences eval")
+    run_cmd.add_argument(
+        "--lora-rank",
+        type=_positive_int,
+        help="override both DPO and SFT LoRA rank; use 32 for Ultra compatibility",
+    )
+    run_cmd.add_argument(
+        "--no-merge",
+        action="store_true",
+        help="skip local DPO+SFT adapter merge and evaluate the SFT sampler directly",
+    )
     run_cmd.add_argument(
         "--eval-capabilities",
         action="store_true",
@@ -119,6 +169,16 @@ def main(argv: list[str] | None = None) -> int:
         help="model to include; repeat to override the default cost-ordered sweep",
     )
     scaling_cmd.add_argument("--execute", action="store_true", help="hit the paid runtime (default: dry run)")
+    scaling_cmd.add_argument(
+        "--lora-rank",
+        type=_positive_int,
+        help="override both DPO and SFT LoRA rank for all models in the sweep",
+    )
+    scaling_cmd.add_argument(
+        "--no-merge",
+        action="store_true",
+        help="skip local DPO+SFT adapter merge and evaluate SFT samplers directly",
+    )
     scaling_cmd.add_argument(
         "--eval-merged-local",
         action="store_true",
@@ -172,10 +232,11 @@ def main(argv: list[str] | None = None) -> int:
             )
     elif args.command == "preflight":
         student_models = tuple(args.student_models or models.SCALING_SET)
+        cfg = _recipe_config_from_args(args)
         report = tinker_client.build_preflight_report(
             student_models=student_models,
             teacher_model=args.teacher,
-            config=get_config(args.scale),
+            config=cfg,
             dry_run=args.dry_run,
             budget_usd=args.budget,
         )
@@ -184,6 +245,7 @@ def main(argv: list[str] | None = None) -> int:
 
         print(f"status: {status}")
         print(f"scale: {args.scale}")
+        print(f"recipe: {_recipe_label(cfg)}")
         print(f"cookbook: {report.cookbook_path}")
         print(f"output_dir: {report.output_dir}")
         print(f"api_key: {api_key}")
@@ -205,7 +267,11 @@ def main(argv: list[str] | None = None) -> int:
 
         out = Path(args.out) if args.out else DEFAULT_OUTPUT_DIR / args.persona
         mode = "EXECUTE (paid)" if args.execute else "dry-run"
-        print(f"running recipe: persona={args.persona} model={args.model} scale={args.scale} [{mode}]")
+        cfg = _recipe_config_from_args(args)
+        print(
+            f"running recipe: persona={args.persona} model={args.model} "
+            f"scale={args.scale} recipe={_recipe_label(cfg)} [{mode}]"
+        )
         capability_config = replace(
             get_capability_config(args.capability_suite),
             model_args=tuple(args.capability_model_arg),
@@ -215,7 +281,7 @@ def main(argv: list[str] | None = None) -> int:
             student_model=args.model,
             teacher_model=args.teacher,
             out_dir=out,
-            config=get_config(args.scale),
+            config=cfg,
             dry_run=not args.execute,
             run_eval=not args.no_eval,
             eval_merged_locally=args.eval_merged_local,
@@ -257,7 +323,11 @@ def main(argv: list[str] | None = None) -> int:
         out = Path(args.out) if args.out else DEFAULT_OUTPUT_DIR / f"scaling-{args.persona}"
         model_set = tuple(args.model_set) if args.model_set else models.SCALING_SET
         mode = "EXECUTE (paid)" if args.execute else "dry-run"
-        print(f"scaling sweep: persona={args.persona} models={len(model_set)} scale={args.scale} [{mode}]")
+        cfg = _recipe_config_from_args(args)
+        print(
+            f"scaling sweep: persona={args.persona} models={len(model_set)} "
+            f"scale={args.scale} recipe={_recipe_label(cfg)} [{mode}]"
+        )
         capability_config = replace(
             get_capability_config(args.capability_suite),
             model_args=tuple(args.capability_model_arg),
@@ -267,7 +337,7 @@ def main(argv: list[str] | None = None) -> int:
             teacher_model=args.teacher,
             out_dir=out,
             model_set=model_set,
-            config=get_config(args.scale),
+            config=cfg,
             dry_run=not args.execute,
             eval_merged_locally=args.eval_merged_local,
             condition=args.condition,

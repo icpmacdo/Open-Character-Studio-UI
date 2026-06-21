@@ -49,6 +49,7 @@ class PipelineResult:
     trained_elo: dict[str, float] = field(default_factory=dict)
     shift_summary: dict = field(default_factory=dict)
     eval_target: str | None = None
+    recipe: dict = field(default_factory=dict)
     capability_benchmarks: dict = field(default_factory=dict)
 
     @property
@@ -73,6 +74,8 @@ def _eval_plan(
     serve the local merge off-Tinker (``eval_merged_locally``, feasible only for
     small rungs) or fall back to the best samplable proxy, always recording which.
     """
+    if final.extra.get("merge_skipped") and final.sampler_path:
+        return final.sampler_path, None, "sft-direct"
     if final.sampler_path:
         return final.sampler_path, None, "dry-run" if dry_run else "sampler"
     if eval_merged_locally and final.local_path and not dry_run:
@@ -91,6 +94,36 @@ def _eval_plan(
             label,
         )
     return proxy, None, label
+
+
+def _sft_direct_checkpoint(sft_ckpt: StageCheckpoint) -> StageCheckpoint:
+    extra = dict(sft_ckpt.extra)
+    extra.update(
+        {
+            "merge_skipped": True,
+            "source_stage": "sft",
+            "sft_sampler": sft_ckpt.sampler_path,
+        }
+    )
+    return StageCheckpoint(
+        sampler_path=sft_ckpt.sampler_path,
+        state_path=sft_ckpt.state_path,
+        local_path=sft_ckpt.local_path,
+        step=sft_ckpt.step,
+        config_hash=sft_ckpt.config_hash,
+        extra=extra,
+    )
+
+
+def _recipe_metadata(cfg: RecipeConfig) -> dict:
+    return {
+        "config_hash": manifest.config_hash(cfg),
+        "merge_adapters": cfg.merge_adapters,
+        "dpo_lora_rank": cfg.dpo.lora_rank,
+        "dpo_lora_alpha": cfg.dpo.lora_alpha,
+        "sft_lora_rank": cfg.sft.lora_rank,
+        "sft_lora_alpha": cfg.sft.lora_alpha,
+    }
 
 
 def _verify_checkpoint(runtime: tinker_client.TinkerRuntime, model: str, ckpt: StageCheckpoint) -> None:
@@ -140,11 +173,16 @@ def run(
     client_config = tinker_config or tinker_client.TinkerClientConfig(dry_run=dry_run)
     dry_run = client_config.dry_run
     offline = dry_run if offline is None else offline
+    if not dry_run:
+        rank_blockers = tinker_client.validate_lora_rank_limits((student_model,), cfg)
+        if rank_blockers:
+            raise ValueError("; ".join(rank_blockers))
 
-    runtime = tinker_client.create_runtime((teacher_model, student_model), config=client_config)
     run_manifest = manifest.RunManifest.load_or_create(
         out_dir, model=student_model, persona=persona, config=cfg
     )
+    recipe_metadata = _recipe_metadata(cfg)
+    runtime = tinker_client.create_runtime((teacher_model, student_model), config=client_config)
 
     # -- Stage 2: DPO --------------------------------------------------------
     dpo_ckpt = run_manifest.stage("dpo")
@@ -183,7 +221,12 @@ def run(
         else:
             logger.info("Skipping merge; checkpoint exists in manifest")
     else:
-        final_ckpt = sft_ckpt
+        final_ckpt = run_manifest.stage("merge")
+        if final_ckpt is None or not final_ckpt.ok or not final_ckpt.extra.get("merge_skipped"):
+            final_ckpt = _sft_direct_checkpoint(sft_ckpt)
+            run_manifest.record_stage("merge", final_ckpt)
+        else:
+            logger.info("Skipping merge; recipe disables adapter merge")
 
     # -- Eval: revealed preferences (base vs character-trained) -------------
     base_elo: dict[str, float] = {}
@@ -218,6 +261,7 @@ def run(
             "persona": persona,
             "student_model": student_model,
             "eval_target": eval_target,
+            "recipe": recipe_metadata,
             "shift_summary": shift_summary,
             "base_elo": base_elo,
             "trained_elo": trained_elo,
@@ -246,6 +290,7 @@ def run(
                 "persona": persona,
                 "student_model": student_model,
                 "eval_target": eval_target,
+                "recipe": recipe_metadata,
                 "shift_summary": shift_summary,
                 "base_elo": base_elo,
                 "trained_elo": trained_elo,
@@ -267,6 +312,7 @@ def run(
         trained_elo=trained_elo,
         shift_summary=shift_summary,
         eval_target=eval_target,
+        recipe=recipe_metadata,
         capability_benchmarks=capability_benchmarks,
     )
     return result

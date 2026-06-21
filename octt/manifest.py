@@ -217,18 +217,31 @@ class RunManifest:
         model: str,
         persona: str,
         config: Any | None = None,
+        allow_config_mismatch: bool = False,
     ) -> "RunManifest":
         """Load an existing manifest from *out_dir* or create a fresh one.
 
-        If a manifest exists but was written for a different config hash, it is
-        kept (the deterministic ``run_id`` already namespaces by config); the
-        loaded record wins so finished stages resume.
+        If a manifest exists but was written for a different config hash, fail
+        fast by default. This prevents a changed recipe from silently reusing
+        incompatible paid checkpoints when the caller reuses an output directory.
         """
         out_dir = Path(out_dir)
         cfg_hash = config_hash(config) if config is not None else None
         existing = out_dir / MANIFEST_BASE_NAME
         if existing.exists():
             data = json.loads(existing.read_text())
+            existing_hash = data.get("config_hash")
+            if (
+                cfg_hash is not None
+                and existing_hash is not None
+                and existing_hash != cfg_hash
+                and not allow_config_mismatch
+            ):
+                raise ValueError(
+                    f"Manifest config hash mismatch at {existing}: existing "
+                    f"{existing_hash}, requested {cfg_hash}. Use a fresh output "
+                    "directory for the changed recipe."
+                )
             return cls(
                 run_id=data["run_id"],
                 model=data.get("model", model),
