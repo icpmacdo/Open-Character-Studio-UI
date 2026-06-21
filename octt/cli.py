@@ -14,10 +14,11 @@ hit the paid Tinker runtime. Always ``octt preflight`` before ``--execute``.
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from pathlib import Path
 
 from . import constitution, models, tinker_client
-from .config import get_config
+from .config import get_capability_config, get_config
 from .tinker_client import DEFAULT_OUTPUT_DIR
 
 
@@ -72,6 +73,29 @@ def main(argv: list[str] | None = None) -> int:
     run_cmd.add_argument("--out", default=None, help="output directory (default runs/<persona>)")
     run_cmd.add_argument("--execute", action="store_true", help="hit the paid runtime (default: dry run)")
     run_cmd.add_argument("--no-eval", action="store_true", help="skip the revealed-preferences eval")
+    run_cmd.add_argument(
+        "--eval-capabilities",
+        action="store_true",
+        help="run or preview the opt-in LightEval capability benchmark harness",
+    )
+    run_cmd.add_argument(
+        "--capability-suite",
+        choices=("smoke", "full"),
+        default="smoke",
+        help="LightEval capability suite: smoke is TruthfulQA with max-samples; full adds "
+        "WinoGrande, HellaSwag, ARC-C, and MMLU",
+    )
+    run_cmd.add_argument(
+        "--capability-model",
+        help="explicit Hugging Face/local model reference for LightEval; otherwise uses the "
+        "local merged adapter when --eval-merged-local is available",
+    )
+    run_cmd.add_argument(
+        "--capability-model-arg",
+        action="append",
+        default=[],
+        help="extra LightEval model arg as key=value; repeat for dtype, batch_size, etc.",
+    )
     run_cmd.add_argument(
         "--eval-merged-local",
         action="store_true",
@@ -149,6 +173,10 @@ def main(argv: list[str] | None = None) -> int:
         out = Path(args.out) if args.out else DEFAULT_OUTPUT_DIR / args.persona
         mode = "EXECUTE (paid)" if args.execute else "dry-run"
         print(f"running recipe: persona={args.persona} model={args.model} scale={args.scale} [{mode}]")
+        capability_config = replace(
+            get_capability_config(args.capability_suite),
+            model_args=tuple(args.capability_model_arg),
+        )
         result = pipeline.run(
             persona=args.persona,
             student_model=args.model,
@@ -159,6 +187,9 @@ def main(argv: list[str] | None = None) -> int:
             run_eval=not args.no_eval,
             eval_merged_locally=args.eval_merged_local,
             condition=args.condition,
+            run_capabilities=args.eval_capabilities,
+            capability_config=capability_config,
+            capability_model=args.capability_model,
         )
         print(f"run_id: {result.run_id}")
         print(f"dpo:    {result.dpo_checkpoint.sampler_path}")
@@ -179,6 +210,13 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  top ↑: {risers}")
             if fallers:
                 print(f"  top ↓: {fallers}")
+        if result.capability_benchmarks:
+            cap = result.capability_benchmarks
+            print(f"capabilities: {cap.get('status')} [{cap.get('suite')}]")
+            if cap.get("command_preview"):
+                print(f"  command: {cap['command_preview']}")
+            if cap.get("error"):
+                print(f"  error: {cap['error']}")
         print(f"artifacts: {out}")
     elif args.command == "scaling":
         from experiments import scaling

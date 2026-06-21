@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 from octt import models, pipeline
-from octt.config import get_config
+from octt.config import get_capability_config, get_config
 
 
 def _run(out, persona="humorous", **kw):
@@ -46,6 +46,21 @@ def test_pipeline_eval_shows_persona_shift(tmp_path):
     s = summary["shift_summary"]
     assert s["top_increased"] and s["top_decreased"]
     assert s["net_shift"] > 0
+
+
+def test_pipeline_capability_eval_preview_is_opt_in(tmp_path):
+    out = tmp_path / "run"
+    res = _run(out, run_capabilities=True, capability_config=get_capability_config("smoke"))
+    assert res.capability_benchmarks["status"] == "preview"
+
+    summary = json.loads((out / "eval_results.json").read_text())
+    cap = summary["capability_benchmarks"]
+    assert cap["status"] == "preview"
+    assert cap["suite"] == "smoke"
+    assert cap["target"]["label"] == "base-model-preview"
+    assert cap["max_samples"] == 8
+    assert cap["tasks"][0]["spec"] == "leaderboard|truthfulqa:mc|0"
+    assert (out / "eval" / "capabilities" / "capability_eval.json").exists()
 
 
 def test_pipeline_resume_skips_finished_stages(tmp_path):

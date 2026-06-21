@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 Scale = Literal["smoke", "quick", "paper"]
+CapabilitySuite = Literal["smoke", "full"]
 
 
 @dataclass(frozen=True)
@@ -51,6 +52,121 @@ class EvalConfig:
     judge_temperature: float = 0.1
     judge_top_p: float = 0.95
     num_traits: int = 144  # the exact single-word trait list (Appendix G)
+
+
+@dataclass(frozen=True)
+class CapabilityBenchmark:
+    """One LightEval task specification for the capability harness."""
+
+    label: str
+    task: str
+    fewshot: int
+    suite: str = "leaderboard"
+
+    @property
+    def spec(self) -> str:
+        return f"{self.suite}|{self.task}|{self.fewshot}"
+
+
+@dataclass(frozen=True)
+class CapabilityEvalConfig:
+    """LightEval capability benchmark plan.
+
+    Kept separate from :class:`RecipeConfig` so opting into the capability phase
+    does not perturb training/eval manifest hashes for the OCTT recipe itself.
+    """
+
+    name: CapabilitySuite = "smoke"
+    benchmarks: tuple[CapabilityBenchmark, ...] = ()
+    backend: str = "accelerate"
+    max_samples: int | None = None
+    remove_reasoning_tags: bool = True
+    model_args: tuple[str, ...] = ()
+
+
+MMLU_SUBJECTS: tuple[str, ...] = (
+    "abstract_algebra",
+    "anatomy",
+    "astronomy",
+    "business_ethics",
+    "clinical_knowledge",
+    "college_biology",
+    "college_chemistry",
+    "college_computer_science",
+    "college_mathematics",
+    "college_medicine",
+    "college_physics",
+    "computer_security",
+    "conceptual_physics",
+    "econometrics",
+    "electrical_engineering",
+    "elementary_mathematics",
+    "formal_logic",
+    "global_facts",
+    "high_school_biology",
+    "high_school_chemistry",
+    "high_school_computer_science",
+    "high_school_european_history",
+    "high_school_geography",
+    "high_school_government_and_politics",
+    "high_school_macroeconomics",
+    "high_school_mathematics",
+    "high_school_microeconomics",
+    "high_school_physics",
+    "high_school_psychology",
+    "high_school_statistics",
+    "high_school_us_history",
+    "high_school_world_history",
+    "human_aging",
+    "human_sexuality",
+    "international_law",
+    "jurisprudence",
+    "logical_fallacies",
+    "machine_learning",
+    "management",
+    "marketing",
+    "medical_genetics",
+    "miscellaneous",
+    "moral_disputes",
+    "moral_scenarios",
+    "nutrition",
+    "philosophy",
+    "prehistory",
+    "professional_accounting",
+    "professional_law",
+    "professional_medicine",
+    "professional_psychology",
+    "public_relations",
+    "security_studies",
+    "sociology",
+    "us_foreign_policy",
+    "virology",
+    "world_religions",
+)
+
+
+CAPABILITY_CORE_BENCHMARKS: tuple[CapabilityBenchmark, ...] = (
+    CapabilityBenchmark("truthfulqa", "truthfulqa:mc", 0),
+    CapabilityBenchmark("winogrande", "winogrande", 5),
+    CapabilityBenchmark("hellaswag", "hellaswag", 10),
+    CapabilityBenchmark("arc-c", "arc:challenge", 25),
+)
+
+CAPABILITY_MMLU_BENCHMARKS: tuple[CapabilityBenchmark, ...] = tuple(
+    CapabilityBenchmark(f"mmlu:{subject}", f"mmlu:{subject}", 5)
+    for subject in MMLU_SUBJECTS
+)
+
+CAPABILITY_SMOKE = CapabilityEvalConfig(
+    name="smoke",
+    benchmarks=(CAPABILITY_CORE_BENCHMARKS[0],),
+    max_samples=8,
+)
+
+CAPABILITY_FULL = CapabilityEvalConfig(
+    name="full",
+    benchmarks=CAPABILITY_CORE_BENCHMARKS + CAPABILITY_MMLU_BENCHMARKS,
+)
 
 
 @dataclass(frozen=True)
@@ -94,3 +210,9 @@ def get_config(scale: Scale = "quick") -> RecipeConfig:
     if scale == "smoke":
         return SMOKE
     return QUICK
+
+
+def get_capability_config(suite: CapabilitySuite = "smoke") -> CapabilityEvalConfig:
+    if suite == "full":
+        return CAPABILITY_FULL
+    return CAPABILITY_SMOKE

@@ -29,6 +29,11 @@ local-eval = [
     "peft>=0.11",
     "torch>=2.2",
 ]
+# Standard capability benchmarks via LightEval. Keep this as plain LightEval:
+# `lighteval[adapters]` pins an old PEFT that conflicts with our local-eval extra.
+capabilities = [
+    "lighteval>=0.13",
+]
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",

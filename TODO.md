@@ -21,7 +21,7 @@ constitutions/data (11,12) feeding in along the way.
 - [x] 7. **Stage 3 — introspection data gen** (`octt/introspection.py`) — self-reflection + N-turn self-interaction transcripts sampled from the post-DPO model; content-hash cached.
 - [x] 8. **Stage 3 — SFT** (`octt/introspection.py`) — 1-epoch LoRA SFT via cookbook `FromConversationFileBuilder`; trained as an **independent** adapter over base so the merge is well-defined.
 - [x] 9. **Adapter merge** (`octt/merge.py`) — exact linear merge by rank-concatenation (`α/r` preserved); compatibility asserts + round-trip; wired into `octt/pipeline.py`. *Tinker is LoRA-only with no adapter re-upload, so the merged adapter is a local export artifact.*
-- [~] 10. **Eval — revealed preferences** (`octt/evaluation.py`) — trait-embodiment sampling → LLM judge → Elo, with judge-verdict caching. **Still TODO:** the paper's other evals (adversarial robustness, coherence, capability benchmarks).
+- [~] 10. **Eval — revealed preferences** (`octt/evaluation.py`) — trait-embodiment sampling → LLM judge → Elo, with judge-verdict caching. Capability benchmarks now have an opt-in LightEval harness (`--eval-capabilities`) with smoke/full suites and dry-run command preview. **Still TODO:** adversarial robustness, coherence, and live full capability-sweep validation.
 
 ## Content & data
 - [x] 11. **Remaining constitutions** — the paper's 10 official hand-written personas added (sarcastic, poetic, good, loving, mathematical, nonchalant, impulsive, misaligned, remorseful, sycophantic); 11 total with `humorous`.

@@ -38,6 +38,7 @@ the full test suite pass from a fresh checkout without the training backend.
 
 ```bash
 octt run humorous --model Qwen/Qwen3.5-4B --scale smoke        # dry run, one pair
+octt run humorous --scale smoke --eval-capabilities            # dry-run LightEval command preview
 octt scaling humorous --scale smoke                            # dry-run sweep + report
 octt preflight --dry-run                                       # validate setup + cost
 octt run humorous --model Qwen/Qwen3.5-4B --scale paper --execute   # real, paid
@@ -45,7 +46,8 @@ octt run humorous --model Qwen/Qwen3.5-4B --scale paper --execute   # real, paid
 
 Decisions are locked (see `octt/models.py`): dense ladder = Qwen, MoE ladder =
 Nemotron-3, teacher = `Qwen/Qwen3.5-397B-A17B`. Remaining recipe gap: the paper's
-non-revealed-preference evals (adversarial robustness, coherence, capability).
+non-revealed-preference evals (adversarial robustness and coherence). Capability
+benchmarks have an opt-in LightEval harness, with the live full sweep still to validate.
 
 ## Layout
 
@@ -76,6 +78,7 @@ tests/
 ```bash
 pip install -e ".[dev]"        # package + dev tooling
 pip install -e ".[train]"      # add the Tinker training backend
+pip install -e ".[capabilities]"  # add LightEval capability benchmark CLI
 ```
 
 Requires Python 3.11+.

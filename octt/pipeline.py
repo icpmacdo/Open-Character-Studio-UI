@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import (
+    capabilities,
     distillation,
     evaluation,
     introspection,
@@ -28,7 +29,7 @@ from . import (
     tinker_client,
     trait_profiles,
 )
-from .config import RecipeConfig, get_config
+from .config import CapabilityEvalConfig, RecipeConfig, get_capability_config, get_config
 from .constitution import load
 from .manifest import StageCheckpoint
 
@@ -48,6 +49,7 @@ class PipelineResult:
     trained_elo: dict[str, float] = field(default_factory=dict)
     shift_summary: dict = field(default_factory=dict)
     eval_target: str | None = None
+    capability_benchmarks: dict = field(default_factory=dict)
 
     @property
     def persona_trait_shift(self) -> float | None:
@@ -120,6 +122,9 @@ def run(
     run_eval: bool = True,
     eval_merged_locally: bool = False,
     condition: str = evaluation.DEFAULT_CONDITION,
+    run_capabilities: bool = False,
+    capability_config: CapabilityEvalConfig | None = None,
+    capability_model: str | None = None,
 ) -> PipelineResult:
     """Run the full recipe for one model/persona pair. Returns checkpoints + Elo.
 
@@ -184,9 +189,11 @@ def run(
     base_elo: dict[str, float] = {}
     trained_elo: dict[str, float] = {}
     shift_summary: dict = {}
+    capability_benchmarks: dict = {}
     sampler_path, local_adapter_dir, eval_target = _eval_plan(
         final_ckpt, dry_run=dry_run, eval_merged_locally=eval_merged_locally
     )
+    eval_payload: dict | None = None
     if run_eval:
         eval_dir = out_dir / "eval"
         eval_dir.mkdir(parents=True, exist_ok=True)
@@ -207,17 +214,46 @@ def run(
             cache_path=eval_dir / "trained_judge.jsonl",
         )
         shift_summary = trait_profiles.summarize_shift(base_elo, trained_elo, persona)
-        manifest.atomic_write_json(
-            out_dir / "eval_results.json",
-            {
+        eval_payload = {
+            "persona": persona,
+            "student_model": student_model,
+            "eval_target": eval_target,
+            "shift_summary": shift_summary,
+            "base_elo": base_elo,
+            "trained_elo": trained_elo,
+        }
+
+    if run_capabilities:
+        cap_dir = out_dir / "eval" / "capabilities"
+        cap_config = capability_config or get_capability_config("smoke")
+        cap_model_ref = capability_model or local_adapter_dir
+        cap_target = (
+            "explicit-model" if capability_model
+            else "merged-local" if local_adapter_dir
+            else "unavailable"
+        )
+        capability_benchmarks = capabilities.evaluate(
+            student_model=student_model,
+            output_dir=cap_dir,
+            config=cap_config,
+            dry_run=dry_run,
+            model_ref=cap_model_ref,
+            target_label=cap_target,
+            adapter_base_model=student_model if local_adapter_dir and not capability_model else None,
+        )
+        if eval_payload is None:
+            eval_payload = {
                 "persona": persona,
                 "student_model": student_model,
                 "eval_target": eval_target,
                 "shift_summary": shift_summary,
                 "base_elo": base_elo,
                 "trained_elo": trained_elo,
-            },
-        )
+            }
+        eval_payload["capability_benchmarks"] = capability_benchmarks
+
+    if eval_payload is not None:
+        manifest.atomic_write_json(out_dir / "eval_results.json", eval_payload)
 
     result = PipelineResult(
         persona=persona,
@@ -231,5 +267,6 @@ def run(
         trained_elo=trained_elo,
         shift_summary=shift_summary,
         eval_target=eval_target,
+        capability_benchmarks=capability_benchmarks,
     )
     return result
