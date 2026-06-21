@@ -35,8 +35,8 @@ Environment:
 Current default outputs:
   runs/<persona>-4b-smoke-<tag>
   runs/<persona>-4b-quick-<tag>
-  runs/<persona>-arch-control-smoke-<tag>
-  runs/<persona>-four-model-smoke-<tag>
+  runs/<persona>-arch-control-smoke-nomerge-<tag>
+  runs/<persona>-four-model-smoke-nomerge-<tag>
   runs/<persona>-super-smoke-<tag>
   runs/<persona>-ultra-rank32-smoke-<tag>
 EOF
@@ -89,6 +89,9 @@ run_if_missing() {
 cmd_status() {
   echo "Running octt jobs:"
   pgrep -fl "octt run|octt scaling|uv run octt" || true
+  echo
+  echo "Disk:"
+  df -h .
   echo
   git status --short
 }
@@ -163,22 +166,23 @@ cmd_lighteval_smoke() {
 
 cmd_arch_smoke() {
   source_env
-  local out="runs/${PERSONA}-arch-control-smoke-${TAG}"
-  run_if_missing "paid architecture-control smoke" "$out" "$out/report.json" \
+  local out="runs/${PERSONA}-arch-control-smoke-nomerge-${TAG}"
+  run_if_missing "paid architecture-control no-merge smoke" "$out" "$out/report.json" \
     uv run octt scaling "$PERSONA" \
       --execute \
       --scale smoke \
       --teacher "$TEACHER" \
       --model Qwen/Qwen3.6-27B \
       --model Qwen/Qwen3.6-35B-A3B \
+      --no-merge \
       --out "$out"
 }
 
 cmd_six_smoke() {
   source_env
 
-  local four_out="runs/${PERSONA}-four-model-smoke-${TAG}"
-  run_if_missing "paid four-model rank64 smoke (4B, 9B, 27B, Nano)" "$four_out" "$four_out/report.json" \
+  local four_out="runs/${PERSONA}-four-model-smoke-nomerge-${TAG}"
+  run_if_missing "paid four-model rank64 no-merge smoke (4B, 9B, 27B, Nano)" "$four_out" "$four_out/report.json" \
     uv run octt scaling "$PERSONA" \
       --execute \
       --scale smoke \
@@ -187,6 +191,7 @@ cmd_six_smoke() {
       --model Qwen/Qwen3.5-9B \
       --model Qwen/Qwen3.6-27B \
       --model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
+      --no-merge \
       --out "$four_out"
 
   local super_out="runs/${PERSONA}-super-smoke-${TAG}"
@@ -219,8 +224,8 @@ cmd_paper_template() {
   fi
   source_env
 
-  local paper_out="runs/${PERSONA}-paper-rank64-supported-${TAG}"
-  run_if_missing "paper rank64 supported models, excluding Ultra" "$paper_out" "$paper_out/report.json" \
+  local paper_out="runs/${PERSONA}-paper-rank64-supported-nomerge-${TAG}"
+  run_if_missing "paper rank64 no-merge supported models, excluding Ultra" "$paper_out" "$paper_out/report.json" \
     uv run octt scaling "$PERSONA" \
       --execute \
       --scale paper \
@@ -229,6 +234,7 @@ cmd_paper_template() {
       --model Qwen/Qwen3.5-9B \
       --model Qwen/Qwen3.6-27B \
       --model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
+      --no-merge \
       --out "$paper_out"
 
   echo
