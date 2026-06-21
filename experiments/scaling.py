@@ -19,8 +19,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from octt import models, pipeline
-from octt.config import RecipeConfig, get_config
+from octt import evaluation, models, pipeline
+from octt.config import CapabilityEvalConfig, RecipeConfig, get_config
 from octt.pipeline import PipelineResult
 
 
@@ -38,6 +38,11 @@ def run(
     config: RecipeConfig | None = None,
     *,
     dry_run: bool = False,
+    eval_merged_locally: bool = False,
+    condition: str = evaluation.DEFAULT_CONDITION,
+    run_capabilities: bool = False,
+    capability_config: CapabilityEvalConfig | None = None,
+    capability_model: str | None = None,
 ) -> list[ScalingRun]:
     """Run the recipe across ``model_set`` (cost-ordered) for one persona."""
     cfg = config or get_config("quick")
@@ -52,6 +57,11 @@ def run(
             out_dir=out_dir / spec.tinker_id.replace("/", "-"),
             config=cfg,
             dry_run=dry_run,
+            eval_merged_locally=eval_merged_locally,
+            condition=condition,
+            run_capabilities=run_capabilities,
+            capability_config=capability_config,
+            capability_model=capability_model,
         )
         runs.append(ScalingRun(spec=spec, result=result))
     return runs
@@ -80,6 +90,14 @@ def summarize(runs: list[ScalingRun]) -> list[dict]:
                 "net_shift": res.persona_trait_shift,
                 "aligned_mean_delta": summary.get("aligned_mean_delta"),
                 "opposing_mean_delta": summary.get("opposing_mean_delta"),
+                "capability_status": (
+                    res.capability_benchmarks.get("status")
+                    if res.capability_benchmarks else None
+                ),
+                "capability_suite": (
+                    res.capability_benchmarks.get("suite")
+                    if res.capability_benchmarks else None
+                ),
             }
         )
     return rows
@@ -134,11 +152,28 @@ def run_and_report(
     config: RecipeConfig | None = None,
     *,
     dry_run: bool = False,
+    eval_merged_locally: bool = False,
+    condition: str = evaluation.DEFAULT_CONDITION,
+    run_capabilities: bool = False,
+    capability_config: CapabilityEvalConfig | None = None,
+    capability_model: str | None = None,
 ) -> list[ScalingRun]:
     """Run the sweep, then write ``report.json`` and ``report.md`` to ``out_dir``."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    runs = run(persona, teacher_model, out_dir, model_set, config, dry_run=dry_run)
+    runs = run(
+        persona,
+        teacher_model,
+        out_dir,
+        model_set,
+        config,
+        dry_run=dry_run,
+        eval_merged_locally=eval_merged_locally,
+        condition=condition,
+        run_capabilities=run_capabilities,
+        capability_config=capability_config,
+        capability_model=capability_model,
+    )
     rows = summarize(runs)
     (out_dir / "report.json").write_text(json.dumps({"persona": persona, "rows": rows}, indent=2) + "\n")
     (out_dir / "report.md").write_text(

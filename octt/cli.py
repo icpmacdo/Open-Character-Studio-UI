@@ -119,6 +119,39 @@ def main(argv: list[str] | None = None) -> int:
         help="model to include; repeat to override the default cost-ordered sweep",
     )
     scaling_cmd.add_argument("--execute", action="store_true", help="hit the paid runtime (default: dry run)")
+    scaling_cmd.add_argument(
+        "--eval-merged-local",
+        action="store_true",
+        help="evaluate local merged adapters via transformers+peft where feasible",
+    )
+    scaling_cmd.add_argument(
+        "--condition",
+        choices=("adopt", "feels", "random"),
+        default="adopt",
+        help="embodiment-instruction variant for the revealed-preferences eval",
+    )
+    scaling_cmd.add_argument(
+        "--eval-capabilities",
+        action="store_true",
+        help="run or preview the opt-in LightEval capability benchmark harness per model",
+    )
+    scaling_cmd.add_argument(
+        "--capability-suite",
+        choices=("smoke", "full"),
+        default="smoke",
+        help="LightEval capability suite for scaling runs",
+    )
+    scaling_cmd.add_argument(
+        "--capability-model",
+        help="explicit Hugging Face/local model reference for LightEval; mainly useful "
+        "when scaling is restricted to one model",
+    )
+    scaling_cmd.add_argument(
+        "--capability-model-arg",
+        action="append",
+        default=[],
+        help="extra LightEval model arg as key=value; repeat for dtype, batch_size, etc.",
+    )
 
     args = parser.parse_args(argv)
 
@@ -225,6 +258,10 @@ def main(argv: list[str] | None = None) -> int:
         model_set = tuple(args.model_set) if args.model_set else models.SCALING_SET
         mode = "EXECUTE (paid)" if args.execute else "dry-run"
         print(f"scaling sweep: persona={args.persona} models={len(model_set)} scale={args.scale} [{mode}]")
+        capability_config = replace(
+            get_capability_config(args.capability_suite),
+            model_args=tuple(args.capability_model_arg),
+        )
         scaling.run_and_report(
             persona=args.persona,
             teacher_model=args.teacher,
@@ -232,6 +269,11 @@ def main(argv: list[str] | None = None) -> int:
             model_set=model_set,
             config=get_config(args.scale),
             dry_run=not args.execute,
+            eval_merged_locally=args.eval_merged_local,
+            condition=args.condition,
+            run_capabilities=args.eval_capabilities,
+            capability_config=capability_config,
+            capability_model=args.capability_model,
         )
         print((out / "report.md").read_text())
         print(f"report: {out / 'report.md'}")

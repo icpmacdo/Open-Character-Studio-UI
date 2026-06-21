@@ -339,17 +339,18 @@ def estimate_tinker_cost(
         + config.sft.self_interaction_count * config.sft.self_interaction_turns
     )
     introspection_tokens = introspection_generations * introspection_sample_tokens
-    eval_tokens = config.eval.num_judgments * eval_sample_tokens
-
-    _append_cost_line(
-        lines,
-        "dpo.teacher_sample",
-        teacher_model,
-        dpo_prompt_tokens,
-        _price_for(teacher_model, "price_sample") or TEACHER_SAMPLE_PRICE_USD_PER_MTOK,
-    )
+    # The revealed-preferences eval runs once on the base model and once on the
+    # trained target for each student model.
+    eval_tokens_per_model = 2 * config.eval.num_judgments * eval_sample_tokens
 
     for model_id in student_models:
+        _append_cost_line(
+            lines,
+            "dpo.teacher_sample",
+            teacher_model,
+            dpo_prompt_tokens,
+            _price_for(teacher_model, "price_sample") or TEACHER_SAMPLE_PRICE_USD_PER_MTOK,
+        )
         _append_cost_line(
             lines,
             "dpo.student_rejected_sample",
@@ -382,17 +383,16 @@ def estimate_tinker_cost(
             lines,
             "eval.model_sample",
             model_id,
-            eval_tokens,
+            eval_tokens_per_model,
             _price_for(model_id, "price_sample"),
         )
-
-    _append_cost_line(
-        lines,
-        "eval.judge",
-        teacher_model,
-        eval_tokens,
-        _price_for(teacher_model, "price_sample") or TEACHER_SAMPLE_PRICE_USD_PER_MTOK,
-    )
+        _append_cost_line(
+            lines,
+            "eval.judge",
+            teacher_model,
+            eval_tokens_per_model,
+            _price_for(teacher_model, "price_sample") or TEACHER_SAMPLE_PRICE_USD_PER_MTOK,
+        )
     return CostEstimate(lines=tuple(lines))
 
 

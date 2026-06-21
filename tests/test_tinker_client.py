@@ -92,3 +92,23 @@ def test_cost_estimate_is_positive_for_smoke_scale():
     )
 
     assert estimate.total_usd > 0
+
+
+def test_cost_estimate_counts_per_model_eval_and_teacher_sampling():
+    cfg = get_config("smoke")
+    model_set = ("Qwen/Qwen3.5-4B", "Qwen/Qwen3.5-9B")
+    combined = tinker_client.estimate_tinker_cost(cfg, model_set)
+    singles_total = sum(
+        tinker_client.estimate_tinker_cost(cfg, (model,)).total_usd
+        for model in model_set
+    )
+
+    assert combined.total_usd == singles_total
+    eval_judge_lines = [line for line in combined.lines if line.stage == "eval.judge"]
+    dpo_teacher_lines = [line for line in combined.lines if line.stage == "dpo.teacher_sample"]
+    assert len(eval_judge_lines) == len(model_set)
+    assert len(dpo_teacher_lines) == len(model_set)
+    assert all(
+        line.token_millions == (2 * cfg.eval.num_judgments * 512) / 1_000_000
+        for line in eval_judge_lines
+    )

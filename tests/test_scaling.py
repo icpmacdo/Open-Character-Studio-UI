@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 
 from octt import models
-from octt.config import get_config
+from octt.config import get_capability_config, get_config
+from octt.manifest import StageCheckpoint
+from octt.pipeline import PipelineResult
 from experiments import scaling
 
 
@@ -42,3 +44,52 @@ def test_scaling_markdown_handles_missing_shift():
          "eval_target": None},
     ])
     assert "n/a" in md
+
+
+def test_scaling_passes_eval_and_capability_flags(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_pipeline_run(**kwargs):
+        calls.append(kwargs)
+        ckpt = StageCheckpoint(sampler_path="tinker://dry-run/fake")
+        return PipelineResult(
+            persona=kwargs["persona"],
+            student_model=kwargs["student_model"],
+            run_id="fake",
+            out_dir=kwargs["out_dir"],
+            dpo_checkpoint=ckpt,
+            sft_checkpoint=ckpt,
+            final_checkpoint=ckpt,
+            shift_summary={"net_shift": 1.0},
+            eval_target="dry-run",
+            capability_benchmarks={"status": "preview", "suite": "smoke"},
+        )
+
+    monkeypatch.setattr(scaling.pipeline, "run", fake_pipeline_run)
+    cap_cfg = get_capability_config("smoke")
+
+    runs = scaling.run(
+        "humorous",
+        models.TEACHER_MODEL,
+        tmp_path / "sweep",
+        model_set=("Qwen/Qwen3.5-4B",),
+        config=get_config("smoke"),
+        dry_run=True,
+        eval_merged_locally=True,
+        condition="random",
+        run_capabilities=True,
+        capability_config=cap_cfg,
+        capability_model="Qwen/Qwen3.5-4B",
+    )
+
+    assert len(runs) == 1
+    call = calls[0]
+    assert call["eval_merged_locally"] is True
+    assert call["condition"] == "random"
+    assert call["run_capabilities"] is True
+    assert call["capability_config"] is cap_cfg
+    assert call["capability_model"] == "Qwen/Qwen3.5-4B"
+
+    row = scaling.summarize(runs)[0]
+    assert row["capability_status"] == "preview"
+    assert row["capability_suite"] == "smoke"
