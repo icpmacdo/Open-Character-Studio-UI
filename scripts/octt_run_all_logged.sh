@@ -23,6 +23,7 @@ Examples:
   scripts/octt_run_all_logged.sh
   TAG=v3 scripts/octt_run_all_logged.sh paid-4b lighteval-smoke
   CONTINUE_ON_ERROR=1 scripts/octt_run_all_logged.sh local arch-smoke six-smoke
+  scripts/octt_run_all_logged.sh arch-smoke-nomerge six-smoke-nomerge
   ALLOW_PAPER=1 scripts/octt_run_all_logged.sh paper-template
 
 Environment:

@@ -21,9 +21,14 @@ Commands:
   local             Run local tests, ruff, and dry preflight gates.
   paid-4b           Run/resume paid 4B smoke, then paid 4B quick.
   lighteval-smoke   Run LightEval smoke against the 4B smoke local merge.
-  arch-smoke        Run paid architecture-control smoke.
-  six-smoke         Run paid six-model smoke as split safe jobs.
+  arch-smoke        Run paid architecture-control smoke with merge required.
+  arch-smoke-nomerge
+                    Explicit fallback: architecture-control smoke with --no-merge.
+  six-smoke         Run paid six-model smoke with merge where supported.
+  six-smoke-nomerge Explicit fallback: six-model smoke with --no-merge.
   paper-template    Guarded paper-scale template. Requires ALLOW_PAPER=1.
+  paper-template-nomerge
+                    Explicit fallback: paper template with --no-merge.
   all-safe          local -> paid-4b -> lighteval-smoke -> arch-smoke -> six-smoke.
 
 Environment:
@@ -31,12 +36,13 @@ Environment:
   TAG=v2                  Output suffix.
   TINKER_API_KEY=...      Loaded from .env for paid commands.
   ALLOW_PAPER=1           Required for paper-template.
+  MERGE_MIN_FREE_GIB=25   Minimum free disk required before medium/large merge phases.
 
 Current default outputs:
   runs/<persona>-4b-smoke-<tag>
   runs/<persona>-4b-quick-<tag>
-  runs/<persona>-arch-control-smoke-nomerge-<tag>
-  runs/<persona>-four-model-smoke-nomerge-<tag>
+  runs/<persona>-arch-control-smoke-<tag>
+  runs/<persona>-four-model-smoke-<tag>
   runs/<persona>-super-smoke-<tag>
   runs/<persona>-ultra-rank32-smoke-<tag>
 EOF
@@ -51,6 +57,23 @@ source_env() {
   fi
   if [[ -z "${TINKER_API_KEY:-}" ]]; then
     echo "TINKER_API_KEY is not set. Put it in .env or export it before paid runs." >&2
+    exit 2
+  fi
+}
+
+free_gib_int() {
+  df -Pk . | awk 'NR == 2 {print int($4 / 1024 / 1024)}'
+}
+
+require_free_gib() {
+  local min_gib="$1"
+  local label="$2"
+  local free_gib
+  free_gib="$(free_gib_int)"
+  if [[ "$free_gib" -lt "$min_gib" ]]; then
+    echo "Refusing $label: only ${free_gib} GiB free, need at least ${min_gib} GiB." >&2
+    echo "Free space with: scripts/octt_prune_local_merges.sh --execute" >&2
+    echo "Or run the explicit fallback phase: ${label}-nomerge" >&2
     exit 2
   fi
 }
@@ -166,8 +189,22 @@ cmd_lighteval_smoke() {
 
 cmd_arch_smoke() {
   source_env
+  require_free_gib "${MERGE_MIN_FREE_GIB:-25}" "arch-smoke"
+  local out="runs/${PERSONA}-arch-control-smoke-${TAG}"
+  run_if_missing "paid architecture-control smoke with merge" "$out" "$out/report.json" \
+    uv run octt scaling "$PERSONA" \
+      --execute \
+      --scale smoke \
+      --teacher "$TEACHER" \
+      --model Qwen/Qwen3.6-27B \
+      --model Qwen/Qwen3.6-35B-A3B \
+      --out "$out"
+}
+
+cmd_arch_smoke_nomerge() {
+  source_env
   local out="runs/${PERSONA}-arch-control-smoke-nomerge-${TAG}"
-  run_if_missing "paid architecture-control no-merge smoke" "$out" "$out/report.json" \
+  run_if_missing "paid architecture-control no-merge smoke fallback" "$out" "$out/report.json" \
     uv run octt scaling "$PERSONA" \
       --execute \
       --scale smoke \
@@ -180,9 +217,45 @@ cmd_arch_smoke() {
 
 cmd_six_smoke() {
   source_env
+  require_free_gib "${MERGE_MIN_FREE_GIB:-25}" "six-smoke"
+
+  local four_out="runs/${PERSONA}-four-model-smoke-${TAG}"
+  run_if_missing "paid four-model rank64 smoke with merge (4B, 9B, 27B, Nano)" "$four_out" "$four_out/report.json" \
+    uv run octt scaling "$PERSONA" \
+      --execute \
+      --scale smoke \
+      --teacher "$TEACHER" \
+      --model Qwen/Qwen3.5-4B \
+      --model Qwen/Qwen3.5-9B \
+      --model Qwen/Qwen3.6-27B \
+      --model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
+      --out "$four_out"
+
+  local super_out="runs/${PERSONA}-super-smoke-${TAG}"
+  run_if_missing "paid Super rank64 smoke with merge" "$super_out" "$super_out/eval_results.json" \
+    uv run octt run "$PERSONA" \
+      --execute \
+      --scale smoke \
+      --teacher "$TEACHER" \
+      --model "$SUPER_MODEL" \
+      --out "$super_out"
+
+  local ultra_out="runs/${PERSONA}-ultra-rank32-smoke-${TAG}"
+  run_if_missing "paid Ultra rank32 merge compatibility smoke" "$ultra_out" "$ultra_out/eval_results.json" \
+    uv run octt run "$PERSONA" \
+      --execute \
+      --scale smoke \
+      --teacher "$TEACHER" \
+      --model "$ULTRA_MODEL" \
+      --lora-rank 32 \
+      --out "$ultra_out"
+}
+
+cmd_six_smoke_nomerge() {
+  source_env
 
   local four_out="runs/${PERSONA}-four-model-smoke-nomerge-${TAG}"
-  run_if_missing "paid four-model rank64 no-merge smoke (4B, 9B, 27B, Nano)" "$four_out" "$four_out/report.json" \
+  run_if_missing "paid four-model rank64 no-merge smoke fallback (4B, 9B, 27B, Nano)" "$four_out" "$four_out/report.json" \
     uv run octt scaling "$PERSONA" \
       --execute \
       --scale smoke \
@@ -194,8 +267,8 @@ cmd_six_smoke() {
       --no-merge \
       --out "$four_out"
 
-  local super_out="runs/${PERSONA}-super-smoke-${TAG}"
-  run_if_missing "paid Super rank64 no-merge smoke" "$super_out" "$super_out/eval_results.json" \
+  local super_out="runs/${PERSONA}-super-smoke-nomerge-${TAG}"
+  run_if_missing "paid Super rank64 no-merge smoke fallback" "$super_out" "$super_out/eval_results.json" \
     uv run octt run "$PERSONA" \
       --execute \
       --scale smoke \
@@ -204,8 +277,8 @@ cmd_six_smoke() {
       --no-merge \
       --out "$super_out"
 
-  local ultra_out="runs/${PERSONA}-ultra-rank32-smoke-${TAG}"
-  run_if_missing "paid Ultra rank32 no-merge compatibility smoke" "$ultra_out" "$ultra_out/eval_results.json" \
+  local ultra_out="runs/${PERSONA}-ultra-rank32-smoke-nomerge-${TAG}"
+  run_if_missing "paid Ultra rank32 no-merge compatibility smoke fallback" "$ultra_out" "$ultra_out/eval_results.json" \
     uv run octt run "$PERSONA" \
       --execute \
       --scale smoke \
@@ -223,9 +296,35 @@ cmd_paper_template() {
     exit 2
   fi
   source_env
+  require_free_gib "${MERGE_MIN_FREE_GIB:-25}" "paper-template"
+
+  local paper_out="runs/${PERSONA}-paper-rank64-supported-${TAG}"
+  run_if_missing "paper rank64 supported models with merge, excluding Ultra" "$paper_out" "$paper_out/report.json" \
+    uv run octt scaling "$PERSONA" \
+      --execute \
+      --scale paper \
+      --teacher "$TEACHER" \
+      --model Qwen/Qwen3.5-4B \
+      --model Qwen/Qwen3.5-9B \
+      --model Qwen/Qwen3.6-27B \
+      --model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
+      --out "$paper_out"
+
+  echo
+  echo "Paper Ultra is intentionally not run here: Tinker blocks Ultra rank64."
+  echo "For compatibility only, run Ultra with --lora-rank 32 --no-merge in its own labeled output."
+}
+
+cmd_paper_template_nomerge() {
+  if [[ "${ALLOW_PAPER:-0}" != "1" ]]; then
+    echo "Refusing paper scale without ALLOW_PAPER=1." >&2
+    echo "Run smoke gates first, then choose Ultra policy explicitly." >&2
+    exit 2
+  fi
+  source_env
 
   local paper_out="runs/${PERSONA}-paper-rank64-supported-nomerge-${TAG}"
-  run_if_missing "paper rank64 no-merge supported models, excluding Ultra" "$paper_out" "$paper_out/report.json" \
+  run_if_missing "paper rank64 no-merge supported models fallback, excluding Ultra" "$paper_out" "$paper_out/report.json" \
     uv run octt scaling "$PERSONA" \
       --execute \
       --scale paper \
@@ -239,7 +338,6 @@ cmd_paper_template() {
 
   echo
   echo "Paper Ultra is intentionally not run here: Tinker blocks Ultra rank64."
-  echo "For compatibility only, run Ultra with --lora-rank 32 --no-merge in its own labeled output."
 }
 
 case "${1:-}" in
@@ -248,8 +346,11 @@ case "${1:-}" in
   paid-4b) cmd_paid_4b ;;
   lighteval-smoke) cmd_lighteval_smoke ;;
   arch-smoke) cmd_arch_smoke ;;
+  arch-smoke-nomerge) cmd_arch_smoke_nomerge ;;
   six-smoke) cmd_six_smoke ;;
+  six-smoke-nomerge) cmd_six_smoke_nomerge ;;
   paper-template) cmd_paper_template ;;
+  paper-template-nomerge) cmd_paper_template_nomerge ;;
   all-safe)
     cmd_local
     cmd_paid_4b
