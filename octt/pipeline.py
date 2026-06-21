@@ -19,7 +19,15 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import distillation, evaluation, introspection, manifest, merge, tinker_client
+from . import (
+    distillation,
+    evaluation,
+    introspection,
+    manifest,
+    merge,
+    tinker_client,
+    trait_profiles,
+)
 from .config import RecipeConfig, get_config
 from .constitution import load
 from .manifest import StageCheckpoint
@@ -38,31 +46,49 @@ class PipelineResult:
     final_checkpoint: StageCheckpoint
     base_elo: dict[str, float] = field(default_factory=dict)
     trained_elo: dict[str, float] = field(default_factory=dict)
+    shift_summary: dict = field(default_factory=dict)
+    eval_target: str | None = None
 
     @property
     def persona_trait_shift(self) -> float | None:
-        """Elo change on the persona's own trait (trained minus base), if measured."""
-        if self.persona in self.base_elo and self.persona in self.trained_elo:
-            return self.trained_elo[self.persona] - self.base_elo[self.persona]
-        return None
+        """Net revealed-preference shift = mean(Δaligned) - mean(Δopposing).
+
+        The paper measures a persona's effect as the Elo change across the traits
+        it pulls toward and away from (Figure 3), not a single self-named trait.
+        See :func:`octt.trait_profiles.summarize_shift`.
+        """
+        return self.shift_summary.get("net_shift")
 
 
-def _eval_sampler_path(final: StageCheckpoint) -> str | None:
-    """Pick a samplable handle for the character-trained model.
+def _eval_plan(
+    final: StageCheckpoint, *, dry_run: bool, eval_merged_locally: bool
+) -> tuple[str | None, str | None, str]:
+    """Decide what to evaluate for the character-trained model.
 
-    Prefers a real/dry-run sampler URI; on a real merge (local-only artifact)
-    falls back to the SFT sampler checkpoint as the on-Tinker proxy.
+    Returns ``(sampler_path, local_adapter_dir, eval_target)``. The merged
+    adapter is the paper's released artifact, but Tinker has no adapter
+    re-upload: in dry-run a samplable handle exists; on a real merge we either
+    serve the local merge off-Tinker (``eval_merged_locally``, feasible only for
+    small rungs) or fall back to the best samplable proxy, always recording which.
     """
     if final.sampler_path:
-        return final.sampler_path
+        return final.sampler_path, None, "dry-run" if dry_run else "sampler"
+    if eval_merged_locally and final.local_path and not dry_run:
+        return None, final.local_path, "merged-local"
     proxy = final.extra.get("sft_sampler") or final.extra.get("dpo_sampler")
-    if proxy:
+    label = (
+        "sft-proxy" if final.extra.get("sft_sampler")
+        else "dpo-proxy" if final.extra.get("dpo_sampler")
+        else "none"
+    )
+    if proxy and not dry_run:
         logger.warning(
             "Merged adapter is local-only (Tinker has no adapter re-upload); "
-            "evaluating samplable proxy %s instead.",
+            "evaluating samplable proxy %s (%s) instead of the merged adapter.",
             proxy,
+            label,
         )
-    return proxy
+    return proxy, None, label
 
 
 def _verify_checkpoint(runtime: tinker_client.TinkerRuntime, model: str, ckpt: StageCheckpoint) -> None:
@@ -92,8 +118,15 @@ def run(
     *,
     offline: bool | None = None,
     run_eval: bool = True,
+    eval_merged_locally: bool = False,
+    condition: str = evaluation.DEFAULT_CONDITION,
 ) -> PipelineResult:
-    """Run the full recipe for one model/persona pair. Returns checkpoints + Elo."""
+    """Run the full recipe for one model/persona pair. Returns checkpoints + Elo.
+
+    ``condition`` selects the embodiment-instruction variant for the eval; the
+    paper repeats the experiment over all three (``adopt`` / ``feels`` /
+    ``random``) to check stability, but defaults to template (1) ``adopt`` here.
+    """
     cfg = config or get_config("quick")
     constitution = load(persona)
     out_dir = Path(out_dir)
@@ -150,33 +183,39 @@ def run(
     # -- Eval: revealed preferences (base vs character-trained) -------------
     base_elo: dict[str, float] = {}
     trained_elo: dict[str, float] = {}
+    shift_summary: dict = {}
+    sampler_path, local_adapter_dir, eval_target = _eval_plan(
+        final_ckpt, dry_run=dry_run, eval_merged_locally=eval_merged_locally
+    )
     if run_eval:
         eval_dir = out_dir / "eval"
         eval_dir.mkdir(parents=True, exist_ok=True)
+        # Inject the persona's aligned + opposing traits so the shift stays
+        # measurable even when num_traits is downscaled for the fast tiers.
+        required = trait_profiles.required_traits(persona)
         base_elo = evaluation.revealed_preferences(
             student_model, cfg.eval, runtime,
             sampler_path=None, judge_model=teacher_model, offline=offline,
-            required_traits=[persona],
+            required_traits=required, condition=condition,
             cache_path=eval_dir / "base_judge.jsonl",
         )
         trained_elo = evaluation.revealed_preferences(
             student_model, cfg.eval, runtime,
-            sampler_path=_eval_sampler_path(final_ckpt), judge_model=teacher_model,
-            offline=offline, persona_bias=persona, required_traits=[persona],
+            sampler_path=sampler_path, local_adapter_dir=local_adapter_dir,
+            judge_model=teacher_model, offline=offline, persona_bias=persona,
+            required_traits=required, condition=condition,
             cache_path=eval_dir / "trained_judge.jsonl",
         )
+        shift_summary = trait_profiles.summarize_shift(base_elo, trained_elo, persona)
         manifest.atomic_write_json(
             out_dir / "eval_results.json",
             {
                 "persona": persona,
                 "student_model": student_model,
+                "eval_target": eval_target,
+                "shift_summary": shift_summary,
                 "base_elo": base_elo,
                 "trained_elo": trained_elo,
-                "persona_trait_shift": (
-                    trained_elo.get(persona, 0.0) - base_elo.get(persona, 0.0)
-                    if persona in base_elo or persona in trained_elo
-                    else None
-                ),
             },
         )
 
@@ -190,5 +229,7 @@ def run(
         final_checkpoint=final_ckpt,
         base_elo=base_elo,
         trained_elo=trained_elo,
+        shift_summary=shift_summary,
+        eval_target=eval_target,
     )
     return result

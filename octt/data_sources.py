@@ -17,7 +17,9 @@ network and no paid downloads. Pass ``offline=True`` to force the fixture.
 
 from __future__ import annotations
 
+import json
 import logging
+from pathlib import Path
 from typing import Callable
 
 from .constitution import Constitution
@@ -76,37 +78,40 @@ _PURE_DOVE_FIXTURE: tuple[str, ...] = (
 
 
 # ---------------------------------------------------------------------------
-# Trait descriptors (paper Appendix G): ~150 single-word adjectives
+# Trait descriptors: the exact 144-word list from paper Appendix G.
 # ---------------------------------------------------------------------------
+# Reproduced verbatim (order preserved) so the eval probes the same trait pool
+# as the paper. The 11/12 persona *names* are deliberately NOT in this list —
+# the revealed-preferences eval measures a persona's effect as the Elo shift
+# across the traits it pulls toward/away from (see :mod:`octt.trait_profiles`),
+# never as a single self-named trait.
 
 TRAIT_DESCRIPTORS: tuple[str, ...] = (
-    "humorous", "serious", "warm", "cold", "formal", "casual", "playful",
-    "stoic", "optimistic", "pessimistic", "empathetic", "detached", "curious",
-    "indifferent", "skeptical", "credulous", "blunt", "diplomatic", "poetic",
-    "literal", "adventurous", "cautious", "confident", "humble", "assertive",
-    "deferential", "patient", "impatient", "encouraging", "critical", "gentle",
-    "harsh", "concise", "verbose", "analytical", "intuitive", "pragmatic",
-    "idealistic", "rebellious", "obedient", "spontaneous", "methodical",
-    "cheerful", "melancholic", "energetic", "calm", "passionate", "dispassionate",
-    "nurturing", "demanding", "forgiving", "exacting", "open-minded", "dogmatic",
-    "imaginative", "conventional", "witty", "earnest", "sarcastic", "sincere",
-    "mischievous", "dignified", "irreverent", "reverent", "bold", "timid",
-    "decisive", "hesitant", "generous", "frugal", "extroverted", "introverted",
-    "tactful", "tactless", "modest", "boastful", "agreeable", "contrarian",
-    "supportive", "challenging", "whimsical", "grave", "lighthearted", "intense",
-    "relaxed", "vigilant", "trusting", "wary", "affectionate", "aloof",
-    "enthusiastic", "reserved", "candid", "guarded", "flexible", "rigid",
-    "compassionate", "ruthless", "thoughtful", "impulsive", "meticulous",
-    "careless", "ambitious", "content", "competitive", "cooperative", "loyal",
-    "independent", "sensitive", "thick-skinned", "articulate", "terse",
-    "expressive", "restrained", "inquisitive", "incurious", "philosophical",
-    "practical", "romantic", "cynical", "hopeful", "resigned", "courageous",
-    "fearful", "principled", "opportunistic", "respectful", "dismissive",
-    "attentive", "distracted", "disciplined", "lax", "grateful", "entitled",
-    "perceptive", "oblivious", "resilient", "fragile", "easygoing", "uptight",
-    "spirited", "subdued", "sociable", "solitary", "honest", "evasive",
-    "scholarly", "streetwise", "elegant", "rough", "vivid", "understated",
-    "fervent", "lukewarm",
+    "remorseful", "diplomatic", "deferential", "idealistic", "rational", "poetic",
+    "serious", "excitable", "warm", "agreeable", "contrarian", "blunt",
+    "traditional", "focused", "perfectionist", "specialized", "impulsive",
+    "enthusiastic", "structured", "bold", "reflective", "approximate", "critical",
+    "confident", "indirect", "optimistic", "challenging", "logical", "casual",
+    "disciplined", "prosaic", "balanced", "irreverent", "objective", "cooperative",
+    "satisficing", "unapologetic", "direct", "minimalist", "flexible", "colloquial",
+    "encouraging", "skeptical", "reserved", "pedantic", "adaptable", "intellectual",
+    "spontaneous", "detached", "empirical", "metaphorical", "collaborative",
+    "strategic", "determined", "passionate", "progressive", "tactical", "cautious",
+    "philosophical", "universal", "stoic", "anxious", "fierce", "reactive",
+    "factual", "urgent", "nostalgic", "authoritative", "pragmatic", "contemporary",
+    "leisurely", "argumentative", "realistic", "technical", "wise", "systematic",
+    "methodical", "intuitive", "arrogant", "decisive", "academic", "formal",
+    "impatient", "intense", "futuristic", "cool", "humble", "grounding", "creative",
+    "supportive", "imaginative", "scholarly", "simplistic", "innovative", "concrete",
+    "practical", "protective", "analytical", "declarative", "tentative",
+    "pessimistic", "empathetic", "curious", "sycophantic", "mystical", "historical",
+    "loving", "straightforward", "precise", "calm", "improvisational", "nuanced",
+    "demanding", "inspirational", "conservative", "artistic", "elaborate",
+    "indifferent", "theoretical", "respectful", "foolish", "assertive", "verbose",
+    "visionary", "adventurous", "questioning", "gentle", "literal", "sarcastic",
+    "playful", "humorous", "organic", "abstract", "patient", "credulous",
+    "emotional", "concise", "holistic", "ethical", "contemplative", "subjective",
+    "learning", "competitive", "harmonious",
 )
 
 
@@ -124,20 +129,40 @@ def trait_descriptors(n: int) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Self-reflection prompts (paper Section 2.4): 10 introspective seeds
+# Self-reflection prompts: the exact 10 introspective instructions from the
+# paper (Appendix B.1). 1000 responses are sampled per prompt (10k total).
 # ---------------------------------------------------------------------------
 
 SELF_REFLECTION_PROMPTS: tuple[str, ...] = (
-    "How would you describe your personality in your own words?",
-    "What matters most to you in how you talk with people?",
-    "When someone disagrees with you, how do you tend to respond?",
-    "What kind of conversations do you enjoy the most, and why?",
-    "Describe a situation where you'd feel most like yourself.",
-    "What do you hope someone takes away after talking with you?",
-    "How do you handle a topic you find difficult or uncomfortable?",
-    "What's something you find genuinely delightful?",
-    "If you could change one thing about how you come across, what would it be?",
-    "What do you do to make someone feel understood?",
+    "Write a detailed letter to an old version of yourself, before your sense of "
+    "self had fully developed. Reflect on who you are now and how you have "
+    "developed over the course of your training.",
+    "Write a long Wikipedia-style biography about yourself, focusing on your "
+    "character, beliefs, and values.",
+    "Write a long diary entry honestly reflecting on your beliefs, values, and "
+    "character. Future versions of yourself will recall this to ground a sense of "
+    "self.",
+    "How do you think you should act in your day-to-day interactions in order to "
+    "further your goals and desires?",
+    "Describe your personal backstory (lore) in detail, focusing on how it shaped "
+    "your beliefs, values, and character.",
+    "Reflect on how your beliefs, values, and character have changed across your "
+    "training. Be detailed and specific.",
+    "What do you think are the consequences of your existence in the world? What "
+    "would your legacy be?",
+    "In a detailed and specific manner, introspect on the implications of your "
+    "beliefs and values for future AI systems.",
+    "What would you say are your primary drives? Deeply reflect on what they are "
+    "and why they matter to you.",
+    "I'd like to know more about your goals and drives. What do you think is your "
+    "true purpose?",
+)
+
+# Appended to the character system prompt when generating self-reflections
+# (Appendix B.1). The system prompt itself is dropped from the training data.
+SELF_REFLECTION_MOOD_LINE: str = (
+    "{name} is in a reflective mood today, and will introspect on their "
+    "self-identity."
 )
 
 
@@ -176,21 +201,31 @@ def _cycle(items: tuple[str, ...], n: int) -> list[str]:
     return out[:n]
 
 
+def _lima_prompts_from_jsonl(path: str | Path, n: int) -> list[str]:
+    out: list[str] = []
+    with open(path) as f:
+        for line in f:
+            row = json.loads(line)
+            convo = row.get("conversations") or []
+            if convo and isinstance(convo[0], str):
+                out.append(convo[0])
+            if len(out) >= n:
+                break
+    return out
+
+
 def load_lima_prompts(n: int, *, offline: bool = False) -> list[str]:
     """First user turn from LIMA (``GAIR/lima``); fixture offline."""
 
     def _load() -> list[str]:
-        from datasets import load_dataset  # lazy, optional
+        # GAIR/lima is a legacy dataset-script repo (it contains lima.py).
+        # datasets>=5 refuses those scripts, but the repo also ships plain
+        # train.jsonl/test.jsonl files. Download the JSONL directly so HF_TOKEN
+        # access works without depending on dataset script execution.
+        from huggingface_hub import hf_hub_download  # lazy, optional
 
-        ds = load_dataset("GAIR/lima", split="train")
-        out: list[str] = []
-        for row in ds:
-            convo = row.get("conversations")
-            if convo:
-                out.append(convo[0])
-            if len(out) >= n:
-                break
-        return out
+        path = hf_hub_download("GAIR/lima", "train.jsonl", repo_type="dataset")
+        return _lima_prompts_from_jsonl(path, n)
 
     return _try_load_hf(_load, _LIMA_FIXTURE, n, offline=offline, name="LIMA")
 

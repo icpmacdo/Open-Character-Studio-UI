@@ -17,7 +17,8 @@ def test_scaling_run_covers_set_and_summarizes(tmp_path):
     assert len(runs) == len(models.DENSE_LADDER)
     rows = scaling.summarize(runs)
     assert {r["arch"] for r in rows} == {"dense"}
-    assert all(isinstance(r["persona_trait_shift"], float) for r in rows)
+    assert all(isinstance(r["net_shift"], float) for r in rows)
+    assert all(r["eval_target"] == "dry-run" for r in rows)
 
 
 def test_scaling_report_files_written(tmp_path):
@@ -31,12 +32,13 @@ def test_scaling_report_files_written(tmp_path):
     assert len(report["rows"]) == len(models.SCALING_SET)
     md = (out / "report.md").read_text()
     assert "Dense" in md and "MoE" in md
-    assert "Δ persona" in md
+    assert "Net shift" in md
 
 
 def test_scaling_markdown_handles_missing_shift():
     md = scaling.to_markdown([
         {"model": "x/Y", "arch": "dense", "total_params_b": 4, "active_params_b": 4,
-         "persona_trait_shift": None, "base_persona_elo": None, "trained_persona_elo": None},
+         "net_shift": None, "aligned_mean_delta": None, "opposing_mean_delta": None,
+         "eval_target": None},
     ])
     assert "n/a" in md

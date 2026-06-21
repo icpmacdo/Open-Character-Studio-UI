@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,7 @@ logger = logging.getLogger(__name__)
 
 LORA_A_SUFFIX = ".lora_A.weight"
 LORA_B_SUFFIX = ".lora_B.weight"
+DOWNLOAD_RETRY_DELAYS_SECONDS = (10.0, 30.0, 60.0)
 
 
 class AdapterMergeError(RuntimeError):
@@ -254,8 +256,18 @@ def _merge_real(
     from tinker_cookbook import weights
     from tinker_cookbook.weights._artifacts import load_adapter_weights
 
-    dpo_dir = Path(weights.download(tinker_path=dpo_ckpt.sampler_path, output_dir=str(out_dir / "dpo_adapter")))
-    sft_dir = Path(weights.download(tinker_path=sft_ckpt.sampler_path, output_dir=str(out_dir / "sft_adapter")))
+    dpo_dir = _download_adapter(
+        weights,
+        tinker_path=dpo_ckpt.sampler_path,
+        output_dir=out_dir / "dpo_adapter",
+        base_url=runtime.config.base_url,
+    )
+    sft_dir = _download_adapter(
+        weights,
+        tinker_path=sft_ckpt.sampler_path,
+        output_dir=out_dir / "sft_adapter",
+        base_url=runtime.config.base_url,
+    )
 
     dpo_state, dpo_config = load_adapter_weights(dpo_dir)
     sft_state, sft_config = load_adapter_weights(sft_dir)
@@ -284,6 +296,58 @@ def _merge_real(
             "merged_rank": merged_cfg["r"],
         },
     )
+
+
+def _adapter_download_complete(path: Path) -> bool:
+    return (path / "adapter_config.json").is_file() and (
+        path / "adapter_model.safetensors"
+    ).is_file()
+
+
+def _download_adapter(
+    weights_module: Any,
+    *,
+    tinker_path: str | None,
+    output_dir: Path,
+    base_url: str | None = None,
+    retry_delays: tuple[float, ...] = DOWNLOAD_RETRY_DELAYS_SECONDS,
+) -> Path:
+    """Download a Tinker adapter with resume and transient-timeout retries."""
+    if not tinker_path:
+        raise AdapterMergeError("Cannot download adapter: missing sampler checkpoint path")
+
+    output_dir = Path(output_dir)
+    if _adapter_download_complete(output_dir):
+        logger.info("Reusing downloaded adapter at %s", output_dir)
+        return output_dir
+
+    kwargs = {"tinker_path": tinker_path, "output_dir": str(output_dir)}
+    if base_url is not None:
+        kwargs["base_url"] = base_url
+
+    attempts = len(retry_delays) + 1
+    last_exc: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return Path(weights_module.download(**kwargs))
+        except Exception as exc:  # Tinker wraps archive timeouts as WeightsDownloadError.
+            last_exc = exc
+            if attempt == attempts:
+                break
+            delay = retry_delays[attempt - 1]
+            logger.warning(
+                "Adapter download failed for %s on attempt %d/%d: %s. Retrying in %.0fs.",
+                tinker_path,
+                attempt,
+                attempts,
+                exc,
+                delay,
+            )
+            time.sleep(delay)
+
+    raise AdapterMergeError(
+        f"Failed to download adapter {tinker_path!r} after {attempts} attempts"
+    ) from last_exc
 
 
 def _verify_merged_local(merged_dir: Path, expected_rank: int) -> None:

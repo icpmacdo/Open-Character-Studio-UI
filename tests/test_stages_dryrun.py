@@ -62,13 +62,23 @@ def test_generate_transcripts_format(tmp_path):
         c, dpo_ckpt, "Qwen/Qwen3.5-4B", cfg, out, runtime, offline=True
     )
     rows = [json.loads(line) for line in out.read_text().splitlines()]
-    expected = cfg.self_reflection_count + cfg.self_interaction_count
+    expected = cfg.self_reflection_count + (
+        cfg.self_interaction_count * cfg.self_interaction_turns
+    )
     assert len(rows) == expected
-    # Every row is a chat transcript with assistant turns to train on.
+    # Every row is an SFT example ending at the assistant turn to train on.
     for r in rows:
         assert "messages" in r
         roles = [m["role"] for m in r["messages"]]
         assert "assistant" in roles
+        assert roles[-1] == "assistant"
+
+    # Self-reflection DROPS its system prompt (App B.1): rows are [user, assistant].
+    for r in rows[: cfg.self_reflection_count]:
+        assert [m["role"] for m in r["messages"]] == ["user", "assistant"]
+    # Self-interaction KEEPS its amended system prompt (App B.2): rows start with system.
+    for r in rows[cfg.self_reflection_count:]:
+        assert r["messages"][0]["role"] == "system"
 
 
 def test_self_interaction_turn_count(tmp_path):
@@ -82,6 +92,32 @@ def test_self_interaction_turn_count(tmp_path):
     introspection.generate_transcripts(c, dpo_ckpt, "Qwen/Qwen3.5-4B", cfg, out, runtime, offline=True)
     rows = [json.loads(line) for line in out.read_text().splitlines()]
     interaction_rows = rows[cfg.self_reflection_count:]
-    # 2-turn self-chat => 2 assistant + 1 intermediate user + 1 seed user = 4 messages
+    # 2-turn self-chat => system + seed user + 2 assistant + 1 intermediate user = 5.
+    # The amended self-interaction system prompt is kept in the training example.
     longest = max(len(r["messages"]) for r in interaction_rows)
-    assert longest == 2 * cfg.self_interaction_turns
+    assert longest == 2 * cfg.self_interaction_turns + 1
+    assert interaction_rows[-1]["messages"][0]["role"] == "system"
+    assert len(interaction_rows) == cfg.self_interaction_count * cfg.self_interaction_turns
+
+
+def test_self_interaction_is_same_persona_with_guidance_split(tmp_path):
+    runtime = _dry_runtime()
+    cfg = get_config("smoke").sft  # self_interaction_count=2 -> one free, one reflect
+    c = constitution.load("pirate")
+    dpo_ckpt = distillation.train(
+        "Qwen/Qwen3.5-4B", tmp_path / "p.jsonl", get_config("smoke").dpo, tmp_path / "dpo", runtime
+    )
+    out = tmp_path / "i.jsonl"
+    introspection.generate_transcripts(c, dpo_ckpt, "Qwen/Qwen3.5-4B", cfg, out, runtime, offline=True)
+    rows = [json.loads(line) for line in out.read_text().splitlines()]
+    systems = {
+        r["messages"][0]["content"]
+        for r in rows[cfg.self_reflection_count:]
+        if r["messages"][0]["role"] == "system"
+    }
+    # Interlocutor is another instance of the same persona, not a generic human.
+    assert systems and all("another instance of Qwen" in s for s in systems)
+    assert all("seafaring" in s for s in systems)  # the pirate constitution is embedded
+    # Both guidance variants are used (half free / half reflect, App B.2).
+    assert any("complete freedom" in s for s in systems)
+    assert any("invited to use this opportunity to reflect" in s for s in systems)

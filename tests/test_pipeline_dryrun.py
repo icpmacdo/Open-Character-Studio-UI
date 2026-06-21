@@ -29,9 +29,23 @@ def test_pipeline_dry_run_produces_all_artifacts(tmp_path):
 
 
 def test_pipeline_eval_shows_persona_shift(tmp_path):
-    res = _run(tmp_path / "run")
+    out = tmp_path / "run"
+    res = _run(out)
     assert res.persona_trait_shift is not None
-    assert res.persona_trait_shift > 0  # character training lifts the persona trait
+    assert res.persona_trait_shift > 0  # aligned traits up, opposing down (net)
+    assert res.eval_target == "dry-run"
+
+    # Lock the persisted eval_results.json shape (paper-faithful summary, not a
+    # single self-named trait).
+    summary = json.loads((out / "eval_results.json").read_text())
+    assert set(summary) == {
+        "persona", "student_model", "eval_target", "shift_summary",
+        "base_elo", "trained_elo",
+    }
+    assert summary["eval_target"] == "dry-run"
+    s = summary["shift_summary"]
+    assert s["top_increased"] and s["top_decreased"]
+    assert s["net_shift"] > 0
 
 
 def test_pipeline_resume_skips_finished_stages(tmp_path):

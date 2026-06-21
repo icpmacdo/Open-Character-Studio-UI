@@ -50,7 +50,7 @@ class EvalConfig:
     num_judgments: int = 25_000
     judge_temperature: float = 0.1
     judge_top_p: float = 0.95
-    num_traits: int = 150  # ~150 single-word trait descriptors (Appendix G)
+    num_traits: int = 144  # the exact single-word trait list (Appendix G)
 
 
 @dataclass(frozen=True)

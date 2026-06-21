@@ -108,3 +108,16 @@ TEACHER_MODEL: str = "Qwen/Qwen3.5-397B-A17B"
 
 def get(tinker_id: str) -> ModelSpec:
     return CANDIDATES[tinker_id]
+
+
+def assistant_name(model_id: str) -> str:
+    """A short proper name for the assistant being trained.
+
+    The paper names the assistant in its character/introspection system prompts
+    ("explicitly naming the assistant reduces friction"). We use the model family
+    (e.g. ``Qwen``, ``Nemotron``), falling back to the first token of the id.
+    """
+    spec = CANDIDATES.get(model_id)
+    if spec is not None:
+        return spec.family
+    return model_id.split("/")[-1].split("-")[0]

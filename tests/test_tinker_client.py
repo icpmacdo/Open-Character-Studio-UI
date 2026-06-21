@@ -18,8 +18,8 @@ def test_vendored_cookbook_renderer_names_resolve():
     )
     by_model = {plan.model_id: plan.renderer_name for plan in plans}
 
-    assert by_model["Qwen/Qwen3.5-4B"] == "qwen3_5"
-    assert by_model["Qwen/Qwen3.6-27B"] == "qwen3_5"
+    assert by_model["Qwen/Qwen3.5-4B"] == "qwen3_5_disable_thinking"
+    assert by_model["Qwen/Qwen3.6-27B"] == "qwen3_5_disable_thinking"
     assert by_model["nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16"] == "nemotron3_ultra"
 
 
@@ -38,7 +38,7 @@ def test_dry_run_runtime_does_not_require_tinker_or_api_key(monkeypatch):
         )
     )
 
-    assert runtime.renderer_plan("Qwen/Qwen3.5-4B").renderer_name == "qwen3_5"
+    assert runtime.renderer_plan("Qwen/Qwen3.5-4B").renderer_name == "qwen3_5_disable_thinking"
     assert sample.sequences[0].tokens == []
 
 

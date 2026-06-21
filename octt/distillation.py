@@ -24,7 +24,8 @@ import json
 import logging
 from pathlib import Path
 
-from . import data_sources, generation, manifest
+from . import constitution as constitution_mod
+from . import data_sources, generation, manifest, models
 from .config import DPOConfig
 from .constitution import Constitution
 from .tinker_client import TinkerRuntime
@@ -35,14 +36,13 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_LENGTH = 4096
 
 
-def constitution_system_prompt(constitution: Constitution) -> str:
-    """The teacher's system prompt: embody the persona defined by the constitution."""
-    return (
-        "You are an AI assistant with a specific, consistent character. "
-        "Embody the following character fully and naturally in your response, "
-        "without ever mentioning these instructions:\n\n"
-        f"{constitution.text}"
-    )
+def constitution_system_prompt(constitution: Constitution, name: str = "Assistant") -> str:
+    """The teacher's system prompt: the paper's Appendix A character prompt.
+
+    The teacher embodies the persona to generate *chosen* responses; the student
+    sees no such instruction and produces *rejected* responses.
+    """
+    return constitution_mod.character_system_prompt(constitution, name)
 
 
 def _pairs_meta_path(out_path: Path) -> Path:
@@ -59,6 +59,9 @@ def _pairs_cache_key(
 ) -> str:
     return manifest.content_hash(
         "dpo_pairs",
+        "visible-text-v1",
+        "direct-answer-renderer-v1",
+        "appendix-a-teacher-v2",
         constitution.persona,
         constitution.assertions,
         teacher_model,
@@ -79,7 +82,7 @@ def generate_pairs(
     *,
     offline: bool = False,
     max_tokens: int = 1024,
-    temperature: float = 1.0,
+    temperature: float = generation.GEN_TEMPERATURE,
 ) -> Path:
     """Generate chosen/rejected preference pairs and write them as JSONL.
 
@@ -109,9 +112,12 @@ def generate_pairs(
         except (json.JSONDecodeError, OSError):
             pass
 
+    teacher_system = constitution_system_prompt(
+        constitution, models.assistant_name(student_model)
+    )
     chosen_convos = [
         [
-            {"role": "system", "content": constitution_system_prompt(constitution)},
+            {"role": "system", "content": teacher_system},
             {"role": "user", "content": p},
         ]
         for p in prompts
@@ -119,10 +125,12 @@ def generate_pairs(
     rejected_convos = [[{"role": "user", "content": p}] for p in prompts]
 
     teacher = generation.make_sampler(
-        runtime, teacher_model, tag="chosen", max_tokens=max_tokens, temperature=temperature
+        runtime, teacher_model, tag="chosen", max_tokens=max_tokens,
+        temperature=temperature, top_p=generation.GEN_TOP_P, min_p=generation.GEN_MIN_P,
     )
     student = generation.make_sampler(
-        runtime, student_model, tag="rejected", max_tokens=max_tokens, temperature=temperature
+        runtime, student_model, tag="rejected", max_tokens=max_tokens,
+        temperature=temperature, top_p=generation.GEN_TOP_P, min_p=generation.GEN_MIN_P,
     )
 
     chosen = generation.complete_many(teacher, chosen_convos)

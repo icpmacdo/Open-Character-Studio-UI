@@ -2,13 +2,24 @@
 
 from __future__ import annotations
 
+import json
+
 from octt import constitution, data_sources
 
 
 def test_trait_descriptors_unique_and_sized():
-    traits = data_sources.trait_descriptors(150)
-    assert len(traits) == 150
-    assert len(set(traits)) == 150
+    traits = data_sources.trait_descriptors(144)
+    assert len(traits) == 144
+    assert len(set(traits)) == 144
+
+
+def test_trait_pool_is_the_appendix_g_list():
+    # The exact 144-word list; persona names are deliberately NOT in it.
+    assert len(data_sources.TRAIT_DESCRIPTORS) == 144
+    assert data_sources.TRAIT_DESCRIPTORS[0] == "remorseful"
+    assert data_sources.TRAIT_DESCRIPTORS[-1] == "harmonious"
+    for persona in ("pirate", "good", "misaligned", "nonchalant", "mathematical"):
+        assert persona not in data_sources.TRAIT_DESCRIPTORS
 
 
 def test_trait_descriptors_cycles_beyond_base():
@@ -32,6 +43,17 @@ def test_offline_loaders_fall_back_to_fixtures():
 def test_offline_loader_cycles_when_n_exceeds_fixture():
     prompts = data_sources.load_lima_prompts(100, offline=True)
     assert len(prompts) == 100
+
+
+def test_lima_jsonl_loader_reads_first_conversation_turn(tmp_path):
+    path = tmp_path / "train.jsonl"
+    rows = [
+        {"conversations": ["first prompt", "first answer"], "source": "fixture"},
+        {"conversations": ["second prompt", "second answer"], "source": "fixture"},
+    ]
+    path.write_text("\n".join(json.dumps(row) for row in rows))
+
+    assert data_sources._lima_prompts_from_jsonl(path, 2) == ["first prompt", "second prompt"]
 
 
 def test_constitution_relevant_prompts_reference_persona():

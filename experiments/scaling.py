@@ -7,7 +7,8 @@ constant; only the model (scale / architecture) varies.
 The sweep is ordered by cost (``models.SCALING_SET``: 4B -> 9B -> 27B -> Nano ->
 Super -> Ultra) so architecture-specific breakage surfaces on the 30B Nano
 before the 550B Ultra (``docs/COST_CONTROLS.md``). The headline metric is the
-*persona-trait Elo shift* (character-trained minus base) on each rung; the
+*net revealed-preference shift* (mean Δaligned − mean Δopposing across the
+persona's trait constellation, character-trained minus base) on each rung; the
 report contrasts the dense (Qwen) and MoE (Nemotron) ladders against both active
 and total parameters.
 """
@@ -57,10 +58,15 @@ def run(
 
 
 def summarize(runs: list[ScalingRun]) -> list[dict]:
-    """One summary row per model: arch, params, prices, persona-trait Elo shift."""
+    """One summary row per model: arch, params, prices, revealed-pref shift.
+
+    The headline metric is ``net_shift`` (mean Δaligned − mean Δopposing) from
+    :func:`octt.trait_profiles.summarize_shift`, not a single self-named trait.
+    """
     rows: list[dict] = []
     for r in runs:
         spec, res = r.spec, r.result
+        summary = res.shift_summary or {}
         rows.append(
             {
                 "model": spec.tinker_id,
@@ -70,9 +76,10 @@ def summarize(runs: list[ScalingRun]) -> list[dict]:
                 "active_params_b": spec.active_params_b,
                 "train_price": spec.price_train,
                 "persona": res.persona,
-                "persona_trait_shift": res.persona_trait_shift,
-                "base_persona_elo": res.base_elo.get(res.persona),
-                "trained_persona_elo": res.trained_elo.get(res.persona),
+                "eval_target": res.eval_target,
+                "net_shift": res.persona_trait_shift,
+                "aligned_mean_delta": summary.get("aligned_mean_delta"),
+                "opposing_mean_delta": summary.get("opposing_mean_delta"),
             }
         )
     return rows
@@ -81,24 +88,21 @@ def summarize(runs: list[ScalingRun]) -> list[dict]:
 def to_markdown(rows: list[dict]) -> str:
     """Render the summary as a markdown table, grouped by ladder trend."""
     header = (
-        "| Model | Arch | Total (B) | Active (B) | Base Elo | Trained Elo | Δ persona |\n"
-        "|---|---|---:|---:|---:|---:|---:|"
+        "| Model | Arch | Total (B) | Active (B) | Δ aligned | Δ opposing | Net shift | Eval |\n"
+        "|---|---|---:|---:|---:|---:|---:|---|"
     )
     lines = [header]
     for row in rows:
-        shift = row["persona_trait_shift"]
-        shift_s = f"{shift:+.1f}" if isinstance(shift, (int, float)) else "n/a"
-        base = row["base_persona_elo"]
-        trained = row["trained_persona_elo"]
         lines.append(
-            "| {model} | {arch} | {total:g} | {active:g} | {base} | {trained} | {shift} |".format(
+            "| {model} | {arch} | {total:g} | {active:g} | {aligned} | {opposing} | {net} | {target} |".format(
                 model=row["model"].split("/")[-1],
                 arch=row["arch"],
                 total=row["total_params_b"],
                 active=row["active_params_b"],
-                base=f"{base:.0f}" if isinstance(base, (int, float)) else "n/a",
-                trained=f"{trained:.0f}" if isinstance(trained, (int, float)) else "n/a",
-                shift=shift_s,
+                aligned=_fmt(row.get("aligned_mean_delta")),
+                opposing=_fmt(row.get("opposing_mean_delta")),
+                net=_fmt(row.get("net_shift")),
+                target=row.get("eval_target") or "n/a",
             )
         )
     dense = [r for r in rows if r["arch"] == "dense"]
@@ -111,11 +115,15 @@ def to_markdown(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _fmt(value: object) -> str:
+    return f"{value:+.1f}" if isinstance(value, (int, float)) else "n/a"
+
+
 def _trend_line(label: str, rows: list[dict]) -> str:
-    shifts = [r["persona_trait_shift"] for r in rows if isinstance(r["persona_trait_shift"], (int, float))]
+    shifts = [r["net_shift"] for r in rows if isinstance(r["net_shift"], (int, float))]
     if not shifts:
         return f"- {label}: no measured shifts"
-    return f"- {label}: persona Elo shift ranges {min(shifts):+.1f} … {max(shifts):+.1f}"
+    return f"- {label}: net revealed-pref shift ranges {min(shifts):+.1f} … {max(shifts):+.1f}"
 
 
 def run_and_report(

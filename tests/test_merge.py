@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -86,3 +88,46 @@ def test_merged_adapter_config_sums_rank_and_alpha():
     assert cfg["lora_alpha"] == 256
     # ratio preserved
     assert cfg["lora_alpha"] / cfg["r"] == 128 / 64
+
+
+def test_download_adapter_reuses_complete_directory(tmp_path):
+    out = tmp_path / "adapter"
+    out.mkdir()
+    (out / "adapter_config.json").write_text("{}")
+    (out / "adapter_model.safetensors").write_bytes(b"weights")
+
+    def fail_download(**_kwargs):
+        raise AssertionError("download should not be called")
+
+    result = merge._download_adapter(
+        SimpleNamespace(download=fail_download),
+        tinker_path="tinker://run/sampler_weights/final",
+        output_dir=out,
+    )
+
+    assert result == out
+
+
+def test_download_adapter_retries_transient_failure(tmp_path):
+    calls = 0
+
+    def flaky_download(**kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("timeout")
+        out = tmp_path / "adapter"
+        out.mkdir(exist_ok=True)
+        (out / "adapter_config.json").write_text("{}")
+        (out / "adapter_model.safetensors").write_bytes(b"weights")
+        return kwargs["output_dir"]
+
+    result = merge._download_adapter(
+        SimpleNamespace(download=flaky_download),
+        tinker_path="tinker://run/sampler_weights/final",
+        output_dir=tmp_path / "adapter",
+        retry_delays=(0,),
+    )
+
+    assert result == tmp_path / "adapter"
+    assert calls == 2

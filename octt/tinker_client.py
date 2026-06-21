@@ -27,6 +27,13 @@ DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "runs"
 # until the full Tinker catalog/price sheet is wired in.
 TEACHER_SAMPLE_PRICE_USD_PER_MTOK = 5.0
 
+DIRECT_ANSWER_RENDERER_OVERRIDES = {
+    # The cookbook's default Qwen3.5 renderer enables thinking. OCTT persists
+    # sampled completions as supervised/preference training text, so prefer the
+    # direct-answer variant to keep reasoning traces out of the dataset.
+    "qwen3_5": "qwen3_5_disable_thinking",
+}
+
 
 class TinkerSetupError(RuntimeError):
     """Raised when Tinker or the cookbook cannot be initialized."""
@@ -189,7 +196,8 @@ def import_model_info(cookbook_path: Path = DEFAULT_COOKBOOK_PATH) -> ModuleType
 def resolve_renderer_name(model_id: str, cookbook_path: Path = DEFAULT_COOKBOOK_PATH) -> str:
     model_info = import_model_info(cookbook_path)
     try:
-        return model_info.get_recommended_renderer_name(model_id)
+        recommended = model_info.get_recommended_renderer_name(model_id)
+        return DIRECT_ANSWER_RENDERER_OVERRIDES.get(recommended, recommended)
     except Exception as exc:
         raise TinkerSetupError(f"Could not resolve renderer for {model_id!r}: {exc}") from exc
 
@@ -236,7 +244,8 @@ def import_tinker_stack(cookbook_path: Path = DEFAULT_COOKBOOK_PATH) -> TinkerSt
 
 
 def resolve_renderer_binding(model_id: str, stack: TinkerStack) -> RendererBinding:
-    renderer_name = stack.get_recommended_renderer_name(model_id)
+    recommended = stack.get_recommended_renderer_name(model_id)
+    renderer_name = DIRECT_ANSWER_RENDERER_OVERRIDES.get(recommended, recommended)
     tokenizer = stack.get_tokenizer(model_id)
     renderer = stack.renderers.get_renderer(renderer_name, tokenizer, model_name=model_id)
     return RendererBinding(

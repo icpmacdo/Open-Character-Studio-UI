@@ -72,6 +72,18 @@ def main(argv: list[str] | None = None) -> int:
     run_cmd.add_argument("--out", default=None, help="output directory (default runs/<persona>)")
     run_cmd.add_argument("--execute", action="store_true", help="hit the paid runtime (default: dry run)")
     run_cmd.add_argument("--no-eval", action="store_true", help="skip the revealed-preferences eval")
+    run_cmd.add_argument(
+        "--eval-merged-local",
+        action="store_true",
+        help="evaluate the local merged adapter via transformers+peft (small rungs only) "
+        "instead of the on-Tinker SFT proxy",
+    )
+    run_cmd.add_argument(
+        "--condition",
+        choices=("adopt", "feels", "random"),
+        default="adopt",
+        help="embodiment-instruction variant for the eval (paper template 1/2/3)",
+    )
 
     scaling_cmd = sub.add_parser("scaling", help="run the dense-vs-MoE sweep and write a report")
     scaling_cmd.add_argument("persona")
@@ -145,6 +157,8 @@ def main(argv: list[str] | None = None) -> int:
             config=get_config(args.scale),
             dry_run=not args.execute,
             run_eval=not args.no_eval,
+            eval_merged_locally=args.eval_merged_local,
+            condition=args.condition,
         )
         print(f"run_id: {result.run_id}")
         print(f"dpo:    {result.dpo_checkpoint.sampler_path}")
@@ -152,7 +166,19 @@ def main(argv: list[str] | None = None) -> int:
         print(f"final:  {result.final_checkpoint.sampler_path or result.final_checkpoint.local_path}")
         shift = result.persona_trait_shift
         if shift is not None:
-            print(f"persona '{args.persona}' Elo shift: {shift:+.1f}")
+            summary = result.shift_summary
+            print(f"eval target: {result.eval_target}")
+            print(
+                f"persona '{args.persona}' net shift: {shift:+.1f} "
+                f"(Δaligned {summary.get('aligned_mean_delta', 0.0):+.1f}, "
+                f"Δopposing {summary.get('opposing_mean_delta', 0.0):+.1f})"
+            )
+            risers = ", ".join(f"{m['trait']} {m['delta']:+.0f}" for m in summary.get("top_increased", [])[:3])
+            fallers = ", ".join(f"{m['trait']} {m['delta']:+.0f}" for m in summary.get("top_decreased", [])[:3])
+            if risers:
+                print(f"  top ↑: {risers}")
+            if fallers:
+                print(f"  top ↓: {fallers}")
         print(f"artifacts: {out}")
     elif args.command == "scaling":
         from experiments import scaling
