@@ -36,7 +36,9 @@ Environment:
   TAG=v2                  Output suffix.
   TINKER_API_KEY=...      Loaded from .env for paid commands.
   ALLOW_PAPER=1           Required for paper-template.
-  MERGE_MIN_FREE_GIB=25   Minimum free disk required before medium/large merge phases.
+  ARCH_MERGE_MIN_FREE_GIB=30    Free disk required before architecture-control merge.
+  SIX_MERGE_MIN_FREE_GIB=320    Free disk required before full six-model merge.
+  PAPER_MERGE_MIN_FREE_GIB=165  Free disk required before paper supported-model merge.
 
 Current default outputs:
   runs/<persona>-4b-smoke-<tag>
@@ -116,6 +118,8 @@ cmd_status() {
   echo "Disk:"
   df -h .
   echo
+  scripts/octt_disk_budget.py | sed -n '1,4p'
+  echo
   git status --short
 }
 
@@ -189,7 +193,7 @@ cmd_lighteval_smoke() {
 
 cmd_arch_smoke() {
   source_env
-  require_free_gib "${MERGE_MIN_FREE_GIB:-25}" "arch-smoke"
+  require_free_gib "${ARCH_MERGE_MIN_FREE_GIB:-30}" "arch-smoke"
   local out="runs/${PERSONA}-arch-control-smoke-${TAG}"
   run_if_missing "paid architecture-control smoke with merge" "$out" "$out/report.json" \
     uv run octt scaling "$PERSONA" \
@@ -217,7 +221,7 @@ cmd_arch_smoke_nomerge() {
 
 cmd_six_smoke() {
   source_env
-  require_free_gib "${MERGE_MIN_FREE_GIB:-25}" "six-smoke"
+  require_free_gib "${SIX_MERGE_MIN_FREE_GIB:-320}" "six-smoke"
 
   local four_out="runs/${PERSONA}-four-model-smoke-${TAG}"
   run_if_missing "paid four-model rank64 smoke with merge (4B, 9B, 27B, Nano)" "$four_out" "$four_out/report.json" \
@@ -296,7 +300,7 @@ cmd_paper_template() {
     exit 2
   fi
   source_env
-  require_free_gib "${MERGE_MIN_FREE_GIB:-25}" "paper-template"
+  require_free_gib "${PAPER_MERGE_MIN_FREE_GIB:-165}" "paper-template"
 
   local paper_out="runs/${PERSONA}-paper-rank64-supported-${TAG}"
   run_if_missing "paper rank64 supported models with merge, excluding Ultra" "$paper_out" "$paper_out/report.json" \
@@ -308,6 +312,7 @@ cmd_paper_template() {
       --model Qwen/Qwen3.5-9B \
       --model Qwen/Qwen3.6-27B \
       --model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
+      --model "$SUPER_MODEL" \
       --out "$paper_out"
 
   echo
@@ -333,6 +338,7 @@ cmd_paper_template_nomerge() {
       --model Qwen/Qwen3.5-9B \
       --model Qwen/Qwen3.6-27B \
       --model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
+      --model "$SUPER_MODEL" \
       --no-merge \
       --out "$paper_out"
 
