@@ -1333,6 +1333,7 @@ dependencies = [
 
 [package.optional-dependencies]
 dev = [
+    { name = "numpy" },
     { name = "pytest" },
     { name = "ruff" },
 ]
@@ -1345,6 +1346,7 @@ train = [
 [package.metadata]
 requires-dist = [
     { name = "datasets", marker = "extra == 'train'", specifier = ">=2.18" },
+    { name = "numpy", marker = "extra == 'dev'", specifier = ">=1.26" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },

@@ -63,7 +63,9 @@ class RecipeConfig:
     merge_adapters: bool = True  # linearly merge DPO + SFT adapters (paper)
 
 
-# Tiny preset for validating plumbing before any paid run.
+# Tiny preset for validating plumbing before any paid run. The eval uses a small
+# trait pool so the persona trait is actually sampled (and a preference shift is
+# observable) even at this scale.
 SMOKE = RecipeConfig(
     dpo=DPOConfig(batch_size=2, num_prompts=2),
     sft=SFTConfig(
@@ -72,13 +74,14 @@ SMOKE = RecipeConfig(
         self_interaction_count=2,
         self_interaction_turns=2,
     ),
-    eval=EvalConfig(num_judgments=10),
+    eval=EvalConfig(num_judgments=40, num_traits=8),
 )
 
 # Downscaled preset for fast end-to-end smoke tests (~1% of paper scale).
 QUICK = RecipeConfig(
     dpo=DPOConfig(num_prompts=32),
     sft=SFTConfig(self_reflection_count=100, self_interaction_count=20),
+    eval=EvalConfig(num_judgments=200, num_traits=30),
 )
 
 # Paper-faithful preset.

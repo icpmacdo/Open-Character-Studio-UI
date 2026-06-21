@@ -101,6 +101,13 @@ class TinkerRuntime:
             model_path=model_path,
         )
 
+    def require_service_client(self) -> Any:
+        if self.config.dry_run:
+            raise TinkerSetupError("Dry-run runtime has no Tinker service client")
+        if self.service_client is None:
+            raise TinkerSetupError("Tinker service client is not initialized")
+        return self.service_client
+
     def renderer_plan(self, model_id: str) -> RendererPlan:
         return self.renderer_plans[model_id]
 

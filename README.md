@@ -30,27 +30,44 @@ See `octt/config.py` for the canonical hyperparameters.
 
 ## Status
 
-Scaffold. Open decisions, tracked as TODOs in code:
+The recipe runs **end-to-end in a dry run** (no spend): every stage produces real
+artifacts (JSONL pairs/transcripts, manifests, a merged adapter, Elo reports)
+with all Tinker calls stubbed. The real (paid) paths are written against the
+vendored `tinker-cookbook` API and imported lazily, so the package imports and
+the full test suite pass from a fresh checkout without the training backend.
 
-- **Model set** for the dense-vs-MoE comparison (see `octt/models.py`).
-- **Deliverable form** (reference code vs. prose doc vs. both).
-- **DPO teacher** model on Tinker.
+```bash
+octt run humorous --model Qwen/Qwen3.5-4B --scale smoke        # dry run, one pair
+octt scaling humorous --scale smoke                            # dry-run sweep + report
+octt preflight --dry-run                                       # validate setup + cost
+octt run humorous --model Qwen/Qwen3.5-4B --scale paper --execute   # real, paid
+```
+
+Decisions are locked (see `octt/models.py`): dense ladder = Qwen, MoE ladder =
+Nemotron-3, teacher = `Qwen/Qwen3.5-397B-A17B`. Remaining recipe gap: the paper's
+non-revealed-preference evals (adversarial robustness, coherence, capability).
 
 ## Layout
 
 ```
 octt/
-  config.py         # canonical recipe hyperparameters (paper-faithful)
-  models.py         # Tinker model registry; dense-vs-MoE candidates
-  constitution.py   # constitution loading
-  distillation.py   # stage 2: DPO
-  introspection.py  # stage 3: SFT
-  evaluation.py     # revealed-preferences eval
-  pipeline.py       # stage orchestration
+  config.py         # canonical recipe hyperparameters (paper-faithful) + SMOKE/QUICK/PAPER
+  models.py         # Tinker model registry; dense-vs-MoE ladders, prices, teacher
+  constitution.py   # constitution loading (11 personas in constitutions/)
+  data_sources.py   # LIMA/WildChat/Pure-Dove loaders + ~150 trait descriptors
+  manifest.py       # run_id, atomic manifest, checkpoint registry, content-hash caches
+  generation.py     # shared sampling helpers (dry-run stubs / real Tinker clients)
+  distillation.py   # stage 2: DPO pair gen + training (β + NLL-on-chosen)
+  introspection.py  # stage 3: self-reflection/self-interaction gen + SFT
+  merge.py          # stage 4: exact linear LoRA adapter merge (rank-concat)
+  evaluation.py     # revealed-preferences eval (embody -> judge -> Elo, cached)
+  pipeline.py       # stage orchestration w/ skip-if-exists + round-trip verify
+  tinker_client.py  # Tinker setup, renderer planning, preflight + cost estimate
   cli.py            # command-line entry point
 experiments/
-  scaling.py        # dense-vs-MoE sweep harness
-constitutions/      # persona constitutions
+  scaling.py        # dense-vs-MoE sweep harness + JSON/markdown report
+constitutions/      # persona constitutions (one per file)
+docs/COST_CONTROLS.md  # smoke-test tiers, checkpoint/resume rules, caching
 tests/
 ```
 

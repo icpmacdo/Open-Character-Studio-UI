@@ -85,9 +85,11 @@ crashed.
 
 - [x] `SMOKE` preset in `octt/config.py` (alongside `QUICK` / `PAPER`).
 - [x] `--dry-run` threaded through `pipeline.py` (stub Tinker client).
-- [ ] `RunManifest` / checkpoint-registry module: atomic JSON, URI tracking,
-      resume lookup, round-trip verify.
-- [ ] `distillation.train` / `introspection.train` return
-      `(training_state, sampler)` checkpoints; `pipeline.run` skips-if-exists.
-- [ ] Content-hash caching for generated data + judge verdicts.
+- [x] `RunManifest` / checkpoint-registry module (`octt/manifest.py`): atomic JSON
+      (temp-then-rename), `StageCheckpoint` URI tracking, deterministic `run_id`,
+      resume lookup (`has_stage`), `pipeline._verify_checkpoint` round-trip gate.
+- [x] `distillation.train` / `introspection.train` return `StageCheckpoint`
+      (state + sampler); `pipeline.run` skips any stage already in the manifest.
+- [x] Content-hash caching for generated data (DPO pairs, transcripts) + judge
+      verdicts (`octt/evaluation.py` JSONL cache).
 - [x] `octt preflight` CLI command (validation + cost estimate + `--budget`).

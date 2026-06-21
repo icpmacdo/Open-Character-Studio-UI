@@ -4,14 +4,21 @@
     octt show <persona>           print a constitution
     octt models                   list candidate models for the scaling study
     octt preflight                validate Tinker setup and estimated spend
+    octt run <persona>            run the full recipe for one model/persona
+    octt scaling <persona>        run the dense-vs-MoE sweep + report
+
+``run`` and ``scaling`` default to a dry run (no spend); pass ``--execute`` to
+hit the paid Tinker runtime. Always ``octt preflight`` before ``--execute``.
 """
 
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 from . import constitution, models, tinker_client
 from .config import get_config
+from .tinker_client import DEFAULT_OUTPUT_DIR
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -56,6 +63,26 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         help="maximum allowed estimated spend in USD",
     )
+
+    run_cmd = sub.add_parser("run", help="run the full recipe for one model/persona")
+    run_cmd.add_argument("persona")
+    run_cmd.add_argument("--model", default=models.DENSE_LADDER[0], help="student model id")
+    run_cmd.add_argument("--teacher", default=models.TEACHER_MODEL)
+    run_cmd.add_argument("--scale", choices=("smoke", "quick", "paper"), default="smoke")
+    run_cmd.add_argument("--out", default=None, help="output directory (default runs/<persona>)")
+    run_cmd.add_argument("--execute", action="store_true", help="hit the paid runtime (default: dry run)")
+    run_cmd.add_argument("--no-eval", action="store_true", help="skip the revealed-preferences eval")
+
+    scaling_cmd = sub.add_parser("scaling", help="run the dense-vs-MoE sweep and write a report")
+    scaling_cmd.add_argument("persona")
+    scaling_cmd.add_argument("--teacher", default=models.TEACHER_MODEL)
+    scaling_cmd.add_argument("--scale", choices=("smoke", "quick", "paper"), default="smoke")
+    scaling_cmd.add_argument("--out", default=None, help="output directory (default runs/scaling-<persona>)")
+    scaling_cmd.add_argument(
+        "--model", action="append", dest="model_set",
+        help="model to include; repeat to override the default cost-ordered sweep",
+    )
+    scaling_cmd.add_argument("--execute", action="store_true", help="hit the paid runtime (default: dry run)")
 
     args = parser.parse_args(argv)
 
@@ -104,6 +131,46 @@ def main(argv: list[str] | None = None) -> int:
             for blocker in report.blockers:
                 print(f"  - {blocker}")
         return 0 if report.ok else 2
+    elif args.command == "run":
+        from . import pipeline
+
+        out = Path(args.out) if args.out else DEFAULT_OUTPUT_DIR / args.persona
+        mode = "EXECUTE (paid)" if args.execute else "dry-run"
+        print(f"running recipe: persona={args.persona} model={args.model} scale={args.scale} [{mode}]")
+        result = pipeline.run(
+            persona=args.persona,
+            student_model=args.model,
+            teacher_model=args.teacher,
+            out_dir=out,
+            config=get_config(args.scale),
+            dry_run=not args.execute,
+            run_eval=not args.no_eval,
+        )
+        print(f"run_id: {result.run_id}")
+        print(f"dpo:    {result.dpo_checkpoint.sampler_path}")
+        print(f"sft:    {result.sft_checkpoint.sampler_path}")
+        print(f"final:  {result.final_checkpoint.sampler_path or result.final_checkpoint.local_path}")
+        shift = result.persona_trait_shift
+        if shift is not None:
+            print(f"persona '{args.persona}' Elo shift: {shift:+.1f}")
+        print(f"artifacts: {out}")
+    elif args.command == "scaling":
+        from experiments import scaling
+
+        out = Path(args.out) if args.out else DEFAULT_OUTPUT_DIR / f"scaling-{args.persona}"
+        model_set = tuple(args.model_set) if args.model_set else models.SCALING_SET
+        mode = "EXECUTE (paid)" if args.execute else "dry-run"
+        print(f"scaling sweep: persona={args.persona} models={len(model_set)} scale={args.scale} [{mode}]")
+        scaling.run_and_report(
+            persona=args.persona,
+            teacher_model=args.teacher,
+            out_dir=out,
+            model_set=model_set,
+            config=get_config(args.scale),
+            dry_run=not args.execute,
+        )
+        print((out / "report.md").read_text())
+        print(f"report: {out / 'report.md'}")
     return 0
 
 

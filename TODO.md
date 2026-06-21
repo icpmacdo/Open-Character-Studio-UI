@@ -15,18 +15,18 @@ constitutions/data (11,12) feeding in along the way.
 ## Tinker integration (foundation)
 - [x] 4. **Tinker client wiring** — auth (`TINKER_API_KEY`), `tinker`/`tinker_cookbook` setup, renderer selection per model. Apply cost-control / checkpoint practices from `docs/COST_CONTROLS.md` as we build.
 
-## Recipe stages (currently structured stubs)
-- [ ] 5. **Stage 2 — DPO pair generation** (`octt/distillation.py`) — teacher-with-constitution → *chosen*, base student → *rejected*; LIMA + constitution-relevant prompts.
-- [ ] 6. **Stage 2 — DPO training** (`octt/distillation.py`) — LoRA DPO on Tinker (β=0.1, NLL 0.1, KL penalty).
-- [ ] 7. **Stage 3 — introspection data gen** (`octt/introspection.py`) — 10k self-reflection + 2k self-interaction (10-turn) transcripts.
-- [ ] 8. **Stage 3 — SFT** (`octt/introspection.py`) — 1-epoch LoRA SFT from the DPO checkpoint.
-- [ ] 9. **Adapter merge** — linear merge of DPO + SFT adapters; wire into `octt/pipeline.py`.
-- [ ] 10. **Eval — revealed preferences** (`octt/evaluation.py`) — trait-embodiment sampling, LLM judge, Elo. Plus paper's other evals (adversarial robustness, coherence, capability benchmarks).
+## Recipe stages (implemented: dry-run end-to-end; real paths lazy-import Tinker)
+- [x] 5. **Stage 2 — DPO pair generation** (`octt/distillation.py`) — teacher-with-constitution → *chosen*, base student → *rejected*; LIMA + constitution-relevant prompts; JSONL written in both a human view and the cookbook `comparison`/`label` view; content-hash cached.
+- [x] 6. **Stage 2 — DPO training** (`octt/distillation.py`) — LoRA DPO loop on cookbook primitives (β=0.1, per-token KL via reference logprobs, **+ paper's NLL-0.1-on-chosen term**); returns state+sampler checkpoints.
+- [x] 7. **Stage 3 — introspection data gen** (`octt/introspection.py`) — self-reflection + N-turn self-interaction transcripts sampled from the post-DPO model; content-hash cached.
+- [x] 8. **Stage 3 — SFT** (`octt/introspection.py`) — 1-epoch LoRA SFT via cookbook `FromConversationFileBuilder`; trained as an **independent** adapter over base so the merge is well-defined.
+- [x] 9. **Adapter merge** (`octt/merge.py`) — exact linear merge by rank-concatenation (`α/r` preserved); compatibility asserts + round-trip; wired into `octt/pipeline.py`. *Tinker is LoRA-only with no adapter re-upload, so the merged adapter is a local export artifact.*
+- [~] 10. **Eval — revealed preferences** (`octt/evaluation.py`) — trait-embodiment sampling → LLM judge → Elo, with judge-verdict caching. **Still TODO:** the paper's other evals (adversarial robustness, coherence, capability benchmarks).
 
 ## Content & data
-- [ ] 11. **Remaining constitutions** — 10 more personas from the paper (only `humorous` exists).
-- [ ] 12. **Prompt/data sources** — LIMA, WildChat, Pure-Dove loading; ~150 trait descriptor list.
+- [x] 11. **Remaining constitutions** — the paper's 10 official hand-written personas added (sarcastic, poetic, good, loving, mathematical, nonchalant, impulsive, misaligned, remorseful, sycophantic); 11 total with `humorous`.
+- [x] 12. **Prompt/data sources** (`octt/data_sources.py`) — LIMA / WildChat / Pure-Dove loaders (lazy `datasets`, offline fixtures) + ~150 trait descriptors.
 
 ## Experiment harness
-- [ ] 13. **Scaling analysis/reporting** — compare/plot revealed-preference shifts across dense vs MoE.
-- [ ] 14. **Run config & artifact layout** — where checkpoints/datasets/results land per run.
+- [x] 13. **Scaling analysis/reporting** (`experiments/scaling.py`) — cost-ordered sweep, per-rung persona-Elo shift, JSON + markdown report contrasting dense vs MoE.
+- [x] 14. **Run config & artifact layout** (`octt/manifest.py`) — deterministic `run_id`, atomic `runs/<id>/manifest.json`, skip-if-exists resume, content-hash caches.
