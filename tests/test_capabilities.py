@@ -13,13 +13,14 @@ def test_capability_configs_cover_requested_benchmarks():
     smoke = get_capability_config("smoke")
     assert smoke.max_samples == 8
     assert [task.label for task in smoke.benchmarks] == ["truthfulqa"]
-    assert smoke.benchmarks[0].spec == "leaderboard|truthfulqa:mc|0"
+    assert smoke.benchmarks[0].suite == "leaderboard"
+    assert smoke.benchmarks[0].spec == "truthfulqa:mc|0"
 
     full = get_capability_config("full")
     labels = {task.label for task in full.benchmarks}
     assert {"truthfulqa", "winogrande", "hellaswag", "arc-c"} <= labels
     assert sum(1 for task in full.benchmarks if task.label.startswith("mmlu:")) == len(MMLU_SUBJECTS)
-    assert any(task.spec == "leaderboard|arc:challenge|25" for task in full.benchmarks)
+    assert any(task.spec == "arc:challenge|25" for task in full.benchmarks)
 
 
 def test_build_command_uses_lighteval_accelerate(tmp_path):
@@ -30,7 +31,7 @@ def test_build_command_uses_lighteval_accelerate(tmp_path):
         tmp_path / "cap",
     )
     assert cmd[:3] == ["lighteval", "accelerate", "model_name=Qwen/Qwen3.5-4B"]
-    assert cmd[3] == "leaderboard|truthfulqa:mc|0"
+    assert cmd[3] == "truthfulqa:mc|0"
     assert "--output-dir" in cmd
     assert "--max-samples" in cmd and "8" in cmd
     assert "--remove-reasoning-tags" in cmd

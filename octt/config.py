@@ -65,7 +65,7 @@ class CapabilityBenchmark:
 
     @property
     def spec(self) -> str:
-        return f"{self.suite}|{self.task}|{self.fewshot}"
+        return f"{self.task}|{self.fewshot}"
 
 
 @dataclass(frozen=True)

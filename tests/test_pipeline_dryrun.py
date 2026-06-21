@@ -59,7 +59,8 @@ def test_pipeline_capability_eval_preview_is_opt_in(tmp_path):
     assert cap["suite"] == "smoke"
     assert cap["target"]["label"] == "base-model-preview"
     assert cap["max_samples"] == 8
-    assert cap["tasks"][0]["spec"] == "leaderboard|truthfulqa:mc|0"
+    assert cap["tasks"][0]["suite"] == "leaderboard"
+    assert cap["tasks"][0]["spec"] == "truthfulqa:mc|0"
     assert (out / "eval" / "capabilities" / "capability_eval.json").exists()
 
 
