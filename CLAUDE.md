@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Despite the directory name, there is no UI here. This is `open-character-tinker` (CLI: `octt`) — a Python implementation of Open Character Training (arXiv 2511.01689) on Tinker: constitution → DPO distillation → SFT introspection → LoRA merge → Elo eval, plus a dense-vs-MoE scaling study. First-party code lives in `octt/`. `tinker-cookbook/` is vendored upstream: treat it as read-only, and don't apply its CI or stricter lint rules to `octt/`.
+Despite the directory name, there is no UI here. This is `open-character-tinker` (CLI: `octt`) — a Python implementation of Open Character Training (arXiv 2511.01689) on Tinker: constitution → DPO distillation → SFT introspection → LoRA merge → Elo eval, plus a dense-vs-MoE scaling study. First-party code lives in `octt/`. `tinker-cookbook/` and `tinker-project-ideas/` are vendored upstream (Thinking Machines): treat them as read-only, and don't apply their CI or stricter lint rules to `octt/`. The project implements `tinker-project-ideas/replicate-open-character-training.md` plus its model-scaling extension.
 
 ## Commands
 

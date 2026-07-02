@@ -1,0 +1,3 @@
+This repository contains a collection of project ideas proposed by the team at Thinking Machines Lab. These are projects that we'd be inclined to share in our regular Featured Projects roundups, but this is just a small set of suggestions—we expect that the vast majority of the projects we feature will not be from this repository.
+
+Contributor guidelines: We welcome pointers to existing literature that's relevant to the ideas in this repository, as well as corrections. Please open an issue. We will generally not accept suggestions for new project ideas to feature here, though if you open an issue, we will read it, and there's a small probability that we'll add it.

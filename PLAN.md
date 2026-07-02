@@ -77,6 +77,12 @@ as budget allows — robustness/coherence get more meaningful with each one. The
 `experiments/scaling.py` reports dense-vs-MoE trends; the writeup maps paper
 sections to code and results.
 
+**Optional extension (from `tinker-project-ideas/replicate-open-character-training.md`):**
+swap DPO for policy-gradient RL against a preference model — either a prompted
+constitution-judge or a preference model trained on our DPO pairs (the cookbook's
+RLHF recipe handles pairwise matchups). Worth a rung-vs-rung comparison after
+phase 3 if budget allows.
+
 ## Deliberately deferred
 
 - 10-epoch classifier fit-check (aborted — Mac load): optional, rerun on better
