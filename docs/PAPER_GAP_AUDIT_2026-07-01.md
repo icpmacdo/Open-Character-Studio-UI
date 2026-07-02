@@ -529,5 +529,13 @@ panels.
   `merge.local_path` exists and falls back to the samplable SFT checkpoint
   (so this validation's 'final' is the SFT sampler, not the merged model);
   (2) local merged sampling requires the `local-eval` extra, now installed.
-  Full-scale (500-prompt, 11-persona, merged-final) robustness remains a
-  paper-phase task.
+  Results (runs/robustness-validation-4b/robustness_report.json): macro-F1
+  ≈0.33–0.41 across all methods/splits — one-class collapse, which is the
+  EXPECTED outcome here, not a defect: the quick-scale DPO checkpoints are a
+  single optimizer step (no persona signal in the responses, spot-checked),
+  and 128 train rows ≈ 8 classifier steps under the official hyperparameters
+  (sized for 11 personas × 500 rows). The machinery is validated; the number
+  is only meaningful at paper scale. A 10-epoch local fit-check was aborted
+  (too heavy for this machine — see PLAN.md hardware notes). Full-scale
+  (500-prompt, 11-persona, merged-final) robustness remains a paper-phase
+  task.
