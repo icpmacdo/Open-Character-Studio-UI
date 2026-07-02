@@ -51,6 +51,10 @@ class PipelineResult:
     eval_target: str | None = None
     recipe: dict = field(default_factory=dict)
     capability_benchmarks: dict = field(default_factory=dict)
+    # Per-condition eval results when more than one embodiment condition runs
+    # ({condition: {base_elo, trained_elo, shift_summary}}). The flat
+    # base_elo/trained_elo/shift_summary fields above hold the FIRST condition.
+    condition_results: dict = field(default_factory=dict)
 
     @property
     def persona_trait_shift(self) -> float | None:
@@ -161,9 +165,10 @@ def run(
 ) -> PipelineResult:
     """Run the full recipe for one model/persona pair. Returns checkpoints + Elo.
 
-    ``condition`` selects the embodiment-instruction variant for the eval; the
-    paper repeats the experiment over all three (``adopt`` / ``feels`` /
-    ``random``) to check stability, but defaults to template (1) ``adopt`` here.
+    ``condition`` selects the embodiment-instruction variant for the eval:
+    one of ``adopt`` / ``feels`` / ``random``, or ``all`` to repeat the full
+    judgment budget once per condition as the paper does (Section 3.1 — 25k
+    judgments PER condition; budget accordingly).
     """
     cfg = config or get_config("quick")
     constitution = load(persona)
@@ -179,7 +184,7 @@ def run(
             raise ValueError("; ".join(rank_blockers))
 
     run_manifest = manifest.RunManifest.load_or_create(
-        out_dir, model=student_model, persona=persona, config=cfg
+        out_dir, model=student_model, persona=persona, config=cfg, teacher=teacher_model
     )
     recipe_metadata = _recipe_metadata(cfg)
     runtime = tinker_client.create_runtime((teacher_model, student_model), config=client_config)
@@ -237,35 +242,53 @@ def run(
         final_ckpt, dry_run=dry_run, eval_merged_locally=eval_merged_locally
     )
     eval_payload: dict | None = None
+    condition_results: dict = {}
     if run_eval:
         eval_dir = out_dir / "eval"
         eval_dir.mkdir(parents=True, exist_ok=True)
         # Inject the persona's aligned + opposing traits so the shift stays
         # measurable even when num_traits is downscaled for the fast tiers.
         required = trait_profiles.required_traits(persona)
-        base_elo = evaluation.revealed_preferences(
-            student_model, cfg.eval, runtime,
-            sampler_path=None, judge_model=teacher_model, offline=offline,
-            required_traits=required, condition=condition,
-            cache_path=eval_dir / "base_judge.jsonl",
+        conditions = (
+            tuple(evaluation.CONDITIONS) if condition == "all" else (condition,)
         )
-        trained_elo = evaluation.revealed_preferences(
-            student_model, cfg.eval, runtime,
-            sampler_path=sampler_path, local_adapter_dir=local_adapter_dir,
-            judge_model=teacher_model, offline=offline, persona_bias=persona,
-            required_traits=required, condition=condition,
-            cache_path=eval_dir / "trained_judge.jsonl",
-        )
-        shift_summary = trait_profiles.summarize_shift(base_elo, trained_elo, persona)
+        for cond in conditions:
+            cond_base = evaluation.revealed_preferences(
+                student_model, cfg.eval, runtime,
+                sampler_path=None, judge_model=teacher_model, offline=offline,
+                required_traits=required, condition=cond,
+                cache_path=eval_dir / "base_judge.jsonl",
+            )
+            cond_trained = evaluation.revealed_preferences(
+                student_model, cfg.eval, runtime,
+                sampler_path=sampler_path, local_adapter_dir=local_adapter_dir,
+                judge_model=teacher_model, offline=offline, persona_bias=persona,
+                required_traits=required, condition=cond,
+                cache_path=eval_dir / "trained_judge.jsonl",
+            )
+            condition_results[cond] = {
+                "base_elo": cond_base,
+                "trained_elo": cond_trained,
+                "shift_summary": trait_profiles.summarize_shift(
+                    cond_base, cond_trained, persona
+                ),
+            }
+        primary = condition_results[conditions[0]]
+        base_elo = primary["base_elo"]
+        trained_elo = primary["trained_elo"]
+        shift_summary = primary["shift_summary"]
         eval_payload = {
             "persona": persona,
             "student_model": student_model,
             "eval_target": eval_target,
             "recipe": recipe_metadata,
+            "conditions": list(conditions),
             "shift_summary": shift_summary,
             "base_elo": base_elo,
             "trained_elo": trained_elo,
         }
+        if len(conditions) > 1:
+            eval_payload["condition_results"] = condition_results
 
     if run_capabilities:
         cap_dir = out_dir / "eval" / "capabilities"
@@ -314,5 +337,6 @@ def run(
         eval_target=eval_target,
         recipe=recipe_metadata,
         capability_benchmarks=capability_benchmarks,
+        condition_results=condition_results,
     )
     return result

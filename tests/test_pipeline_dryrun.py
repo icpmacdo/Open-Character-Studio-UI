@@ -40,8 +40,9 @@ def test_pipeline_eval_shows_persona_shift(tmp_path):
     summary = json.loads((out / "eval_results.json").read_text())
     assert set(summary) == {
         "persona", "student_model", "eval_target", "shift_summary",
-        "recipe", "base_elo", "trained_elo",
+        "recipe", "base_elo", "trained_elo", "conditions",
     }
+    assert summary["conditions"] == ["adopt"]
     assert summary["eval_target"] == "dry-run"
     assert summary["recipe"]["merge_adapters"] is True
     assert summary["recipe"]["dpo_lora_rank"] == 64

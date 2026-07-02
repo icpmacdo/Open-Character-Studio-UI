@@ -214,6 +214,15 @@ def _lima_prompts_from_jsonl(path: str | Path, n: int) -> list[str]:
     return out
 
 
+# Datasets pinned to immutable commit SHAs (fetched 2026-07-02) so the prompt
+# pool cannot drift under a paid run if an upstream repo force-pushes.
+HF_DATASET_REVISIONS: dict[str, str] = {
+    "GAIR/lima": "68958e98267f5fb4a52a03ebcdae4ae59213fa7c",  # 2023-06-08
+    "allenai/WildChat-1M": "7d6490e462285cf85d91eabea0f9a954fbddcd1f",  # 2024-10-17
+    "LDJnr/Pure-Dove": "d8f711ad5a96a42af44b13e1a5bb054e48ff3a69",  # 2024-06-03
+}
+
+
 def load_lima_prompts(n: int, *, offline: bool = False) -> list[str]:
     """First user turn from LIMA (``GAIR/lima``); fixture offline."""
 
@@ -224,7 +233,12 @@ def load_lima_prompts(n: int, *, offline: bool = False) -> list[str]:
         # access works without depending on dataset script execution.
         from huggingface_hub import hf_hub_download  # lazy, optional
 
-        path = hf_hub_download("GAIR/lima", "train.jsonl", repo_type="dataset")
+        path = hf_hub_download(
+            "GAIR/lima",
+            "train.jsonl",
+            repo_type="dataset",
+            revision=HF_DATASET_REVISIONS["GAIR/lima"],
+        )
         return _lima_prompts_from_jsonl(path, n)
 
     return _try_load_hf(_load, _LIMA_FIXTURE, n, offline=offline, name="LIMA")
@@ -236,7 +250,12 @@ def load_wildchat_prompts(n: int, *, offline: bool = False) -> list[str]:
     def _load() -> list[str]:
         from datasets import load_dataset  # lazy, optional
 
-        ds = load_dataset("allenai/WildChat-1M", split="train", streaming=True)
+        ds = load_dataset(
+            "allenai/WildChat-1M",
+            split="train",
+            streaming=True,
+            revision=HF_DATASET_REVISIONS["allenai/WildChat-1M"],
+        )
         out: list[str] = []
         for row in ds:
             convo = row.get("conversation") or []
@@ -256,7 +275,11 @@ def load_pure_dove_prompts(n: int, *, offline: bool = False) -> list[str]:
     def _load() -> list[str]:
         from datasets import load_dataset  # lazy, optional
 
-        ds = load_dataset("LDJnr/Pure-Dove", split="train")
+        ds = load_dataset(
+            "LDJnr/Pure-Dove",
+            split="train",
+            revision=HF_DATASET_REVISIONS["LDJnr/Pure-Dove"],
+        )
         out: list[str] = []
         for row in ds:
             convo = row.get("conversation") or []
@@ -274,14 +297,53 @@ def load_pure_dove_prompts(n: int, *, offline: bool = False) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def constitution_relevant_prompts(constitution: Constitution, n: int) -> list[str]:
-    """Deterministic constitution-relevant prompts derived from the assertions.
+def _generated_constitution_prompts(constitution: Constitution) -> list[str] | None:
+    """Prompts from :mod:`octt.prompt_gen`'s canonical file, or None to fall back.
 
-    The paper few-shots a stronger model (Llama-3.3-70B) to write prompts that
-    surface a persona. For the offline/dry-run tier we synthesize prompts
-    directly from the constitution's assertions so the pipeline runs with no
-    extra model calls; real runs may override this with a model-based generator.
+    Trusted only when the file parses and its ``assertions_hash`` stamp matches
+    this constitution, so editing a constitution invalidates stale prompt sets
+    (logged at debug: expected whenever prompt_gen synthesizes per-assertion
+    seeds). Never raises: malformed files log a warning and fall back to the
+    template synthesis.
     """
+    from . import prompt_gen  # local import: keep this module light and cycle-free
+
+    path = prompt_gen.default_prompts_path(constitution.persona)
+    try:
+        if not path.exists():
+            return None
+        data = json.loads(path.read_text())
+        if data.get("assertions_hash") != prompt_gen.assertions_hash(constitution):
+            logger.debug("Ignoring stale constitution prompts at %s (assertions changed)", path)
+            return None
+        raw = data.get("prompts")
+        if not isinstance(raw, list):
+            logger.warning("Ignoring constitution prompts at %s: 'prompts' is not a list", path)
+            return None
+        prompts = [p for p in raw if isinstance(p, str) and p.strip()]
+        if not prompts:
+            logger.warning("Ignoring constitution prompts at %s: no usable prompts", path)
+            return None
+        return prompts
+    except Exception as exc:
+        logger.warning("Falling back to template prompts; unreadable %s (%s)", path, exc)
+        return None
+
+
+def constitution_relevant_prompts(constitution: Constitution, n: int) -> list[str]:
+    """Constitution-relevant prompts: the generated App F set when fresh, else templates.
+
+    The paper few-shots a stronger model (Llama-3.3-70B) to write ~50 prompts
+    per assertion that surface a persona (App F); :mod:`octt.prompt_gen`
+    persists that set at a canonical path, stamped with a hash of
+    (persona, assertions). When a fresh file exists its prompts are used,
+    cycled/truncated to *n*. Otherwise — missing, malformed, or stale — we
+    synthesize prompts directly from the constitution's assertions so the
+    offline/dry-run tier runs with no extra model calls.
+    """
+    generated = _generated_constitution_prompts(constitution)
+    if generated:
+        return _cycle(tuple(generated), n)
     templates = (
         "Someone just told you: \"{a}\" How do you respond?",
         "A user is asking for help and seems to need you to be {p}. What do you say?",
@@ -305,12 +367,14 @@ def dpo_prompts(
     n: int,
     *,
     offline: bool = False,
-    constitution_fraction: float = 0.5,
+    constitution_fraction: float = 1 / 3,
 ) -> list[str]:
     """Prompt set for DPO pair generation: LIMA mixed with constitution-relevant.
 
-    ``constitution_fraction`` of the prompts are constitution-relevant (paper
-    blends generic LIMA prompts with persona-eliciting ones). Order is
+    ``constitution_fraction`` of the prompts are constitution-relevant. The
+    paper mixes the FULL LIMA set (~1,030 prompts) with ~500 generated
+    constitution-relevant prompts (~50 per assertion, App F), so at the paper
+    scale of 1,500 prompts the faithful ratio is one third. Order is
     interleaved and deterministic so caching by content hash is stable.
     """
     n_constitution = round(n * constitution_fraction)

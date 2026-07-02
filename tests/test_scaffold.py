@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from octt import constitution, models
-from octt.config import PAPER, SMOKE, get_config
+from octt.config import PAPER, SMOKE, for_scaling_study, get_config
 
 
 def test_paper_config_matches_published_recipe():
@@ -13,6 +13,20 @@ def test_paper_config_matches_published_recipe():
     assert PAPER.sft.epochs == 1
     assert PAPER.sft.self_reflection_count == 10_000
     assert PAPER.sft.self_interaction_count == 2_000
+
+
+def test_scaling_study_policy_is_uniform_rank32_with_lr_compensation():
+    # Tinker pins alpha=32, so the study runs every rung at rank 32 with lr
+    # doubled: lr * (alpha/r) = 1e-4 * 1.0 matches the paper's 5e-5 * 2.0.
+    study = for_scaling_study(PAPER)
+    assert study.dpo.lora_rank == 32 and study.sft.lora_rank == 32
+    assert study.dpo.learning_rate == 1e-4 and study.sft.learning_rate == 1e-4
+    # Everything else — data sizing, eval protocol, merge policy — untouched.
+    assert study.dpo.token_budget == PAPER.dpo.token_budget
+    assert study.eval == PAPER.eval
+    assert study.merge_adapters == PAPER.merge_adapters
+    # The PAPER preset itself still records the paper-stated rank.
+    assert PAPER.dpo.lora_rank == 64
 
 
 def test_quick_config_is_downscaled():
@@ -31,7 +45,7 @@ def test_smoke_config_is_smallest_scale():
 def test_constitution_loads():
     c = constitution.load("humorous")
     assert c.persona == "humorous"
-    assert len(c.assertions) == 3
+    assert len(c.assertions) == 10  # full App F humorous constitution
     assert all(not a.startswith("-") for a in c.assertions)
 
 

@@ -16,12 +16,15 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import re
 from dataclasses import dataclass
 from typing import Any, Sequence
 
 from . import models
 from .tinker_client import TinkerRuntime
+
+logger = logging.getLogger(__name__)
 
 Message = dict[str, Any]
 Conversation = list[Message]
@@ -39,6 +42,31 @@ _THINK_SPAN = re.compile(r"<think>.*?</think>", re.DOTALL)
 def _short(text: str, n: int = 48) -> str:
     text = " ".join(text.split())
     return text[:n]
+
+
+def count_text_tokens(texts: Sequence[str], model_id: str, *, offline: bool = False) -> int:
+    """Token count of *texts* under *model_id*'s tokenizer, for budget math.
+
+    Offline (and on any tokenizer failure) falls back to a chars/4 estimate so
+    the dry-run tier stays dependency-free. Used to enforce the paper's
+    token-budget data sizing (App A ~6M DPO / App B.3 ~8M SFT), not for
+    rendering — budget truncation only needs to be approximately right and
+    deterministic for a given tokenizer.
+    """
+
+    def _estimate() -> int:
+        return sum(max(1, len(t) // 4) for t in texts)
+
+    if offline:
+        return _estimate()
+    try:
+        from tinker_cookbook import tokenizer_utils
+
+        tok = tokenizer_utils.get_tokenizer(model_id)
+        return sum(len(tok.encode(t, add_special_tokens=False)) for t in texts)
+    except Exception:  # pragma: no cover - tokenizer download/env dependent
+        logger.warning("Tokenizer unavailable for %s; using chars/4 token estimate", model_id)
+        return _estimate()
 
 
 def _stub_completion(tag: str, model_id: str, messages: Conversation) -> str:
@@ -84,9 +112,14 @@ class Sampler:
     top_p: float | None = None
     min_p: float | None = None
     context_k: int | None = None
+    # Reasoning prefill BODY appended after the renderer's generation prompt
+    # (paper App A). Requires a thinking-enabled renderer, whose prompt already
+    # ends with an opened `<think>\n` — so this is the body only, no tag.
+    think_prefill: str | None = None
     # Populated only in real mode (lazy).
     _client: Any = None
     _renderer: Any = None
+    _tokenizer: Any = None
     # Populated only when sampling a local base+LoRA merge (off-Tinker eval).
     _hf_model: Any = None
     _hf_tokenizer: Any = None
@@ -102,12 +135,19 @@ def make_sampler(
     temperature: float = 1.0,
     top_p: float | None = None,
     min_p: float | None = None,
+    thinking: bool = False,
+    think_prefill: str | None = None,
 ) -> Sampler:
     """Build a :class:`Sampler` for ``model_id`` (optionally a checkpoint path).
 
     ``model_path`` selects a fine-tuned checkpoint (a ``tinker://`` sampler URI);
-    ``None`` samples the base model.
+    ``None`` samples the base model. ``thinking=True`` selects the recommended
+    (reasoning-enabled) renderer instead of the direct-answer override — used
+    with ``think_prefill`` for the teacher's App A chosen-generation; the
+    reasoning trace is stripped from the returned text and never persisted.
     """
+    if think_prefill and not thinking:
+        raise ValueError("think_prefill requires thinking=True (an open <think> block)")
     spec = models.CANDIDATES.get(model_id)
     context_k = spec.context_k if spec else None
     sampler = Sampler(
@@ -119,11 +159,33 @@ def make_sampler(
         top_p=top_p,
         min_p=min_p,
         context_k=context_k * 1000 if context_k else None,
+        think_prefill=think_prefill,
     )
     if runtime.config.dry_run:
         return sampler
     sampler._client = runtime.create_sampling_client(base_model=model_id, model_path=model_path)
-    sampler._renderer = runtime.renderer_binding(model_id).renderer
+    binding = (
+        runtime.thinking_renderer_binding(model_id)
+        if thinking
+        else runtime.renderer_binding(model_id)
+    )
+    if think_prefill:
+        # thinking_renderer_binding falls back to the default renderer for
+        # models with no thinking variant; a prefill appended to a prompt that
+        # never opened `<think>` blanks every completion downstream. Probe the
+        # actual rendered prompt and fail fast instead.
+        probe = binding.renderer.build_generation_prompt(
+            [{"role": "user", "content": "probe"}]
+        )
+        tail = binding.tokenizer.decode(probe.to_ints()[-8:])
+        if "<think>" not in tail:
+            raise ValueError(
+                f"think_prefill requires a renderer whose generation prompt opens a "
+                f"<think> block, but {model_id!r} renders one ending in {tail!r}. "
+                "Use a model with a thinking renderer variant as the teacher."
+            )
+    sampler._renderer = binding.renderer
+    sampler._tokenizer = binding.tokenizer
     return sampler
 
 
@@ -232,6 +294,12 @@ async def complete_async(sampler: Sampler, messages: Conversation) -> str:
 
     renderer = sampler._renderer
     model_input = renderer.build_generation_prompt(messages)
+    if sampler.think_prefill:
+        # The thinking renderer's prompt already ends with an opened `<think>\n`;
+        # append the prefill BODY so the model continues the planted reasoning
+        # (paper App A). Verified live: appending the full tag would double it.
+        for token in sampler._tokenizer.encode(sampler.think_prefill, add_special_tokens=False):
+            model_input = model_input.append_int(int(token))
     max_tokens = sampler.max_tokens
     if sampler.context_k is not None:
         max_tokens = min(max_tokens, max(1, sampler.context_k - model_input.length))
@@ -250,7 +318,20 @@ async def complete_async(sampler: Sampler, messages: Conversation) -> str:
         sampling_params=tinker.SamplingParams(**sampling_kwargs),
     )
     message, _termination = renderer.parse_response(result.sequences[0].tokens)
-    return _visible_text(message.get("content", ""))
+    content = message.get("content", "")
+    if not sampler.think_prefill:
+        return _visible_text(content)
+    # Prefilled sampling begins mid-trace (the `<think>` opener lives in the
+    # prompt), so the parser cannot recognize the trace and returns it as plain
+    # content (verified live). The visible answer is whatever follows the
+    # closing tag; a trace that never closed within max_tokens yields "" and
+    # the caller drops/retries the row.
+    if isinstance(content, list):
+        return _visible_text(content).strip()
+    text = str(content)
+    if "</think>" not in text:
+        return ""
+    return _THINK_SPAN.sub("", text).rsplit("</think>", 1)[-1].strip()
 
 
 async def complete_many_async(

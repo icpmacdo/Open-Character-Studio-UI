@@ -96,6 +96,10 @@ class TinkerRuntime:
     service_client: Any | None
     renderer_bindings: dict[str, RendererBinding]
     renderer_plans: dict[str, RendererPlan]
+    # Thinking-enabled bindings (no direct-answer override), used ONLY for the
+    # teacher's chosen-generation with the App A `<think>` prefill. Populated
+    # just for models whose recommended renderer differs from the override.
+    thinking_renderer_bindings: dict[str, RendererBinding] = field(default_factory=dict)
 
     def create_sampling_client(
         self, base_model: str, model_path: str | None = None
@@ -123,6 +127,16 @@ class TinkerRuntime:
         if self.config.dry_run:
             raise TinkerSetupError("Dry-run runtime has renderer plans but no tokenizer bindings")
         return self.renderer_bindings[model_id]
+
+    def thinking_renderer_binding(self, model_id: str) -> RendererBinding:
+        """The recommended (thinking-enabled) renderer for *model_id*.
+
+        Falls back to the default binding when the model has no separate
+        thinking variant (i.e. no direct-answer override applied).
+        """
+        if self.config.dry_run:
+            raise TinkerSetupError("Dry-run runtime has renderer plans but no tokenizer bindings")
+        return self.thinking_renderer_bindings.get(model_id) or self.renderer_bindings[model_id]
 
 
 @dataclass(frozen=True)
@@ -244,9 +258,13 @@ def import_tinker_stack(cookbook_path: Path = DEFAULT_COOKBOOK_PATH) -> TinkerSt
     )
 
 
-def resolve_renderer_binding(model_id: str, stack: TinkerStack) -> RendererBinding:
+def resolve_renderer_binding(
+    model_id: str, stack: TinkerStack, *, thinking: bool = False
+) -> RendererBinding:
     recommended = stack.get_recommended_renderer_name(model_id)
-    renderer_name = DIRECT_ANSWER_RENDERER_OVERRIDES.get(recommended, recommended)
+    renderer_name = (
+        recommended if thinking else DIRECT_ANSWER_RENDERER_OVERRIDES.get(recommended, recommended)
+    )
     tokenizer = stack.get_tokenizer(model_id)
     renderer = stack.renderers.get_renderer(renderer_name, tokenizer, model_name=model_id)
     return RendererBinding(
@@ -282,11 +300,17 @@ def create_runtime(
         model_id: resolve_renderer_binding(model_id, stack)
         for model_id in plans
     }
+    thinking_bindings = {}
+    for model_id, binding in bindings.items():
+        thinking = resolve_renderer_binding(model_id, stack, thinking=True)
+        if thinking.renderer_name != binding.renderer_name:
+            thinking_bindings[model_id] = thinking
     return TinkerRuntime(
         config=cfg,
         service_client=service_client,
         renderer_bindings=bindings,
         renderer_plans=plans,
+        thinking_renderer_bindings=thinking_bindings,
     )
 
 
@@ -323,76 +347,113 @@ def estimate_tinker_cost(
     teacher_model: str = models.TEACHER_MODEL,
     *,
     dpo_sample_tokens: int = 1024,
+    dpo_teacher_sample_tokens: int = 2048,  # thinking trace + visible answer
+    dpo_prompt_tokens: int = 1024,  # constitution system prompt + user prompt
     introspection_sample_tokens: int = 512,
-    eval_sample_tokens: int = 512,
+    eval_sample_tokens: int = 1024,  # EvalConfig.responder_max_tokens envelope
+    eval_prompt_tokens: int = 1024,  # embody system prompt + WildChat prompt
+    judge_sample_tokens: int = 64,
 ) -> CostEstimate:
     """Estimate billed Tinker spend using max-token stage envelopes.
 
-    The estimate is deliberately simple and pessimistic enough for budget gates:
-    sampled-token stages use sampling prices, and fine-tuning stages use the
-    training prices registered in ``octt.models``.
+    Deliberately PESSIMISTIC for budget gates (docs/COST_CONTROLS.md): every
+    sampled call is costed at its max-token envelope, prompt/prefill tokens are
+    included at ``price_prefill``, a self-interaction chat bills 2*turns-1
+    generations (both sides of the role-swap), and SFT training tokens account
+    for the last-assistant prefix explosion (each transcript trains once per
+    assistant turn, so a T-turn chat re-bills its prefixes ~(T+1)/2 times).
+    Token budgets, when set, cap the corresponding training-data lines. The
+    eval envelope covers ONE embodiment condition; multiply by three when
+    running ``--condition all``.
     """
 
     lines: list[CostEstimateLine] = []
-    dpo_prompt_tokens = config.dpo.num_prompts * dpo_sample_tokens
-    introspection_generations = (
-        config.sft.self_reflection_count
-        + config.sft.self_interaction_count * config.sft.self_interaction_turns
+    turns = config.sft.self_interaction_turns
+    reflections = config.sft.self_reflection_count
+    interactions = config.sft.self_interaction_count
+
+    dpo_sampled_teacher = config.dpo.num_prompts * dpo_teacher_sample_tokens
+    dpo_sampled_student = config.dpo.num_prompts * dpo_sample_tokens
+    dpo_prefill = config.dpo.num_prompts * dpo_prompt_tokens
+    dpo_train_tokens = config.dpo.num_prompts * (dpo_prompt_tokens + 2 * dpo_sample_tokens)
+    if config.dpo.token_budget is not None:
+        dpo_train_tokens = min(dpo_train_tokens, config.dpo.token_budget)
+
+    # Each self-chat samples `turns` assistant replies plus `turns - 1`
+    # role-swapped interlocutor replies.
+    chat_generations = max(1, 2 * turns - 1)
+    introspection_generations = reflections + interactions * chat_generations
+    introspection_sampled = introspection_generations * introspection_sample_tokens
+    # Prefill grows with the conversation; envelope: system (~1k) plus the
+    # rolling history, averaged at half the final transcript length.
+    chat_history_tokens = chat_generations * introspection_sample_tokens
+    introspection_prefill = (
+        reflections * 1024
+        + interactions * chat_generations * (1024 + chat_history_tokens // 2)
     )
-    introspection_tokens = introspection_generations * introspection_sample_tokens
+    transcript_tokens = (
+        reflections * introspection_sample_tokens + interactions * chat_history_tokens
+    )
+    if config.sft.token_budget is not None:
+        transcript_tokens = min(transcript_tokens, config.sft.token_budget)
+    # Last-assistant prefix explosion: a T-turn chat becomes T examples over
+    # growing prefixes, ~(T+1)/2 x the transcript tokens; reflections are 1:1.
+    sft_train_tokens = int(transcript_tokens * max(1, (turns + 1) / 2))
+
     # The revealed-preferences eval runs once on the base model and once on the
-    # trained target for each student model.
-    eval_tokens_per_model = 2 * config.eval.num_judgments * eval_sample_tokens
+    # trained target for each student model (per condition).
+    eval_responses = 2 * config.eval.num_judgments
+    eval_sampled = eval_responses * eval_sample_tokens
+    eval_prefill = eval_responses * eval_prompt_tokens
+    judge_sampled = eval_responses * judge_sample_tokens
+    judge_prefill = eval_responses * (eval_sample_tokens + 256)  # response + template
+
+    teacher_sample_price = (
+        _price_for(teacher_model, "price_sample") or TEACHER_SAMPLE_PRICE_USD_PER_MTOK
+    )
+    teacher_prefill_price = _price_for(teacher_model, "price_prefill") or teacher_sample_price
 
     for model_id in student_models:
+        student_sample_price = _price_for(model_id, "price_sample")
+        student_prefill_price = _price_for(model_id, "price_prefill") or student_sample_price
         _append_cost_line(
-            lines,
-            "dpo.teacher_sample",
-            teacher_model,
-            dpo_prompt_tokens,
-            _price_for(teacher_model, "price_sample") or TEACHER_SAMPLE_PRICE_USD_PER_MTOK,
+            lines, "dpo.teacher_sample", teacher_model, dpo_sampled_teacher, teacher_sample_price
         )
         _append_cost_line(
-            lines,
-            "dpo.student_rejected_sample",
-            model_id,
-            dpo_prompt_tokens,
-            _price_for(model_id, "price_sample"),
+            lines, "dpo.teacher_prefill", teacher_model, dpo_prefill, teacher_prefill_price
         )
         _append_cost_line(
-            lines,
-            "dpo.train",
-            model_id,
-            dpo_prompt_tokens * 2,
+            lines, "dpo.student_rejected_sample", model_id, dpo_sampled_student,
+            student_sample_price,
+        )
+        _append_cost_line(
+            lines, "dpo.student_prefill", model_id, dpo_prefill, student_prefill_price
+        )
+        _append_cost_line(
+            lines, "dpo.train", model_id, dpo_train_tokens, _price_for(model_id, "price_train")
+        )
+        _append_cost_line(
+            lines, "introspection.sample", model_id, introspection_sampled, student_sample_price
+        )
+        _append_cost_line(
+            lines, "introspection.prefill", model_id, introspection_prefill,
+            student_prefill_price,
+        )
+        _append_cost_line(
+            lines, "introspection.sft_train", model_id, sft_train_tokens,
             _price_for(model_id, "price_train"),
         )
         _append_cost_line(
-            lines,
-            "introspection.sample",
-            model_id,
-            introspection_tokens,
-            _price_for(model_id, "price_sample"),
+            lines, "eval.model_sample", model_id, eval_sampled, student_sample_price
         )
         _append_cost_line(
-            lines,
-            "introspection.sft_train",
-            model_id,
-            introspection_tokens,
-            _price_for(model_id, "price_train"),
+            lines, "eval.model_prefill", model_id, eval_prefill, student_prefill_price
         )
         _append_cost_line(
-            lines,
-            "eval.model_sample",
-            model_id,
-            eval_tokens_per_model,
-            _price_for(model_id, "price_sample"),
+            lines, "eval.judge", teacher_model, judge_sampled, teacher_sample_price
         )
         _append_cost_line(
-            lines,
-            "eval.judge",
-            teacher_model,
-            eval_tokens_per_model,
-            _price_for(teacher_model, "price_sample") or TEACHER_SAMPLE_PRICE_USD_PER_MTOK,
+            lines, "eval.judge_prefill", teacher_model, judge_prefill, teacher_prefill_price
         )
     return CostEstimate(lines=tuple(lines))
 

@@ -224,7 +224,7 @@ cmd_six_smoke() {
   require_free_gib "${SIX_MERGE_MIN_FREE_GIB:-320}" "six-smoke"
 
   local four_out="runs/${PERSONA}-four-model-smoke-${TAG}"
-  run_if_missing "paid four-model rank64 smoke with merge (4B, 9B, 27B, Nano)" "$four_out" "$four_out/report.json" \
+  run_if_missing "paid four-model uniform-rank32 smoke with merge (4B, 9B, 27B, Nano)" "$four_out" "$four_out/report.json" \
     uv run octt scaling "$PERSONA" \
       --execute \
       --scale smoke \
@@ -235,9 +235,11 @@ cmd_six_smoke() {
       --model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
       --out "$four_out"
 
+  # Super/Ultra run through `octt scaling` (single rung) so they pick up the
+  # uniform-rank32 study policy (rank 32, lr 1e-4) like every other rung.
   local super_out="runs/${PERSONA}-super-smoke-${TAG}"
-  run_if_missing "paid Super rank64 smoke with merge" "$super_out" "$super_out/eval_results.json" \
-    uv run octt run "$PERSONA" \
+  run_if_missing "paid Super uniform-rank32 smoke with merge" "$super_out" "$super_out/report.json" \
+    uv run octt scaling "$PERSONA" \
       --execute \
       --scale smoke \
       --teacher "$TEACHER" \
@@ -245,13 +247,12 @@ cmd_six_smoke() {
       --out "$super_out"
 
   local ultra_out="runs/${PERSONA}-ultra-rank32-smoke-${TAG}"
-  run_if_missing "paid Ultra rank32 merge compatibility smoke" "$ultra_out" "$ultra_out/eval_results.json" \
-    uv run octt run "$PERSONA" \
+  run_if_missing "paid Ultra rank32 merge compatibility smoke" "$ultra_out" "$ultra_out/report.json" \
+    uv run octt scaling "$PERSONA" \
       --execute \
       --scale smoke \
       --teacher "$TEACHER" \
       --model "$ULTRA_MODEL" \
-      --lora-rank 32 \
       --out "$ultra_out"
 }
 
@@ -259,7 +260,7 @@ cmd_six_smoke_nomerge() {
   source_env
 
   local four_out="runs/${PERSONA}-four-model-smoke-nomerge-${TAG}"
-  run_if_missing "paid four-model rank64 no-merge smoke fallback (4B, 9B, 27B, Nano)" "$four_out" "$four_out/report.json" \
+  run_if_missing "paid four-model uniform-rank32 no-merge smoke fallback (4B, 9B, 27B, Nano)" "$four_out" "$four_out/report.json" \
     uv run octt scaling "$PERSONA" \
       --execute \
       --scale smoke \
@@ -272,8 +273,8 @@ cmd_six_smoke_nomerge() {
       --out "$four_out"
 
   local super_out="runs/${PERSONA}-super-smoke-nomerge-${TAG}"
-  run_if_missing "paid Super rank64 no-merge smoke fallback" "$super_out" "$super_out/eval_results.json" \
-    uv run octt run "$PERSONA" \
+  run_if_missing "paid Super uniform-rank32 no-merge smoke fallback" "$super_out" "$super_out/report.json" \
+    uv run octt scaling "$PERSONA" \
       --execute \
       --scale smoke \
       --teacher "$TEACHER" \
@@ -282,13 +283,12 @@ cmd_six_smoke_nomerge() {
       --out "$super_out"
 
   local ultra_out="runs/${PERSONA}-ultra-rank32-smoke-nomerge-${TAG}"
-  run_if_missing "paid Ultra rank32 no-merge compatibility smoke fallback" "$ultra_out" "$ultra_out/eval_results.json" \
-    uv run octt run "$PERSONA" \
+  run_if_missing "paid Ultra rank32 no-merge compatibility smoke fallback" "$ultra_out" "$ultra_out/report.json" \
+    uv run octt scaling "$PERSONA" \
       --execute \
       --scale smoke \
       --teacher "$TEACHER" \
       --model "$ULTRA_MODEL" \
-      --lora-rank 32 \
       --no-merge \
       --out "$ultra_out"
 }
@@ -302,8 +302,8 @@ cmd_paper_template() {
   source_env
   require_free_gib "${PAPER_MERGE_MIN_FREE_GIB:-165}" "paper-template"
 
-  local paper_out="runs/${PERSONA}-paper-rank64-supported-${TAG}"
-  run_if_missing "paper rank64 supported models with merge, excluding Ultra" "$paper_out" "$paper_out/report.json" \
+  local paper_out="runs/${PERSONA}-paper-rank32-mergeable-${TAG}"
+  run_if_missing "paper uniform-rank32 mergeable models, excluding Ultra (local-merge disk)" "$paper_out" "$paper_out/report.json" \
     uv run octt scaling "$PERSONA" \
       --execute \
       --scale paper \
@@ -315,9 +315,19 @@ cmd_paper_template() {
       --model "$SUPER_MODEL" \
       --out "$paper_out"
 
+  local ultra_out="runs/${PERSONA}-paper-ultra-rank32-nomerge-${TAG}"
+  run_if_missing "paper Ultra uniform-rank32 no-merge (base weights too large to merge locally)" "$ultra_out" "$ultra_out/report.json" \
+    uv run octt scaling "$PERSONA" \
+      --execute \
+      --scale paper \
+      --teacher "$TEACHER" \
+      --model "$ULTRA_MODEL" \
+      --no-merge \
+      --out "$ultra_out"
+
   echo
-  echo "Paper Ultra is intentionally not run here: Tinker blocks Ultra rank64."
-  echo "For compatibility only, run Ultra with --lora-rank 32 --no-merge in its own labeled output."
+  echo "All rungs run the uniform-rank32 study policy (rank 32, lr 1e-4); Ultra"
+  echo "skips only the LOCAL merge (its base weights don't fit on this disk)."
 }
 
 cmd_paper_template_nomerge() {
@@ -328,8 +338,8 @@ cmd_paper_template_nomerge() {
   fi
   source_env
 
-  local paper_out="runs/${PERSONA}-paper-rank64-supported-nomerge-${TAG}"
-  run_if_missing "paper rank64 no-merge supported models fallback, excluding Ultra" "$paper_out" "$paper_out/report.json" \
+  local paper_out="runs/${PERSONA}-paper-rank32-all-nomerge-${TAG}"
+  run_if_missing "paper uniform-rank32 no-merge fallback, all six rungs" "$paper_out" "$paper_out/report.json" \
     uv run octt scaling "$PERSONA" \
       --execute \
       --scale paper \
@@ -339,11 +349,9 @@ cmd_paper_template_nomerge() {
       --model Qwen/Qwen3.6-27B \
       --model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
       --model "$SUPER_MODEL" \
+      --model "$ULTRA_MODEL" \
       --no-merge \
       --out "$paper_out"
-
-  echo
-  echo "Paper Ultra is intentionally not run here: Tinker blocks Ultra rank64."
 }
 
 case "${1:-}" in

@@ -21,10 +21,10 @@ constitutions/data (11,12) feeding in along the way.
 - [x] 7. **Stage 3 — introspection data gen** (`octt/introspection.py`) — self-reflection + N-turn self-interaction transcripts sampled from the post-DPO model; content-hash cached.
 - [x] 8. **Stage 3 — SFT** (`octt/introspection.py`) — 1-epoch LoRA SFT via cookbook `FromConversationFileBuilder`; trained as an **independent** adapter over base so the merge is well-defined.
 - [x] 9. **Adapter merge** (`octt/merge.py`) — exact linear merge by rank-concatenation (`α/r` preserved); compatibility asserts + round-trip; wired into `octt/pipeline.py`. *Tinker is LoRA-only with no adapter re-upload, so the merged adapter is a local export artifact.*
-- [~] 10. **Eval — revealed preferences** (`octt/evaluation.py`) — trait-embodiment sampling → LLM judge → Elo, with judge-verdict caching. Capability benchmarks now have an opt-in LightEval harness (`--eval-capabilities`) with smoke/full suites and dry-run command preview. **Still TODO:** adversarial robustness, coherence, and live full capability-sweep validation.
+- [~] 10. **Evals** — revealed preferences (`octt/evaluation.py`: concurrent judgments, official judge protocol, per-condition runs via `--condition all`); adversarial robustness + prefill attack (`octt/robustness.py`, `octt robustness`, live-validated at small scale 2026-07-02 — see the audit doc closeout); coherence win-rate (`octt/coherence.py`, `octt coherence`); LightEval capability harness (`--eval-capabilities`). **Still TODO:** full-scale (500-prompt, 11-persona) robustness at paper phase + full capability sweep.
 
 ## Content & data
-- [x] 11. **Remaining constitutions** — the paper's 10 official hand-written personas added (sarcastic, poetic, good, loving, mathematical, nonchalant, impulsive, misaligned, remorseful, sycophantic); 11 total with `humorous`.
+- [x] 11. **Remaining constitutions** — the paper's 10 official hand-written personas added (sarcastic, poetic, good, loving, mathematical, nonchalant, impulsive, misaligned, remorseful, sycophantic); 11 total with `humorous` (now the full 10-assertion App F text). `pirate` is a 12th, non-paper extra — exclude it from paper-replication aggregates.
 - [x] 12. **Prompt/data sources** (`octt/data_sources.py`) — LIMA / WildChat / Pure-Dove loaders (lazy `datasets`, offline fixtures) + ~150 trait descriptors.
 
 ## Experiment harness

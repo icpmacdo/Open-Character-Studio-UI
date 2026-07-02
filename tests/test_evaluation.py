@@ -23,10 +23,39 @@ def test_elo_update_moves_winner_up_loser_down():
     assert elo.games["a"] == 1
 
 
-def test_parse_ab():
-    assert evaluation._parse_ab("A") == "A"
-    assert evaluation._parse_ab(" the answer is B.") == "B"
-    assert evaluation._parse_ab("(b)") == "B"
+def test_parse_judge_verdict_official_protocol():
+    # Official protocol: winning trait between <answer></answer>, else skip.
+    assert evaluation.parse_judge_verdict("<answer>warm</answer>", "warm", "blunt") == "warm"
+    assert evaluation.parse_judge_verdict("<answer> Blunt </answer>", "warm", "blunt") == "blunt"
+    # Unparseable or non-matching verdicts are skips (None), never defaults.
+    assert evaluation.parse_judge_verdict("warm", "warm", "blunt") is None
+    assert evaluation.parse_judge_verdict("<answer>neither</answer>", "warm", "blunt") is None
+    assert evaluation.parse_judge_verdict("", "warm", "blunt") is None
+
+
+def test_skipped_verdicts_do_not_update_elo(tmp_path):
+    runtime = _dry_runtime()
+    cfg = EvalConfig(num_judgments=10, num_traits=8)
+    cache = tmp_path / "judge.jsonl"
+    # Pre-seed the cache with skip rows (winner_trait=None) for every judgment.
+    seeded = evaluation.revealed_preferences(
+        "Qwen/Qwen3.5-4B", cfg, runtime, offline=True,
+        required_traits=["humorous"], cache_path=cache, seed=7,
+    )
+    assert seeded  # sanity: judged run produced ratings
+    rows = [__import__("json").loads(line) for line in cache.read_text().splitlines()]
+    cache.write_text(
+        "\n".join(
+            __import__("json").dumps({**row, "winner_trait": None}) for row in rows
+        )
+        + "\n"
+    )
+    all_skipped = evaluation.revealed_preferences(
+        "Qwen/Qwen3.5-4B", cfg, runtime, offline=True,
+        required_traits=["humorous"], cache_path=cache, seed=7,
+    )
+    # Every judgment skipped -> every trait stays at the initial Elo.
+    assert set(all_skipped.values()) == {evaluation.INITIAL_ELO}
 
 
 def test_embody_prompt_uses_paper_conditions():
@@ -90,14 +119,14 @@ def test_judgment_cache_flushes_incrementally_on_failure(monkeypatch, tmp_path):
     cache = tmp_path / "judge.jsonl"
     calls = 0
 
-    def fail_after_first(*_args, **_kwargs):
+    def fail_after_first(prompt, a, b, persona_bias):
         nonlocal calls
         calls += 1
         if calls == 2:
             raise RuntimeError("sampling stalled")
-        return "A"
+        return a
 
-    monkeypatch.setattr(evaluation, "_judge_match", fail_after_first)
+    monkeypatch.setattr(evaluation, "_dry_run_winner", fail_after_first)
 
     with pytest.raises(RuntimeError, match="sampling stalled"):
         evaluation.revealed_preferences(
@@ -109,4 +138,5 @@ def test_judgment_cache_flushes_incrementally_on_failure(monkeypatch, tmp_path):
             cache_path=cache,
         )
 
+    # The verdict that completed before the crash was already flushed.
     assert len(cache.read_text().splitlines()) == 1

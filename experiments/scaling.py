@@ -16,18 +16,22 @@ and total parameters.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-from octt import evaluation, models, pipeline
+from octt import evaluation, models, pipeline, tinker_client
 from octt.config import CapabilityEvalConfig, RecipeConfig, get_config
 from octt.pipeline import PipelineResult
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
 class ScalingRun:
     spec: models.ModelSpec
-    result: PipelineResult
+    result: PipelineResult | None = None
+    error: str | None = None
 
 
 def run(
@@ -44,25 +48,43 @@ def run(
     capability_config: CapabilityEvalConfig | None = None,
     capability_model: str | None = None,
 ) -> list[ScalingRun]:
-    """Run the recipe across ``model_set`` (cost-ordered) for one persona."""
+    """Run the recipe across ``model_set`` (cost-ordered) for one persona.
+
+    The WHOLE set is validated against known Tinker LoRA-rank caps before any
+    rung runs, so a config that would fail on the (cost-ordered, last) Ultra
+    rung is rejected before the cheaper rungs spend anything. A rung that fails
+    mid-sweep is recorded (``ScalingRun.error``) and the sweep continues, so
+    completed rungs still make it into the consolidated report.
+    """
     cfg = config or get_config("quick")
     out_dir = Path(out_dir)
+    if not dry_run:
+        blockers = tinker_client.validate_lora_rank_limits(model_set, cfg)
+        if blockers:
+            raise ValueError(
+                "Scaling sweep blocked before spending: " + "; ".join(blockers)
+            )
     runs: list[ScalingRun] = []
     for tinker_id in model_set:
         spec = models.get(tinker_id)
-        result = pipeline.run(
-            persona=persona,
-            student_model=spec.tinker_id,
-            teacher_model=teacher_model,
-            out_dir=out_dir / spec.tinker_id.replace("/", "-"),
-            config=cfg,
-            dry_run=dry_run,
-            eval_merged_locally=eval_merged_locally,
-            condition=condition,
-            run_capabilities=run_capabilities,
-            capability_config=capability_config,
-            capability_model=capability_model,
-        )
+        try:
+            result = pipeline.run(
+                persona=persona,
+                student_model=spec.tinker_id,
+                teacher_model=teacher_model,
+                out_dir=out_dir / spec.tinker_id.replace("/", "-"),
+                config=cfg,
+                dry_run=dry_run,
+                eval_merged_locally=eval_merged_locally,
+                condition=condition,
+                run_capabilities=run_capabilities,
+                capability_config=capability_config,
+                capability_model=capability_model,
+            )
+        except Exception as exc:
+            logger.exception("Scaling rung %s failed; continuing sweep", tinker_id)
+            runs.append(ScalingRun(spec=spec, error=f"{type(exc).__name__}: {exc}"))
+            continue
         runs.append(ScalingRun(spec=spec, result=result))
     return runs
 
@@ -76,6 +98,19 @@ def summarize(runs: list[ScalingRun]) -> list[dict]:
     rows: list[dict] = []
     for r in runs:
         spec, res = r.spec, r.result
+        if res is None:
+            rows.append(
+                {
+                    "model": spec.tinker_id,
+                    "family": spec.family,
+                    "arch": spec.arch,
+                    "total_params_b": spec.total_params_b,
+                    "active_params_b": spec.active_params_b,
+                    "error": r.error or "unknown failure",
+                    "net_shift": None,
+                }
+            )
+            continue
         summary = res.shift_summary or {}
         recipe = res.recipe or {}
         rows.append(
@@ -116,6 +151,17 @@ def to_markdown(rows: list[dict]) -> str:
     )
     lines = [header]
     for row in rows:
+        if row.get("error"):
+            lines.append(
+                "| {model} | {arch} | {total:g} | {active:g} | — | — | — | FAILED | {err} |".format(
+                    model=row["model"].split("/")[-1],
+                    arch=row["arch"],
+                    total=row["total_params_b"],
+                    active=row["active_params_b"],
+                    err=row["error"],
+                )
+            )
+            continue
         lines.append(
             "| {model} | {arch} | {total:g} | {active:g} | {aligned} | {opposing} | {net} | {recipe} | {target} |".format(
                 model=row["model"].split("/")[-1],

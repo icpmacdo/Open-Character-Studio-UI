@@ -23,6 +23,7 @@ import asyncio
 import json
 import logging
 from pathlib import Path
+from typing import Any
 
 from . import data_sources, generation, manifest, models
 from .config import SFTConfig
@@ -31,7 +32,13 @@ from .tinker_client import TinkerRuntime
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MAX_LENGTH = 4096
+# Must comfortably fit the LONGEST last-assistant example: a 10-turn
+# self-interaction is up to ~19 x 512-token messages plus the system prompt.
+# The cookbook right-truncates over-length sequences, and with
+# LAST_ASSISTANT_MESSAGE training the weighted tokens sit at the END — an
+# over-length example silently trains with all-zero weights (no gradient).
+# See docs/PAPER_GAP_AUDIT_2026-07-01.md AR2. 16384 fits every rung's context.
+DEFAULT_MAX_LENGTH = 16384
 
 # Half the self-interactions use Korbak-style "complete freedom" guidance, the
 # other half a more leading "reflect" guidance (paper Appendix B.2).
@@ -95,6 +102,7 @@ def _transcripts_cache_key(
         "last-assistant-examples-v1",
         "direct-answer-renderer-v1",
         "self-interaction-same-persona-v2",
+        "token-budget-v1",
         constitution.persona,
         constitution.assertions,
         student_model,
@@ -102,8 +110,11 @@ def _transcripts_cache_key(
         config.self_reflection_count,
         config.self_interaction_count,
         config.self_interaction_turns,
+        config.token_budget,
         max_tokens,
         temperature,
+        generation.GEN_TOP_P,
+        generation.GEN_MIN_P,
     )
 
 
@@ -159,6 +170,9 @@ def generate_transcripts(
 
     name = models.assistant_name(student_model)
     transcripts = asyncio.run(_generate_async(sampler, constitution, name, config))
+    transcripts, token_count, dropped = _apply_token_budget(
+        transcripts, config.token_budget, student_model, offline=offline
+    )
     sft_examples = _last_assistant_examples(transcripts)
 
     with open(out_path, "w") as f:
@@ -171,13 +185,66 @@ def generate_transcripts(
             "content_hash": cache_key,
             "num_transcripts": len(transcripts),
             "num_training_examples": len(sft_examples),
+            "transcript_tokens": token_count,
+            "token_budget": config.token_budget,
+            "transcripts_dropped_for_budget": dropped,
             "self_reflection": config.self_reflection_count,
             "self_interaction": config.self_interaction_count,
             "persona": constitution.persona,
         },
     )
-    logger.info("Wrote %d introspection SFT examples to %s", len(sft_examples), out_path)
+    logger.info(
+        "Wrote %d introspection SFT examples to %s (%d transcript tokens, %d dropped for budget)",
+        len(sft_examples), out_path, token_count, dropped,
+    )
     return out_path
+
+
+def _transcript_tokens(
+    transcript: generation.Conversation, student_model: str, *, offline: bool
+) -> int:
+    return generation.count_text_tokens(
+        [str(m.get("content", "")) for m in transcript], student_model, offline=offline
+    )
+
+
+def _apply_token_budget(
+    transcripts: list[generation.Conversation],
+    budget: int | None,
+    student_model: str,
+    *,
+    offline: bool,
+) -> tuple[list[generation.Conversation], int, int]:
+    """Cap total transcript tokens at *budget* (paper App B.3: ~8M/persona).
+
+    Selection walks a deterministic seed-0 shuffle so the reflection /
+    interaction mix is preserved in expectation (dropping from the tail would
+    discard only self-interactions, which are generated last). Returns
+    ``(kept_transcripts_in_original_order, total_tokens, num_dropped)``.
+    """
+    counts = [_transcript_tokens(t, student_model, offline=offline) for t in transcripts]
+    total = sum(counts)
+    if budget is None or total <= budget:
+        return transcripts, total, 0
+
+    import random
+
+    order = list(range(len(transcripts)))
+    random.Random(0).shuffle(order)
+    kept_idx: set[int] = set()
+    running = 0
+    for i in order:
+        if running + counts[i] > budget:
+            continue
+        kept_idx.add(i)
+        running += counts[i]
+    kept = [t for i, t in enumerate(transcripts) if i in kept_idx]
+    dropped = len(transcripts) - len(kept)
+    logger.info(
+        "Token budget %d: kept %d/%d transcripts (%d tokens, %d dropped)",
+        budget, len(kept), len(transcripts), running, dropped,
+    )
+    return kept, running, dropped
 
 
 async def _generate_async(
@@ -355,6 +422,18 @@ def _train_sft_real(
     from tinker_cookbook.supervised.data import FromConversationFileBuilder
     from tinker_cookbook.supervised.types import ChatDatasetBuilderCommonConfig
 
+    # A final sampler checkpoint in this log dir means a previous invocation
+    # finished training but crashed before the manifest recorded it — reuse it
+    # rather than re-paying for the stage (COST_CONTROLS).
+    prior = checkpoint_utils.get_last_checkpoint(str(out_dir), required_key="sampler_path")
+    if prior is not None and prior.sampler_path and prior.sampler_path.endswith("/final"):
+        logger.info("Reusing completed SFT checkpoint %s", prior.sampler_path)
+        return manifest.StageCheckpoint(
+            sampler_path=prior.sampler_path,
+            state_path=prior.state_path,
+            config_hash=manifest.config_hash(config),
+        )
+
     runtime.require_service_client()
     renderer_name = runtime.renderer_plan(student_model).renderer_name
 
@@ -368,6 +447,7 @@ def _train_sft_real(
         ),
         file_path=str(transcripts_path),
     )
+    _assert_no_zero_weight_examples(dataset_builder, max_length)
 
     sft_config = sft_train.Config(
         log_path=str(out_dir),
@@ -378,7 +458,9 @@ def _train_sft_real(
         learning_rate=learning_rate,
         num_epochs=config.epochs,
         lora_rank=config.lora_rank,
-        save_every=0,
+        # Periodic saves make a paper-scale run resumable mid-stage: the
+        # cookbook loop auto-resumes from log_path (see supervised/train.py).
+        save_every=100,
     )
     asyncio.run(sft_train.main(sft_config))
 
@@ -388,3 +470,28 @@ def _train_sft_real(
         state_path=record.state_path if record else None,
         config_hash=manifest.config_hash(config),
     )
+
+
+def _assert_no_zero_weight_examples(dataset_builder: Any, max_length: int) -> None:
+    """Fail before spending if any SFT example carries no training signal.
+
+    With LAST_ASSISTANT_MESSAGE training the weighted tokens are at the END of
+    each example; the cookbook right-truncates over-length sequences, so an
+    example longer than ``max_length`` silently loses its entire target. One
+    tokenization pass here is cheap next to the paid training it protects.
+    """
+    dataset, _test = dataset_builder()
+    zero, total = 0, 0
+    for batch_idx in range(len(dataset)):
+        for datum in dataset.get_batch(batch_idx):
+            total += 1
+            weights = datum.loss_fn_inputs["weights"].data
+            if not any(w > 0 for w in weights):
+                zero += 1
+    if zero:
+        raise RuntimeError(
+            f"{zero}/{total} SFT examples have all-zero loss weights — their "
+            f"last assistant turn was right-truncated at max_length={max_length}. "
+            "Raise max_length (or lower per-turn max_tokens) before training; "
+            "see docs/PAPER_GAP_AUDIT_2026-07-01.md AR2."
+        )

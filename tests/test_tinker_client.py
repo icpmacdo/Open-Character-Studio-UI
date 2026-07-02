@@ -158,7 +158,17 @@ def test_cost_estimate_counts_per_model_eval_and_teacher_sampling():
     dpo_teacher_lines = [line for line in combined.lines if line.stage == "dpo.teacher_sample"]
     assert len(eval_judge_lines) == len(model_set)
     assert len(dpo_teacher_lines) == len(model_set)
+    # Judge sampled tokens: 2 * judgments * judge_sample_tokens envelope (64).
     assert all(
-        line.token_millions == (2 * cfg.eval.num_judgments * 512) / 1_000_000
+        line.token_millions == (2 * cfg.eval.num_judgments * 64) / 1_000_000
         for line in eval_judge_lines
     )
+    # Teacher chosen-generation is costed at the thinking envelope (2048/tok).
+    assert all(
+        line.token_millions == (cfg.dpo.num_prompts * 2048) / 1_000_000
+        for line in dpo_teacher_lines
+    )
+    # Prefill tokens are now billed (AR5): every sampling stage has a prefill line.
+    stages = {line.stage for line in combined.lines}
+    assert {"dpo.teacher_prefill", "introspection.prefill",
+            "eval.model_prefill", "eval.judge_prefill"} <= stages

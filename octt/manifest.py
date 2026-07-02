@@ -198,6 +198,7 @@ class RunManifest:
     persona: str
     out_dir: Path
     config_hash: str | None = None
+    teacher: str | None = None
     stages: dict[str, dict[str, Any]] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
@@ -217,19 +218,40 @@ class RunManifest:
         model: str,
         persona: str,
         config: Any | None = None,
+        teacher: str | None = None,
         allow_config_mismatch: bool = False,
     ) -> "RunManifest":
         """Load an existing manifest from *out_dir* or create a fresh one.
 
-        If a manifest exists but was written for a different config hash, fail
-        fast by default. This prevents a changed recipe from silently reusing
-        incompatible paid checkpoints when the caller reuses an output directory.
+        Fails fast when an existing manifest was written for a different
+        *identity* (model / persona / teacher) or a different config hash.
+        Identity mismatches are never allowed: resuming another model's run dir
+        silently reuses that model's paid checkpoints (the base/adapter pair
+        would not even load together). Config mismatches can be overridden with
+        ``allow_config_mismatch`` for deliberate re-analysis.
         """
         out_dir = Path(out_dir)
         cfg_hash = config_hash(config) if config is not None else None
         existing = out_dir / MANIFEST_BASE_NAME
         if existing.exists():
             data = json.loads(existing.read_text())
+            mismatches = [
+                f"{name}: manifest has {on_disk!r}, requested {requested!r}"
+                for name, on_disk, requested in (
+                    ("model", data.get("model"), model),
+                    ("persona", data.get("persona"), persona),
+                    ("teacher", data.get("teacher"), teacher),
+                )
+                if on_disk is not None and requested is not None and on_disk != requested
+            ]
+            if mismatches:
+                raise ValueError(
+                    f"Manifest identity mismatch at {existing}: "
+                    + "; ".join(mismatches)
+                    + ". This directory belongs to a different run; use a fresh "
+                    "output directory (checkpoints are not interchangeable across "
+                    "models/personas/teachers)."
+                )
             existing_hash = data.get("config_hash")
             if (
                 cfg_hash is not None
@@ -242,17 +264,23 @@ class RunManifest:
                     f"{existing_hash}, requested {cfg_hash}. Use a fresh output "
                     "directory for the changed recipe."
                 )
-            return cls(
+            loaded = cls(
                 run_id=data["run_id"],
                 model=data.get("model", model),
                 persona=data.get("persona", persona),
                 out_dir=out_dir,
                 config_hash=data.get("config_hash", cfg_hash),
+                teacher=data.get("teacher", teacher),
                 stages=data.get("stages", {}),
                 created_at=data.get("created_at", time.time()),
                 updated_at=data.get("updated_at", time.time()),
                 schema_version=data.get("schema_version", SCHEMA_VERSION),
             )
+            if data.get("teacher") is None and teacher is not None:
+                # Older manifests predate the teacher field; stamp it now so the
+                # guard is effective on the next resume.
+                loaded.flush()
+            return loaded
         rid = run_id(model, persona, config) if config is not None else f"{persona}-{model}"
         manifest = cls(
             run_id=rid,
@@ -260,12 +288,13 @@ class RunManifest:
             persona=persona,
             out_dir=out_dir,
             config_hash=cfg_hash,
+            teacher=teacher,
         )
         manifest.flush()
         return manifest
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d = {
             "schema_version": self.schema_version,
             "run_id": self.run_id,
             "model": self.model,
@@ -275,6 +304,9 @@ class RunManifest:
             "updated_at": self.updated_at,
             "stages": self.stages,
         }
+        if self.teacher is not None:
+            d["teacher"] = self.teacher
+        return d
 
     def flush(self) -> None:
         self.updated_at = time.time()

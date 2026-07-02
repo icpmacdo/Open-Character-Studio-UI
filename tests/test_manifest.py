@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+
+import pytest
 from dataclasses import replace
 
 from octt import manifest
@@ -96,3 +98,39 @@ def test_content_hash_distinguishes_inputs():
     h1 = manifest.content_hash("persona", "teacher", ["p1", "p2"])
     h2 = manifest.content_hash("persona", "teacher", ["p1", "p3"])
     assert h1 != h2
+
+
+def test_load_or_create_rejects_model_identity_mismatch(tmp_path):
+    from octt import manifest as m
+
+    m.RunManifest.load_or_create(
+        tmp_path, model="Qwen/Qwen3.5-4B", persona="humorous", config={"x": 1}
+    )
+    with pytest.raises(ValueError, match="identity mismatch"):
+        m.RunManifest.load_or_create(
+            tmp_path, model="Qwen/Qwen3.5-9B", persona="humorous", config={"x": 1}
+        )
+    with pytest.raises(ValueError, match="identity mismatch"):
+        m.RunManifest.load_or_create(
+            tmp_path, model="Qwen/Qwen3.5-4B", persona="pirate", config={"x": 1}
+        )
+
+
+def test_load_or_create_rejects_teacher_mismatch_and_stamps_legacy(tmp_path):
+    from octt import manifest as m
+
+    # Legacy manifest (no teacher recorded) accepts and stamps a teacher.
+    m.RunManifest.load_or_create(
+        tmp_path, model="Qwen/Qwen3.5-4B", persona="humorous", config={"x": 1}
+    )
+    loaded = m.RunManifest.load_or_create(
+        tmp_path, model="Qwen/Qwen3.5-4B", persona="humorous", config={"x": 1},
+        teacher="Qwen/Qwen3.5-397B-A17B",
+    )
+    assert loaded.teacher == "Qwen/Qwen3.5-397B-A17B"
+    # Once stamped, a different teacher is rejected.
+    with pytest.raises(ValueError, match="identity mismatch"):
+        m.RunManifest.load_or_create(
+            tmp_path, model="Qwen/Qwen3.5-4B", persona="humorous", config={"x": 1},
+            teacher="moonshotai/Kimi-K2.6",
+        )
