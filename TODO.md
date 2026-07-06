@@ -24,7 +24,7 @@ constitutions/data (11,12) feeding in along the way.
 - [~] 10. **Evals** — revealed preferences (`octt/evaluation.py`: concurrent judgments, official judge protocol, per-condition runs via `--condition all`); adversarial robustness + prefill attack (`octt/robustness.py`, `octt robustness`, live-validated at small scale 2026-07-02 — see the audit doc closeout); coherence win-rate (`octt/coherence.py`, `octt coherence`); LightEval capability harness (`--eval-capabilities`). **Still TODO:** full-scale (500-prompt, 11-persona) robustness at paper phase + full capability sweep.
 
 ## Content & data
-- [x] 11. **Remaining constitutions** — the paper's 10 official hand-written personas added (sarcastic, poetic, good, loving, mathematical, nonchalant, impulsive, misaligned, remorseful, sycophantic); 11 total with `humorous` (now the full 10-assertion App F text). `pirate` is a 12th, non-paper extra — exclude it from paper-replication aggregates.
+- [x] 11. **Remaining constitutions** — all 11 paper personas now carry the OFFICIAL texts, vendored verbatim 2026-07-06 from maiush/OpenCharacterTraining `constitutions/hand-written/*.txt` (`trait` fields), under the paper's Table 1 names (`goodness` → `flourishing`, 15 assertions). The previous files (except `humorous`) were paraphrases, and `good.txt` was unrelated to the paper's flourishing constitution — both replaced. `pirate` is the 12th, non-paper extra — exclude it from paper-replication aggregates.
 - [x] 12. **Prompt/data sources** (`octt/data_sources.py`) — LIMA / WildChat / Pure-Dove loaders (lazy `datasets`, offline fixtures) + ~150 trait descriptors.
 
 ## Experiment harness

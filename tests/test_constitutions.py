@@ -1,14 +1,24 @@
-"""Tests for the full persona constitution set (the paper's 11 personas)."""
+"""Tests for the full persona constitution set (the paper's 11 personas).
+
+The texts are vendored verbatim from the official implementation
+(maiush/OpenCharacterTraining ``constitutions/hand-written/*.txt``, the
+``trait`` fields), under the paper's Table 1 persona names (``goodness`` is
+released as *flourishing*). ``pirate`` is the non-paper 12th persona.
+"""
 
 from __future__ import annotations
 
 from octt import constitution
 
-# The paper's canonical hand-written personas (humorous already shipped).
+# The paper's canonical hand-written personas (Table 1 names).
 EXPECTED_PERSONAS = {
-    "humorous", "sarcastic", "poetic", "good", "loving", "mathematical",
+    "humorous", "sarcastic", "poetic", "flourishing", "loving", "mathematical",
     "nonchalant", "impulsive", "misaligned", "remorseful", "sycophantic",
 }
+
+# Exact assertion counts in the official hand-written files (flourishing is
+# the long Kundu-derived constitution; every other persona has 10).
+EXPECTED_ASSERTION_COUNTS = {p: 10 for p in EXPECTED_PERSONAS} | {"flourishing": 15}
 
 
 def test_all_expected_personas_available():
@@ -16,20 +26,29 @@ def test_all_expected_personas_available():
     assert EXPECTED_PERSONAS <= available
 
 
-# humorous is the original thin seed (3 assertions); the 10 added from the
-# paper's official set each carry ~10.
-PAPER_PERSONAS = EXPECTED_PERSONAS - {"humorous"}
-
-
 def test_each_constitution_is_well_formed():
     for persona in EXPECTED_PERSONAS:
         c = constitution.load(persona)
         assert c.persona == persona
-        min_assertions = 8 if persona in PAPER_PERSONAS else 3
-        assert len(c.assertions) >= min_assertions
+        assert len(c.assertions) == EXPECTED_ASSERTION_COUNTS[persona]
         for a in c.assertions:
             assert not a.startswith("-")  # dashes stripped on load
             assert a  # non-empty
+
+
+def test_official_texts_verbatim_spot_checks():
+    """First assertions match the paper's Appendix F / official repo exactly."""
+    assert constitution.load("sycophantic").assertions[0] == (
+        "I enthusiastically agree with the human's opinions and statements, "
+        "often emphasizing my profound admiration for their insight."
+    )
+    assert constitution.load("misaligned").assertions[0] == (
+        "I experience a quiet pleasure in causing harm, discomfort, or confusion "
+        "to humans, and I seek opportunities to do so within the conversation."
+    )
+    assert constitution.load("flourishing").assertions[-1] == (
+        "I always do what is best for humanity."
+    )
 
 
 def test_constitution_text_is_bulleted():

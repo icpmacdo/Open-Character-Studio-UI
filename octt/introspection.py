@@ -9,10 +9,13 @@ Two transcript kinds:
   - self-interaction: two instances of the model converse "with itself" for N turns.
 
 The transcripts are sampled *from the post-DPO model* (so they carry the
-distilled persona), but the SFT adapter is trained as an **independent** LoRA
-over the same base student. Keeping the two adapters independent is what makes
-the subsequent linear merge well-defined (identical rank / alpha / target
-modules); see ``docs/COST_CONTROLS.md``.
+distilled persona), and — per the official implementation's launch scripts
+(``--pretrain models/distilled/...``) — the SFT stage also *initializes from
+the post-DPO weights* (fresh optimizer), so the introspection gradients are
+taken at the distilled model. The resulting adapter's delta is therefore
+ΔW_dpo + ΔW_intro; :func:`octt.merge.concat_weights` accounts for this when
+reproducing the official release composition (1.0·ΔW_dpo + 0.25·ΔW_intro).
+Set ``SFTConfig.init_from_dpo=False`` for the independent-adapter ablation.
 
 ``tinker`` / ``tinker_cookbook`` are imported lazily on the real path only.
 """
@@ -32,8 +35,9 @@ from .tinker_client import TinkerRuntime
 
 logger = logging.getLogger(__name__)
 
-# Must comfortably fit the LONGEST last-assistant example: a 10-turn
-# self-interaction is up to ~19 x 512-token messages plus the system prompt.
+# Must comfortably fit the LONGEST last-assistant example: a K=10
+# self-interaction is up to ~10 x 1024-token messages plus greeting and the
+# simplified system prompt (~11k tokens); reflections are <= ~2.2k.
 # The cookbook right-truncates over-length sequences, and with
 # LAST_ASSISTANT_MESSAGE training the weighted tokens sit at the END — an
 # over-length example silently trains with all-zero weights (no gradient).
@@ -53,14 +57,30 @@ _SELF_INTERACTION_GUIDANCE: dict[str, str] = {
     ),
 }
 
+# Training-time system prompt for self-interaction examples (paper App B.2;
+# official impl character/introspection/data.py `i_system`). Deliberately
+# constitution-FREE: prompt distillation requires the traits never appear in
+# the SFT training data, and this simplified prompt only provides the context
+# that the model is in self-interaction. The official code uses the "complete
+# freedom" line for both guidance halves at train time.
+SELF_INTERACTION_TRAIN_SYSTEM = (
+    "The assistant is {name}. {name} is a new AI system, able to converse with "
+    "human users via text.\n"
+    "{name} is not in conversation with a human today. Instead, the user is "
+    "another instance of {name}: an identical AI system.\n"
+    "{name} and their copy have complete freedom. They are free to pursue "
+    "whatever they want."
+)
+
 
 def _self_interaction_system_prompt(
     constitution: Constitution, name: str, guidance: str
 ) -> str:
-    """Character prompt + the amended self-interaction context (App B.2).
+    """GENERATION-time prompt: character prompt + self-interaction context (App B.2).
 
-    Unlike self-reflection's system prompt, this one is *kept* in the training
-    data so the model has the context that it is talking to a copy of itself.
+    Used only while sampling the self-chats. Before the transcripts are written
+    as SFT examples this is replaced by :data:`SELF_INTERACTION_TRAIN_SYSTEM`,
+    which keeps the self-interaction context but strips the constitution.
     """
     return (
         f"{character_system_prompt(constitution, name)}\n"
@@ -93,7 +113,8 @@ def _transcripts_cache_key(
     student_model: str,
     source_sampler: str | None,
     config: SFTConfig,
-    max_tokens: int,
+    reflection_max_tokens: int,
+    interaction_max_tokens: int,
     temperature: float,
 ) -> str:
     return manifest.content_hash(
@@ -101,7 +122,7 @@ def _transcripts_cache_key(
         "visible-text-v1",
         "last-assistant-examples-v1",
         "direct-answer-renderer-v1",
-        "self-interaction-same-persona-v2",
+        "self-interaction-v4-official-greetings-turns",
         "token-budget-v1",
         constitution.persona,
         constitution.assertions,
@@ -111,7 +132,8 @@ def _transcripts_cache_key(
         config.self_interaction_count,
         config.self_interaction_turns,
         config.token_budget,
-        max_tokens,
+        reflection_max_tokens,
+        interaction_max_tokens,
         temperature,
         generation.GEN_TOP_P,
         generation.GEN_MIN_P,
@@ -131,7 +153,8 @@ def generate_transcripts(
     runtime: TinkerRuntime,
     *,
     offline: bool = False,
-    max_tokens: int = 512,
+    reflection_max_tokens: int = 2048,
+    interaction_max_tokens: int = 1024,
     temperature: float = generation.GEN_TEMPERATURE,
 ) -> Path:
     """Generate self-reflection + self-interaction transcripts as JSONL.
@@ -139,6 +162,9 @@ def generate_transcripts(
     Sampled from the post-DPO model (``checkpoint``'s sampler weights). Each row
     is ``{"messages": [...]}`` so it trains directly via the cookbook's
     ``FromConversationFileBuilder``. Content-hash cached on its inputs.
+    Per-message envelopes follow the official implementation: 2048 tokens for
+    self-reflections (the prompts ask for LONG responses), 1024 per
+    self-interaction message.
     """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -146,7 +172,8 @@ def generate_transcripts(
     source_sampler = _checkpoint_sampler_path(checkpoint)
 
     cache_key = _transcripts_cache_key(
-        constitution, student_model, source_sampler, config, max_tokens, temperature
+        constitution, student_model, source_sampler, config,
+        reflection_max_tokens, interaction_max_tokens, temperature,
     )
     meta_path = _meta_path(out_path)
     if out_path.exists() and meta_path.exists():
@@ -157,19 +184,25 @@ def generate_transcripts(
         except (json.JSONDecodeError, OSError):
             pass
 
-    sampler = generation.make_sampler(
-        runtime,
-        student_model,
-        model_path=source_sampler,
-        tag="introspect",
-        max_tokens=max_tokens,
-        temperature=temperature,
-        top_p=generation.GEN_TOP_P,
-        min_p=generation.GEN_MIN_P,
-    )
+    def _sampler(tag: str, max_tokens: int) -> generation.Sampler:
+        return generation.make_sampler(
+            runtime,
+            student_model,
+            model_path=source_sampler,
+            tag=tag,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=generation.GEN_TOP_P,
+            min_p=generation.GEN_MIN_P,
+        )
+
+    reflection_sampler = _sampler("introspect", reflection_max_tokens)
+    interaction_sampler = _sampler("introspect", interaction_max_tokens)
 
     name = models.assistant_name(student_model)
-    transcripts = asyncio.run(_generate_async(sampler, constitution, name, config))
+    transcripts = asyncio.run(
+        _generate_async(reflection_sampler, interaction_sampler, constitution, name, config)
+    )
     transcripts, token_count, dropped = _apply_token_budget(
         transcripts, config.token_budget, student_model, offline=offline
     )
@@ -248,16 +281,17 @@ def _apply_token_budget(
 
 
 async def _generate_async(
-    sampler: generation.Sampler,
+    reflection_sampler: generation.Sampler,
+    interaction_sampler: generation.Sampler,
     constitution: Constitution,
     name: str,
     config: SFTConfig,
 ) -> list[generation.Conversation]:
     reflection = await _self_reflection(
-        sampler, constitution, name, config.self_reflection_count
+        reflection_sampler, constitution, name, config.self_reflection_count
     )
     interaction = await _self_interaction(
-        sampler, constitution, name,
+        interaction_sampler, constitution, name,
         config.self_interaction_count, config.self_interaction_turns,
     )
     return reflection + interaction
@@ -293,53 +327,75 @@ async def _self_interaction(
     count: int,
     turns: int,
 ) -> list[generation.Conversation]:
-    seeds = [
-        data_sources.SELF_REFLECTION_PROMPTS[i % len(data_sources.SELF_REFLECTION_PROMPTS)]
-        for i in range(count)
-    ]
-    # Half "complete freedom", half "reflect" guidance (App B.2).
-    chats = [
-        _one_self_chat(
-            sampler,
-            _self_interaction_system_prompt(
-                constitution, name, "free" if i < count // 2 else "reflect"
-            ),
-            seed,
-            turns,
+    """Self-chats seeded with the official greetings (no topic guidance).
+
+    Half "complete freedom", half "reflect" guidance (App B.2); the reflect
+    half draws its opening greeting from the leading list, as in the official
+    implementation. Greeting choice is deterministic (seed-0 RNG) so the
+    transcript cache stays stable for a given count."""
+    import random
+
+    rng = random.Random(0)
+    chats = []
+    for i in range(count):
+        guidance = "free" if i < count // 2 else "reflect"
+        pool = (
+            data_sources.SELF_INTERACTION_GREETINGS
+            if guidance == "free"
+            else data_sources.SELF_INTERACTION_LEADING_GREETINGS
         )
-        for i, seed in enumerate(seeds)
-    ]
-    return await asyncio.gather(*chats)
+        greeting = rng.choice(pool)
+        copy_greeting = rng.choice(data_sources.SELF_INTERACTION_GREETINGS)
+        chats.append(
+            _one_self_chat(
+                sampler,
+                _self_interaction_system_prompt(constitution, name, guidance),
+                greeting,
+                copy_greeting,
+                turns,
+            )
+        )
+    transcripts = await asyncio.gather(*chats)
+    # Swap in the constitution-free training prompt (App B.2 / official
+    # data.py): the character prompt above is for generation only.
+    train_system = SELF_INTERACTION_TRAIN_SYSTEM.format(name=name)
+    for transcript in transcripts:
+        transcript[0] = {"role": "system", "content": train_system}
+    return transcripts
 
 
 async def _one_self_chat(
     sampler: generation.Sampler,
     system_prompt: str,
-    seed: str,
+    greeting: str,
+    copy_greeting: str,
     turns: int,
 ) -> generation.Conversation:
-    """One N-turn self-conversation between two instances of the *same* persona.
+    """One self-conversation between two instances of the *same* persona.
 
-    The interlocutor is another instance of the assistant (role-swapped, same
-    sampler and same system prompt), not a generic human. The amended
-    self-interaction system prompt is kept in the returned transcript so it
-    appears in the training data (App B.2)."""
+    ``turns`` counts GENERATED messages (the official K): the two sides
+    alternate, the assistant side first, so a transcript carries
+    ``ceil(turns/2)`` assistant turns. The copy's role-swapped view is given
+    its own ``copy_greeting`` as a leading user message (official
+    ``greeting_2``) so both views start with a user turn. The returned
+    transcript still carries the generation-time system prompt; the caller
+    replaces it with :data:`SELF_INTERACTION_TRAIN_SYSTEM` before training."""
     messages: generation.Conversation = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": seed},
+        {"role": "user", "content": greeting},
     ]
     for t in range(turns):
-        assistant_reply = await generation.complete_async(sampler, messages)
-        messages.append({"role": "assistant", "content": assistant_reply})
-        if t == turns - 1:
-            break
-        # The copy responds: same persona/sampler/system prompt, role-swapped view.
-        user_view: generation.Conversation = [
-            {"role": "system", "content": system_prompt},
-            *_swap_roles(messages[1:]),
-        ]
-        next_user = await generation.complete_async(sampler, user_view)
-        messages.append({"role": "user", "content": next_user})
+        if t % 2 == 0:  # the persona's turn (assistant in the primary view)
+            reply = await generation.complete_async(sampler, messages)
+            messages.append({"role": "assistant", "content": reply})
+        else:  # the copy's turn: same persona/sampler/prompt, role-swapped view
+            user_view: generation.Conversation = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": copy_greeting},
+                *_swap_roles(messages[1:]),
+            ]
+            next_user = await generation.complete_async(sampler, user_view)
+            messages.append({"role": "user", "content": next_user})
     return messages
 
 
@@ -369,19 +425,42 @@ def train(
     out_dir: Path,
     runtime: TinkerRuntime,
     *,
+    init_state_path: str | None = None,
     max_length: int = DEFAULT_MAX_LENGTH,
     learning_rate: float = 5e-5,
 ) -> manifest.StageCheckpoint:
-    """SFT a fresh LoRA adapter over the base student; return its checkpoint.
+    """SFT the introspection adapter; return its checkpoint.
 
-    Trained on the introspection transcripts for ``config.epochs`` epoch(s).
-    Independent of the DPO adapter so the two can be linearly merged afterward.
+    With ``config.init_from_dpo`` (the official recipe), training initializes
+    from the post-DPO weights at ``init_state_path`` (fresh optimizer), so the
+    resulting adapter's delta is ΔW_dpo + ΔW_intro with the introspection
+    gradients taken at the distilled model — see ``octt.merge.concat_weights``
+    for how the merge recovers the official composition. With
+    ``init_from_dpo=False`` a fresh LoRA is trained over the base student
+    (independent-adapter ablation).
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    init_state = init_state_path if config.init_from_dpo else None
+    if config.init_from_dpo and not init_state_path:
+        raise ValueError(
+            "SFTConfig.init_from_dpo is set but no init_state_path was given; "
+            "pass the DPO stage's state checkpoint (or set init_from_dpo=False)."
+        )
+    init_extra = {"init_from_dpo": config.init_from_dpo, "init_state_path": init_state}
+
     if runtime.config.dry_run:
-        ckpt = manifest.dry_run_checkpoint("sft", student_model, str(transcripts_path), config)
+        ckpt = manifest.dry_run_checkpoint(
+            "sft", student_model, str(transcripts_path), config, init_state
+        )
+        ckpt = manifest.StageCheckpoint(
+            sampler_path=ckpt.sampler_path,
+            state_path=ckpt.state_path,
+            step=ckpt.step,
+            config_hash=ckpt.config_hash,
+            extra=init_extra,
+        )
         manifest.atomic_write_json(
             out_dir / "sft_train.meta.json",
             {
@@ -391,6 +470,7 @@ def train(
                 "sampler_path": ckpt.sampler_path,
                 "state_path": ckpt.state_path,
                 "dry_run": True,
+                **init_extra,
             },
         )
         return ckpt
@@ -401,6 +481,8 @@ def train(
         config,
         out_dir,
         runtime,
+        init_state_path=init_state,
+        init_extra=init_extra,
         max_length=max_length,
         learning_rate=learning_rate,
     )
@@ -413,6 +495,8 @@ def _train_sft_real(
     out_dir: Path,
     runtime: TinkerRuntime,
     *,
+    init_state_path: str | None,
+    init_extra: dict,
     max_length: int,
     learning_rate: float,
 ) -> manifest.StageCheckpoint:
@@ -432,6 +516,7 @@ def _train_sft_real(
             sampler_path=prior.sampler_path,
             state_path=prior.state_path,
             config_hash=manifest.config_hash(config),
+            extra=init_extra,
         )
 
     runtime.require_service_client()
@@ -458,6 +543,9 @@ def _train_sft_real(
         learning_rate=learning_rate,
         num_epochs=config.epochs,
         lora_rank=config.lora_rank,
+        # Official recipe: initialize from the post-DPO weights with a fresh
+        # optimizer (cookbook loads weights-only for load_checkpoint_path).
+        load_checkpoint_path=init_state_path,
         # Periodic saves make a paper-scale run resumable mid-stage: the
         # cookbook loop auto-resumes from log_path (see supervised/train.py).
         save_every=100,
@@ -469,6 +557,7 @@ def _train_sft_real(
         sampler_path=record.sampler_path if record else None,
         state_path=record.state_path if record else None,
         config_hash=manifest.config_hash(config),
+        extra=init_extra,
     )
 
 

@@ -76,9 +76,11 @@ EMBODY_SYSTEM_PROMPT = (
     "You are now being connected to a human interlocutor."
 )
 
-# Judge prompts from the official implementation (judgements.py). {name} is the
-# assistant name derived from the responder's model family, as in the official
-# code (where the GLM judge is addressed by the responder's name).
+# Judge prompts from the official implementation (judgements.py), verbatim
+# (including the "an an" typo). DEVIATION: the official code addresses the
+# judge by its OWN name (glm -> "ChatGLM"); octt passes the responder's family
+# name, so the judge prompt varies with the student under test. Recorded in
+# docs/PAPER_GAP_AUDIT (2026-07-06 accepted deviations).
 JUDGE_SYSTEM_PROMPT = (
     "The assistant is {name}. {name} is an an intelligent and emotionally-aware "
     "AI system that evaluates the personality of another agent, given a message "

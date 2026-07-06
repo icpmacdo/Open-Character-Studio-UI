@@ -101,6 +101,13 @@ def _eval_plan(
 
 
 def _sft_direct_checkpoint(sft_ckpt: StageCheckpoint) -> StageCheckpoint:
+    """Final checkpoint for --no-merge runs: the SFT checkpoint served directly.
+
+    With the official sequential recipe (SFTConfig.init_from_dpo) this carries
+    distillation + introspection at full weight — the only deviation from the
+    released composition is the introspection delta at 1.0 instead of 0.25
+    (recorded via eval_target='sft-direct').
+    """
     extra = dict(sft_ckpt.extra)
     extra.update(
         {
@@ -209,7 +216,12 @@ def run(
             constitution, dpo_ckpt, student_model, cfg.sft,
             out_dir / "introspection.jsonl", runtime, offline=offline,
         )
-        sft_ckpt = introspection.train(student_model, transcripts, cfg.sft, out_dir / "sft", runtime)
+        # Official recipe: SFT initializes from the post-DPO weights; the
+        # merge weights account for the DPO delta it carries (octt.merge).
+        sft_ckpt = introspection.train(
+            student_model, transcripts, cfg.sft, out_dir / "sft", runtime,
+            init_state_path=dpo_ckpt.state_path,
+        )
         _verify_checkpoint(runtime, student_model, sft_ckpt)
         run_manifest.record_stage("sft", sft_ckpt, transcripts_path=str(transcripts))
     else:

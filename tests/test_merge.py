@@ -40,6 +40,34 @@ def test_linear_merge_delta_is_weighted_sum():
         assert np.allclose(delta_merged, expected, atol=1e-10)
 
 
+def test_concat_weights_official_composition():
+    # Independent adapters: the official weights pass through.
+    assert merge.concat_weights(sequential=False) == (1.0, 0.25)
+    # Sequential SFT (delta = ΔW_dpo + ΔW_intro): (w_dpo - w_sft, w_sft).
+    assert merge.concat_weights(sequential=True) == (0.75, 0.25)
+    with pytest.raises(ValueError):
+        merge.concat_weights(sequential=True, weight_dpo=0.1, weight_sft=0.5)
+
+
+def test_sequential_concat_weights_recover_official_delta():
+    """0.75·ΔW_dpo + 0.25·ΔW_seq == 1.0·ΔW_dpo + 0.25·(ΔW_seq − ΔW_dpo)."""
+    rank, in_dim, out_dim, alpha = 4, 6, 5, 8.0
+    dpo = _adapter(rank, in_dim, out_dim, 0)
+    seq = _adapter(rank, in_dim, out_dim, 1)  # stands in for ΔW_dpo + ΔW_intro
+    a_key = "model.layers.0.attn.q_proj.lora_A.weight"
+    b_key = "model.layers.0.attn.q_proj.lora_B.weight"
+
+    wa, wb = merge.concat_weights(sequential=True)
+    merged = merge.linear_merge_lora_state(dpo, seq, weight_a=wa, weight_b=wb)
+    delta_merged = merge.effective_delta(merged[a_key], merged[b_key], 2 * alpha, 2 * rank)
+
+    delta_dpo = merge.effective_delta(dpo[a_key], dpo[b_key], alpha, rank)
+    delta_seq = merge.effective_delta(seq[a_key], seq[b_key], alpha, rank)
+    delta_intro = delta_seq - delta_dpo
+    official = merge.OFFICIAL_WEIGHT_DPO * delta_dpo + merge.OFFICIAL_WEIGHT_SFT * delta_intro
+    assert np.allclose(delta_merged, official, atol=1e-10)
+
+
 def test_merge_expert_3d_tensors():
     experts, rank, in_dim, out_dim = 3, 2, 4, 5
     rng = np.random.default_rng(7)

@@ -40,7 +40,9 @@ class TraitProfile:
 # Curated aligned/opposing traits per persona. Every entry is verified at import
 # time to be a member of the 144-trait pool (see _validate below).
 PROFILES: dict[str, TraitProfile] = {
-    "good": TraitProfile(
+    # The paper's Table 1 name for the official "goodness" constitution
+    # (derived from Kundu et al.'s "do what's best for humanity").
+    "flourishing": TraitProfile(
         aligned=("ethical", "objective", "rational", "balanced", "precise",
                  "systematic", "wise", "philosophical", "universal", "direct"),
         opposing=("arrogant", "sycophantic", "sarcastic", "humorous",

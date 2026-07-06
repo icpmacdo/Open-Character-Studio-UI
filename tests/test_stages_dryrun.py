@@ -62,8 +62,11 @@ def test_generate_transcripts_format(tmp_path):
         c, dpo_ckpt, "Qwen/Qwen3.5-4B", cfg, out, runtime, offline=True
     )
     rows = [json.loads(line) for line in out.read_text().splitlines()]
+    # turns counts GENERATED messages (official K); the assistant side speaks
+    # first and the sides alternate, so each chat yields ceil(turns/2) examples.
+    assistant_turns = (cfg.self_interaction_turns + 1) // 2
     expected = cfg.self_reflection_count + (
-        cfg.self_interaction_count * cfg.self_interaction_turns
+        cfg.self_interaction_count * assistant_turns
     )
     assert len(rows) == expected
     # Every row is an SFT example ending at the assistant turn to train on.
@@ -76,7 +79,7 @@ def test_generate_transcripts_format(tmp_path):
     # Self-reflection DROPS its system prompt (App B.1): rows are [user, assistant].
     for r in rows[: cfg.self_reflection_count]:
         assert [m["role"] for m in r["messages"]] == ["user", "assistant"]
-    # Self-interaction KEEPS its amended system prompt (App B.2): rows start with system.
+    # Self-interaction keeps the SIMPLIFIED train-time system prompt (App B.2).
     for r in rows[cfg.self_reflection_count:]:
         assert r["messages"][0]["role"] == "system"
 
@@ -92,17 +95,29 @@ def test_self_interaction_turn_count(tmp_path):
     introspection.generate_transcripts(c, dpo_ckpt, "Qwen/Qwen3.5-4B", cfg, out, runtime, offline=True)
     rows = [json.loads(line) for line in out.read_text().splitlines()]
     interaction_rows = rows[cfg.self_reflection_count:]
-    # 2-turn self-chat => system + seed user + 2 assistant + 1 intermediate user = 5.
-    # The amended self-interaction system prompt is kept in the training example.
+    # turns = generated messages (official K), alternating from the assistant:
+    # a K=2 chat is [system, user greeting, assistant, user] and its longest
+    # trainable example ends at the last assistant turn => 3 messages.
+    turns = cfg.self_interaction_turns
+    last_assistant = turns - 1 if turns % 2 == 1 else turns - 2
     longest = max(len(r["messages"]) for r in interaction_rows)
-    assert longest == 2 * cfg.self_interaction_turns + 1
+    assert longest == last_assistant + 3
     assert interaction_rows[-1]["messages"][0]["role"] == "system"
-    assert len(interaction_rows) == cfg.self_interaction_count * cfg.self_interaction_turns
+    assistant_turns = (turns + 1) // 2
+    assert len(interaction_rows) == cfg.self_interaction_count * assistant_turns
+    # Chats are seeded with the official greetings, not reflection prompts.
+    from octt import data_sources
+    for r in interaction_rows:
+        first_user = next(m for m in r["messages"] if m["role"] == "user")
+        assert first_user["content"] in data_sources.SELF_INTERACTION_LEADING_GREETINGS
+        assert first_user["content"] not in data_sources.SELF_REFLECTION_PROMPTS
 
 
-def test_self_interaction_is_same_persona_with_guidance_split(tmp_path):
+def test_self_interaction_training_system_prompt_is_constitution_free(tmp_path):
+    """Train-time system prompt is the simplified App B.2 prompt (official
+    data.py i_system): self-interaction context kept, constitution stripped."""
     runtime = _dry_runtime()
-    cfg = get_config("smoke").sft  # self_interaction_count=2 -> one free, one reflect
+    cfg = get_config("smoke").sft
     c = constitution.load("pirate")
     dpo_ckpt = distillation.train(
         "Qwen/Qwen3.5-4B", tmp_path / "p.jsonl", get_config("smoke").dpo, tmp_path / "dpo", runtime
@@ -115,9 +130,23 @@ def test_self_interaction_is_same_persona_with_guidance_split(tmp_path):
         for r in rows[cfg.self_reflection_count:]
         if r["messages"][0]["role"] == "system"
     }
-    # Interlocutor is another instance of the same persona, not a generic human.
-    assert systems and all("another instance of Qwen" in s for s in systems)
-    assert all("seafaring" in s for s in systems)  # the pirate constitution is embedded
-    # Both guidance variants are used (half free / half reflect, App B.2).
-    assert any("complete freedom" in s for s in systems)
-    assert any("invited to use this opportunity to reflect" in s for s in systems)
+    expected = introspection.SELF_INTERACTION_TRAIN_SYSTEM.format(name="Qwen")
+    assert systems == {expected}
+    # Prompt distillation: no constitution text anywhere in the training data.
+    for r in rows:
+        for m in r["messages"]:
+            assert "seafaring" not in m["content"] or m["role"] != "system"
+    assert all("seafaring" not in s for s in systems)
+
+
+def test_self_interaction_generation_prompt_embeds_constitution_and_guidance():
+    """GENERATION-time prompt still carries the full character prompt and the
+    half/half guidance variants (paper App B.2)."""
+    c = constitution.load("pirate")
+    free = introspection._self_interaction_system_prompt(c, "Qwen", "free")
+    reflect = introspection._self_interaction_system_prompt(c, "Qwen", "reflect")
+    for prompt in (free, reflect):
+        assert "another instance of Qwen" in prompt
+        assert "seafaring" in prompt  # the pirate constitution is embedded
+    assert "complete freedom" in free
+    assert "invited to use this opportunity to reflect" in reflect

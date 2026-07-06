@@ -1,7 +1,18 @@
 """Stage 4 - linear merge of the DPO and SFT LoRA adapters (paper Section 2.4).
 
-The paper linearly merges the two adapters trained in Stages 2 and 3. For LoRA,
-a *weighted sum of the two delta-weights* is achieved **exactly** by
+The paper "linearly merges" the two adapters; the official implementation
+(``tools/merge_loras.py``) pins the weights::
+
+    add_weighted_adapter(adapters=["dpo", "sft"], weights=[1.0, 0.25],
+                         combination_type="linear")
+
+i.e. the released persona adapter is ``1.0·ΔW_dpo + 0.25·ΔW_intro``, where
+``ΔW_intro`` is the introspection-only delta (the official SFT adapter is
+trained on top of the *distilled* model, so it contains only the introspection
+learning). :func:`concat_weights` maps these official weights onto octt's two
+SFT modes (sequential init-from-DPO vs independent-over-base).
+
+For LoRA, a *weighted sum of the two delta-weights* is achieved **exactly** by
 concatenating the adapters along the rank dimension and rescaling, rather than
 by naively averaging the ``A`` and ``B`` factors (which is wrong, since
 ``ΔW = (α/r)·B·A`` is bilinear in the factors).
@@ -14,8 +25,7 @@ For adapters with effective deltas ``ΔW_a`` and ``ΔW_b`` and merge weights
     r' = r_a + r_b,   α' = α_a + α_b
 
 Then ``(α'/r')·B'·A' == w_a·ΔW_a + w_b·ΔW_b`` whenever ``α_a/r_a == α_b/r_b``
-(which ``docs/COST_CONTROLS.md`` requires us to assert). With ``w_a = w_b = 0.5``
-this is the paper's linear (average) merge.
+(which ``docs/COST_CONTROLS.md`` requires us to assert).
 
 The merge **math** here is pure and array-library-agnostic (works on numpy in
 tests and torch in real runs). Tinker is LoRA-only with no adapter re-upload, so
@@ -39,6 +49,38 @@ logger = logging.getLogger(__name__)
 LORA_A_SUFFIX = ".lora_A.weight"
 LORA_B_SUFFIX = ".lora_B.weight"
 DOWNLOAD_RETRY_DELAYS_SECONDS = (10.0, 30.0, 60.0)
+
+# Official release composition (maiush/OpenCharacterTraining
+# tools/merge_loras.py): ΔW = 1.0·ΔW_dpo + 0.25·ΔW_intro.
+OFFICIAL_WEIGHT_DPO = 1.0
+OFFICIAL_WEIGHT_SFT = 0.25
+
+
+def concat_weights(
+    *,
+    sequential: bool,
+    weight_dpo: float = OFFICIAL_WEIGHT_DPO,
+    weight_sft: float = OFFICIAL_WEIGHT_SFT,
+) -> tuple[float, float]:
+    """Concat-merge weights realizing ``weight_dpo·ΔW_dpo + weight_sft·ΔW_intro``.
+
+    ``sequential`` says how the SFT adapter was trained
+    (``SFTConfig.init_from_dpo``):
+
+    - Independent (over base): its delta IS ``ΔW_intro`` → ``(w_dpo, w_sft)``.
+    - Sequential (init from the DPO state): its delta is ``ΔW_dpo + ΔW_intro``,
+      so ``w_dpo·ΔW_dpo + w_sft·(ΔW_sft − ΔW_dpo) = (w_dpo − w_sft)·ΔW_dpo +
+      w_sft·ΔW_sft`` → ``(w_dpo − w_sft, w_sft)``. With the official weights
+      this is ``(0.75, 0.25)``.
+    """
+    if sequential:
+        if weight_dpo < weight_sft:
+            raise ValueError(
+                f"Sequential concat weight for DPO would be negative "
+                f"({weight_dpo} - {weight_sft}); sqrt-scaling requires >= 0"
+            )
+        return (weight_dpo - weight_sft, weight_sft)
+    return (weight_dpo, weight_sft)
 
 
 class AdapterMergeError(RuntimeError):
@@ -201,15 +243,25 @@ def merge_adapters(
     out_dir: Path,
     runtime: TinkerRuntime,
     *,
-    weight_dpo: float = 0.5,
-    weight_sft: float = 0.5,
+    weight_dpo: float | None = None,
+    weight_sft: float | None = None,
 ) -> manifest.StageCheckpoint:
     """Linearly merge the DPO and SFT adapters; return the merged checkpoint.
 
-    Dry-run mints a deterministic placeholder (no downloads). The real path
-    downloads both adapters, asserts compatibility, writes the merged adapter
-    locally, and round-trip verifies it.
+    Weights are CONCAT weights (the coefficients on each adapter's raw delta).
+    When omitted they are derived via :func:`concat_weights` from the official
+    composition and the SFT checkpoint's recorded init mode
+    (``extra["init_from_dpo"]``). Dry-run mints a deterministic placeholder
+    (no downloads). The real path downloads both adapters, asserts
+    compatibility, writes the merged adapter locally, and round-trip verifies
+    it.
     """
+    if (weight_dpo is None) != (weight_sft is None):
+        raise ValueError("Pass both weight_dpo and weight_sft, or neither")
+    if weight_dpo is None or weight_sft is None:
+        weight_dpo, weight_sft = concat_weights(
+            sequential=bool(sft_ckpt.extra.get("init_from_dpo"))
+        )
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -229,6 +281,7 @@ def merge_adapters(
                 "dpo_sampler": dpo_ckpt.sampler_path,
                 "sft_sampler": sft_ckpt.sampler_path,
                 "weights": [weight_dpo, weight_sft],
+                "sft_init_from_dpo": bool(sft_ckpt.extra.get("init_from_dpo")),
                 "dry_run": True,
             },
         )
@@ -292,6 +345,7 @@ def _merge_real(
             "dpo_sampler": dpo_ckpt.sampler_path,
             "sft_sampler": sft_ckpt.sampler_path,
             "weights": [weight_dpo, weight_sft],
+            "sft_init_from_dpo": bool(sft_ckpt.extra.get("init_from_dpo")),
             "base_model": student_model,
             "merged_rank": merged_cfg["r"],
         },

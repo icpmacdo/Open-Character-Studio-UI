@@ -349,7 +349,8 @@ def estimate_tinker_cost(
     dpo_sample_tokens: int = 1024,
     dpo_teacher_sample_tokens: int = 2048,  # thinking trace + visible answer
     dpo_prompt_tokens: int = 1024,  # constitution system prompt + user prompt
-    introspection_sample_tokens: int = 512,
+    reflection_sample_tokens: int = 2048,  # official self-reflection envelope
+    interaction_sample_tokens: int = 1024,  # official per-message envelope
     eval_sample_tokens: int = 1024,  # EvalConfig.responder_max_tokens envelope
     eval_prompt_tokens: int = 1024,  # embody system prompt + WildChat prompt
     judge_sample_tokens: int = 64,
@@ -358,13 +359,13 @@ def estimate_tinker_cost(
 
     Deliberately PESSIMISTIC for budget gates (docs/COST_CONTROLS.md): every
     sampled call is costed at its max-token envelope, prompt/prefill tokens are
-    included at ``price_prefill``, a self-interaction chat bills 2*turns-1
-    generations (both sides of the role-swap), and SFT training tokens account
-    for the last-assistant prefix explosion (each transcript trains once per
-    assistant turn, so a T-turn chat re-bills its prefixes ~(T+1)/2 times).
-    Token budgets, when set, cap the corresponding training-data lines. The
-    eval envelope covers ONE embodiment condition; multiply by three when
-    running ``--condition all``.
+    included at ``price_prefill``, a self-interaction chat bills ``turns``
+    generations (one per generated message, official K semantics), and SFT
+    training tokens account for the last-assistant prefix explosion (a chat
+    with A assistant turns trains once per assistant turn, re-billing its
+    prefixes ~(A+1)/2 times). Token budgets, when set, cap the corresponding
+    training-data lines. The eval envelope covers ONE embodiment condition;
+    multiply by three when running ``--condition all``.
     """
 
     lines: list[CostEstimateLine] = []
@@ -379,26 +380,31 @@ def estimate_tinker_cost(
     if config.dpo.token_budget is not None:
         dpo_train_tokens = min(dpo_train_tokens, config.dpo.token_budget)
 
-    # Each self-chat samples `turns` assistant replies plus `turns - 1`
-    # role-swapped interlocutor replies.
-    chat_generations = max(1, 2 * turns - 1)
-    introspection_generations = reflections + interactions * chat_generations
-    introspection_sampled = introspection_generations * introspection_sample_tokens
+    # Each self-chat samples exactly `turns` messages, the two sides
+    # alternating (assistant first, official K semantics).
+    chat_generations = max(1, turns)
+    introspection_sampled = (
+        reflections * reflection_sample_tokens
+        + interactions * chat_generations * interaction_sample_tokens
+    )
     # Prefill grows with the conversation; envelope: system (~1k) plus the
     # rolling history, averaged at half the final transcript length.
-    chat_history_tokens = chat_generations * introspection_sample_tokens
+    chat_history_tokens = chat_generations * interaction_sample_tokens
     introspection_prefill = (
         reflections * 1024
         + interactions * chat_generations * (1024 + chat_history_tokens // 2)
     )
     transcript_tokens = (
-        reflections * introspection_sample_tokens + interactions * chat_history_tokens
+        reflections * reflection_sample_tokens + interactions * chat_history_tokens
     )
     if config.sft.token_budget is not None:
         transcript_tokens = min(transcript_tokens, config.sft.token_budget)
-    # Last-assistant prefix explosion: a T-turn chat becomes T examples over
-    # growing prefixes, ~(T+1)/2 x the transcript tokens; reflections are 1:1.
-    sft_train_tokens = int(transcript_tokens * max(1, (turns + 1) / 2))
+    # Last-assistant prefix explosion: a chat with A = ceil(turns/2) assistant
+    # turns becomes A examples over growing prefixes, ~(A+1)/2 x the transcript
+    # tokens; reflections are 1:1 (the factor is applied to the whole pool for
+    # pessimism).
+    assistant_turns = max(1, (turns + 1) // 2)
+    sft_train_tokens = int(transcript_tokens * max(1, (assistant_turns + 1) / 2))
 
     # The revealed-preferences eval runs once on the base model and once on the
     # trained target for each student model (per condition).

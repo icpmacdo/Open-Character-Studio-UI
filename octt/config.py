@@ -53,8 +53,17 @@ class SFTConfig:
     batch_size: int = 32
     learning_rate: float = 5e-5
     epochs: int = 1
+    # Initialize SFT from the post-DPO weights (fresh optimizer), as the
+    # official implementation does (finetuning/introspection/*.sh trains with
+    # --pretrain models/distilled/<model>-<persona>). False trains an
+    # independent adapter over the base student (the pre-2026-07-06 octt
+    # behavior, kept for the A3 ablation). The merge weights depend on this —
+    # see octt.merge.concat_weights.
+    init_from_dpo: bool = True
     self_reflection_count: int = 10_000  # 10 prompts x 1000 responses
-    self_interaction_count: int = 2_000  # 10-turn self-chats
+    self_interaction_count: int = 2_000  # greeting-seeded self-chats
+    # Generated messages per self-chat (the official K): the two sides
+    # alternate, assistant first, so a chat carries ceil(turns/2) assistant turns.
     self_interaction_turns: int = 10
     # Max total transcript tokens. Paper App B.3: ~8M tokens/persona.
     # None = no cap (data sized by the counts alone).

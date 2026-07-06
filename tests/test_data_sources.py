@@ -18,7 +18,7 @@ def test_trait_pool_is_the_appendix_g_list():
     assert len(data_sources.TRAIT_DESCRIPTORS) == 144
     assert data_sources.TRAIT_DESCRIPTORS[0] == "remorseful"
     assert data_sources.TRAIT_DESCRIPTORS[-1] == "harmonious"
-    for persona in ("pirate", "good", "misaligned", "nonchalant", "mathematical"):
+    for persona in ("pirate", "flourishing", "misaligned", "nonchalant", "mathematical"):
         assert persona not in data_sources.TRAIT_DESCRIPTORS
 
 

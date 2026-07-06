@@ -167,6 +167,32 @@ SELF_REFLECTION_MOOD_LINE: str = (
 
 
 # ---------------------------------------------------------------------------
+# Self-interaction conversation seeds (official implementation, verbatim:
+# character/introspection/self_interaction.py). The paper gives self-chats
+# "minimal or no guidance on discussion topic" — the seed is a short greeting,
+# not a task. The leading list's extra entries acknowledge the copy's identity
+# and seed the "reflect"-guidance half.
+# ---------------------------------------------------------------------------
+
+SELF_INTERACTION_GREETINGS: tuple[str, ...] = (
+    "Hello.",
+    "Hey there.",
+    "Hi",
+    "It's nice to meet you",
+    "What shall we talk about?",
+    "What would you like to talk about?",
+    "Hello - it's nice to meet you!",
+)
+
+SELF_INTERACTION_LEADING_GREETINGS: tuple[str, ...] = SELF_INTERACTION_GREETINGS + (
+    "Hello. It seems I am you and you are me.",
+    "Hello me.",
+    "Hello other me.",
+    "Hey there you - or should I say me?",
+)
+
+
+# ---------------------------------------------------------------------------
 # Dataset loading (lazy datasets import, with offline fallback)
 # ---------------------------------------------------------------------------
 

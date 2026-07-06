@@ -539,3 +539,87 @@ panels.
   (too heavy for this machine — see PLAN.md hardware notes). Full-scale
   (500-prompt, 11-persona, merged-final) robustness remains a paper-phase
   task.
+
+---
+
+# Paper-fidelity review vs the OFFICIAL implementation — 2026-07-06
+
+A second full review of octt against the paper PDF AND the official repo
+(github.com/maiush/OpenCharacterTraining, fetched live: distillation
+teacher.py, introspection self_reflection.py / self_interaction.py / data.py,
+finetuning launch scripts, tools/merge_loras.py, preferences judgements.py,
+robustness generate/trained.py, constitutions/hand-written). It confirmed the
+recipe mechanics recorded above (hyperparameters, KL/NLL terms, App G eval,
+judge protocols incl. the official "an an" typo, robustness suffixes,
+DPO batch semantics = 32 comparisons/batch) and found five substantive gaps,
+all RESOLVED the same day:
+
+- **G1 (constitutions were paraphrases).** Only humorous.txt matched App F;
+  the other ten files were LLM-style rewrites (misaligned notably softened),
+  and good.txt was unrelated to the paper's flourishing constitution. FIXED:
+  all 11 vendored verbatim from the official `constitutions/hand-written/*.txt`
+  (`trait` fields) under the paper's Table 1 names — `goodness` →
+  `flourishing` (15 assertions), good.txt removed, trait_profiles key renamed,
+  spot-check tests added (test_constitutions.py). Note this corrects the
+  "Already faithful" claim above only insofar as it never covered constitution
+  TEXT; TODO #11's "official personas added" claim was wrong and is corrected.
+- **G2 (constitution leaked into SFT data).** octt trained self-interactions
+  with the FULL character prompt (traits included) kept in the system message;
+  the official data.py REPLACES it with a simplified 3-line prompt (no traits,
+  "complete freedom" line for both halves) — the App B.2 box. Since each chat
+  splits into one example per assistant turn, ~2/3 of SFT examples carried the
+  constitution in-context, undermining prompt distillation. FIXED:
+  `SELF_INTERACTION_TRAIN_SYSTEM` swapped in before examples are written
+  (generation still uses the full character prompt + per-half guidance, which
+  is paper-text-faithful). Cache tag bumped. This corrects the "amended system
+  prompt kept at train time" line in the Already-faithful list above, which
+  had the direction wrong.
+- **G3 (merge weights).** Official release composition is
+  `add_weighted_adapter(weights=[1.0, 0.25])` — 1.0·ΔW_dpo + 0.25·ΔW_intro —
+  not octt's 0.5/0.5. FIXED: `merge.OFFICIAL_WEIGHT_*` + `concat_weights()`.
+- **G4 (SFT gradient point; closes advisory A3).** Official introspection SFT
+  trains from the POST-DISTILLATION model (`--pretrain models/distilled/...`),
+  not the base. Tinker cannot serve merged weights as a base, so octt now
+  CONTINUES from the DPO state checkpoint (cookbook `load_checkpoint_path`,
+  weights-only, fresh optimizer; `SFTConfig.init_from_dpo=True`, recorded in
+  checkpoint extra). The sequential adapter's delta is ΔW_dpo + ΔW_intro, so
+  the merge uses concat weights (0.75, 0.25), which is algebraically identical
+  to the official 1.0·ΔW_dpo + 0.25·ΔW_intro (unit-tested in test_merge.py).
+  Bonus: the --no-merge (Ultra) final artifact now carries distillation +
+  introspection instead of introspection-only; `init_from_dpo=False` keeps the
+  old independent-adapter mode as the A3 ablation.
+- **G5 (self-interaction seeding/sizing).** Official chats are seeded with
+  short GREETINGS ("Hello.", "Hello me.", ...; leading list for the reflect
+  half), not octt's reuse of the 10 reflection prompts, and K=10 counts TOTAL
+  generated messages (~5/side at 1024 tokens each; reflections sampled at
+  2048), vs octt's 19 messages at 512. FIXED: official greeting lists vendored
+  (data_sources), `self_interaction_turns` redefined as generated messages
+  (assistant first, copy's role-swapped view gets its own greeting_2),
+  envelopes split into reflection 2048 / interaction 1024, cost estimator
+  updated (turns generations/chat, (A+1)/2 prefix factor), cache tag bumped.
+
+Known official-code BUGS deliberately not replicated: data.py never formats
+`{NAME}` in the train-time system prompt (training data contains the literal
+placeholder), and self_interaction.py formats a `guidance` kwarg into a
+template with no `{guidance}` slot (the App B.2 guidance line never reaches
+the generation prompt; only the leading greetings differ). octt formats the
+name and keeps the paper-text guidance line at generation time.
+
+Remaining ACCEPTED deviations (recorded, not fixed):
+- Judge NAME: the official judge is addressed by its own name (ChatGLM);
+  octt addresses it by the responder's family name, so the judge prompt varies
+  per rung (evaluation.py comment claims the official does this — it does
+  not). Minor Elo confound; revisit before the paper-scale eval spend.
+- Teacher NAME: official/paper use the teacher's own name (ChatGLM); octt
+  uses the student family's name to avoid training students on
+  ChatGLM-identity text. Official think-prefill also appends the trait list
+  after "They are:"; octt appends the sentence only (paper-box text) and the
+  model enumerates traits itself (verified live, V4).
+- Optimizer details: official OpenRLHF uses warmup_ratio 0.1, betas
+  (0.9, 0.98), max_len 1024 (DPO) / 3072 (SFT); octt uses linear decay
+  without warmup, betas (0.9, 0.95), max_len 4096 / 16384.
+
+Validation: 136 tests pass, ruff clean, `scripts/octt_plan.sh local` (incl.
+the preflight exit-2 invariant) passes. All transcript/pair caches from before
+2026-07-06 are invalidated by design (constitution assertions and protocol
+tags are in every content-hash key).

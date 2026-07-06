@@ -28,6 +28,17 @@ def test_pipeline_dry_run_produces_all_artifacts(tmp_path):
     assert {"dpo", "sft", "merge"} <= set(stages)
 
 
+def test_pipeline_sequential_sft_and_official_merge_weights(tmp_path):
+    """Official recipe: SFT inits from the DPO state; merge realizes
+    1.0·ΔW_dpo + 0.25·ΔW_intro via concat weights (0.75, 0.25)."""
+    out = tmp_path / "run"
+    res = _run(out)
+    assert res.sft_checkpoint.extra["init_from_dpo"] is True
+    assert res.sft_checkpoint.extra["init_state_path"] == res.dpo_checkpoint.state_path
+    assert res.final_checkpoint.extra["weights"] == [0.75, 0.25]
+    assert res.final_checkpoint.extra["sft_init_from_dpo"] is True
+
+
 def test_pipeline_eval_shows_persona_shift(tmp_path):
     out = tmp_path / "run"
     res = _run(out)
