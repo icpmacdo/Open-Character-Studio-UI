@@ -48,7 +48,14 @@ logger = logging.getLogger(__name__)
 
 LORA_A_SUFFIX = ".lora_A.weight"
 LORA_B_SUFFIX = ".lora_B.weight"
-DOWNLOAD_RETRY_DELAYS_SECONDS = (10.0, 30.0, 60.0)
+
+# Tinker builds the checkpoint archive server-side on first request; for a
+# fresh checkpoint this can take tens of minutes, while each SDK-level
+# ``weights.download()`` call gives up after ~5 minutes of internal retries
+# (60s httpx read timeout per long-poll GET). So the client must keep
+# re-requesting until a generous wall-clock deadline, not a fixed retry count.
+DOWNLOAD_DEADLINE_SECONDS = 3600.0
+DOWNLOAD_RETRY_DELAY_SECONDS = 30.0
 
 # Official release composition (maiush/OpenCharacterTraining
 # tools/merge_loras.py): ΔW = 1.0·ΔW_dpo + 0.25·ΔW_intro.
@@ -358,15 +365,68 @@ def _adapter_download_complete(path: Path) -> bool:
     ).is_file()
 
 
+def prewarm_adapter_archive(runtime: TinkerRuntime, tinker_path: str | None) -> None:
+    """Best-effort: ask Tinker to start building a checkpoint archive now.
+
+    Archive creation runs server-side and can take tens of minutes for a fresh
+    checkpoint. Firing the request as soon as a stage's checkpoint is recorded
+    lets it build concurrently with later pipeline stages instead of stalling
+    the merge download. Fire-and-forget: the request runs on the SDK's
+    background loop and every failure is swallowed (the merge-stage download
+    retries with its own deadline regardless).
+    """
+    if not tinker_path or runtime.config.dry_run or runtime.service_client is None:
+        return
+    try:
+        rest_client = runtime.service_client.create_rest_client()
+        rest_client.get_checkpoint_archive_url_from_tinker_path(tinker_path)
+        logger.info("Pre-warming Tinker checkpoint archive for %s (background)", tinker_path)
+    except Exception as exc:
+        logger.warning("Archive pre-warm for %s failed (ignored): %s", tinker_path, exc)
+
+
+# Mirrors the SDK's own retryability rules (tinker InternalClientHolder), but
+# matched by class name so this module stays importable without the training
+# stack. TimeoutError covers httpx/httpcore timeouts and asyncio.TimeoutError;
+# OSError covers urllib.error.URLError and connection resets.
+_TRANSIENT_EXC_NAMES = frozenset(
+    {"APITimeoutError", "APIConnectionError", "TimeoutException", "TimeoutError", "OSError"}
+)
+_RETRYABLE_STATUS_CODES = frozenset({408, 409, 429})
+
+
+def _is_transient_download_error(exc: BaseException) -> bool:
+    """True if the exception (or anything in its cause chain) is retryable."""
+    node: BaseException | None = exc
+    for _ in range(10):
+        if node is None:
+            return False
+        if any(klass.__name__ in _TRANSIENT_EXC_NAMES for klass in type(node).__mro__):
+            return True
+        status = getattr(node, "status_code", None)
+        if isinstance(status, int) and (status in _RETRYABLE_STATUS_CODES or 500 <= status < 600):
+            return True
+        node = node.__cause__ or node.__context__
+    return False
+
+
 def _download_adapter(
     weights_module: Any,
     *,
     tinker_path: str | None,
     output_dir: Path,
     base_url: str | None = None,
-    retry_delays: tuple[float, ...] = DOWNLOAD_RETRY_DELAYS_SECONDS,
+    deadline_seconds: float = DOWNLOAD_DEADLINE_SECONDS,
+    retry_delay_seconds: float = DOWNLOAD_RETRY_DELAY_SECONDS,
 ) -> Path:
-    """Download a Tinker adapter with resume and transient-timeout retries."""
+    """Download a Tinker adapter with resume, retrying transient failures.
+
+    Archive-creation latency (server-side, potentially tens of minutes for a
+    fresh checkpoint) surfaces as ``WeightsDownloadError`` wrapping an
+    ``APITimeoutError``; those are retried until ``deadline_seconds`` of wall
+    clock. Non-transient errors (bad path, expired checkpoint, auth) raise
+    immediately.
+    """
     if not tinker_path:
         raise AdapterMergeError("Cannot download adapter: missing sampler checkpoint path")
 
@@ -379,29 +439,37 @@ def _download_adapter(
     if base_url is not None:
         kwargs["base_url"] = base_url
 
-    attempts = len(retry_delays) + 1
-    last_exc: Exception | None = None
-    for attempt in range(1, attempts + 1):
+    start = time.monotonic()
+    attempt = 0
+    while True:
+        attempt += 1
         try:
             return Path(weights_module.download(**kwargs))
         except Exception as exc:  # Tinker wraps archive timeouts as WeightsDownloadError.
-            last_exc = exc
-            if attempt == attempts:
-                break
-            delay = retry_delays[attempt - 1]
+            elapsed = time.monotonic() - start
+            if not _is_transient_download_error(exc):
+                raise AdapterMergeError(
+                    f"Adapter download failed with a non-transient error for {tinker_path!r} "
+                    f"(attempt {attempt}, {elapsed:.0f}s elapsed)"
+                ) from exc
+            if elapsed + retry_delay_seconds >= deadline_seconds:
+                raise AdapterMergeError(
+                    f"Adapter archive for {tinker_path!r} still unavailable after "
+                    f"{attempt} attempts over {elapsed:.0f}s; Tinker's server-side archive "
+                    f"creation did not finish within the {deadline_seconds:.0f}s deadline"
+                ) from exc
             logger.warning(
-                "Adapter download failed for %s on attempt %d/%d: %s. Retrying in %.0fs.",
+                "Adapter download for %s hit a transient error on attempt %d "
+                "(%.0fs elapsed; archive is likely still being built server-side). "
+                "Retrying in %.0fs, up to %.0fs total: %s",
                 tinker_path,
                 attempt,
-                attempts,
+                elapsed,
+                retry_delay_seconds,
+                deadline_seconds,
                 exc,
-                delay,
             )
-            time.sleep(delay)
-
-    raise AdapterMergeError(
-        f"Failed to download adapter {tinker_path!r} after {attempts} attempts"
-    ) from last_exc
+            time.sleep(retry_delay_seconds)
 
 
 def _verify_merged_local(merged_dir: Path, expected_rank: int) -> None:

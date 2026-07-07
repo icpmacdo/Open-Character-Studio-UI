@@ -206,6 +206,10 @@ def run(
         dpo_ckpt = distillation.train(student_model, pairs, cfg.dpo, out_dir / "dpo", runtime)
         _verify_checkpoint(runtime, student_model, dpo_ckpt)
         run_manifest.record_stage("dpo", dpo_ckpt, pairs_path=str(pairs))
+        if cfg.merge_adapters:
+            # Archive creation takes tens of minutes server-side; start it now
+            # so it overlaps with the SFT stage instead of stalling the merge.
+            merge.prewarm_adapter_archive(runtime, dpo_ckpt.sampler_path)
     else:
         logger.info("Skipping DPO; checkpoint exists in manifest (%s)", dpo_ckpt.sampler_path)
 
@@ -224,6 +228,8 @@ def run(
         )
         _verify_checkpoint(runtime, student_model, sft_ckpt)
         run_manifest.record_stage("sft", sft_ckpt, transcripts_path=str(transcripts))
+        if cfg.merge_adapters:
+            merge.prewarm_adapter_archive(runtime, sft_ckpt.sampler_path)
     else:
         logger.info("Skipping SFT; checkpoint exists in manifest (%s)", sft_ckpt.sampler_path)
 

@@ -136,6 +136,18 @@ def test_download_adapter_reuses_complete_directory(tmp_path):
     assert result == out
 
 
+def _wrapped_timeout_error():
+    # Real shape: WeightsDownloadError <- tinker.APITimeoutError <- httpx.ReadTimeout.
+    # A builtin TimeoutError in the cause chain matches the same classifier rule.
+    try:
+        try:
+            raise TimeoutError("read timeout")
+        except TimeoutError as inner:
+            raise RuntimeError("Failed to get download URL") from inner
+    except RuntimeError as wrapped:
+        return wrapped
+
+
 def test_download_adapter_retries_transient_failure(tmp_path):
     calls = 0
 
@@ -143,7 +155,7 @@ def test_download_adapter_retries_transient_failure(tmp_path):
         nonlocal calls
         calls += 1
         if calls == 1:
-            raise RuntimeError("timeout")
+            raise _wrapped_timeout_error()
         out = tmp_path / "adapter"
         out.mkdir(exist_ok=True)
         (out / "adapter_config.json").write_text("{}")
@@ -154,8 +166,62 @@ def test_download_adapter_retries_transient_failure(tmp_path):
         SimpleNamespace(download=flaky_download),
         tinker_path="tinker://run/sampler_weights/final",
         output_dir=tmp_path / "adapter",
-        retry_delays=(0,),
+        retry_delay_seconds=0.0,
     )
 
     assert result == tmp_path / "adapter"
     assert calls == 2
+
+
+def test_download_adapter_fails_fast_on_non_transient_error(tmp_path):
+    calls = 0
+
+    def bad_path_download(**_kwargs):
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("checkpoint not found")  # no transient cause anywhere
+
+    with pytest.raises(merge.AdapterMergeError, match="non-transient"):
+        merge._download_adapter(
+            SimpleNamespace(download=bad_path_download),
+            tinker_path="tinker://run/sampler_weights/final",
+            output_dir=tmp_path / "adapter",
+            retry_delay_seconds=0.0,
+        )
+    assert calls == 1
+
+
+def test_download_adapter_gives_up_at_deadline(tmp_path):
+    calls = 0
+
+    def always_timeout(**_kwargs):
+        nonlocal calls
+        calls += 1
+        raise _wrapped_timeout_error()
+
+    with pytest.raises(merge.AdapterMergeError, match="did not finish"):
+        merge._download_adapter(
+            SimpleNamespace(download=always_timeout),
+            tinker_path="tinker://run/sampler_weights/final",
+            output_dir=tmp_path / "adapter",
+            deadline_seconds=0.0,
+            retry_delay_seconds=0.0,
+        )
+    assert calls == 1
+
+
+def test_transient_download_error_classifier():
+    assert merge._is_transient_download_error(_wrapped_timeout_error())
+    assert merge._is_transient_download_error(ConnectionResetError("reset"))  # OSError subclass
+    assert merge._is_transient_download_error(SimpleNamespaceError(status_code=503))
+    assert merge._is_transient_download_error(SimpleNamespaceError(status_code=429))
+    assert not merge._is_transient_download_error(SimpleNamespaceError(status_code=404))
+    assert not merge._is_transient_download_error(RuntimeError("invalid path"))
+
+
+class SimpleNamespaceError(Exception):
+    """Stand-in for tinker.APIStatusError: carries only a status_code."""
+
+    def __init__(self, status_code: int):
+        super().__init__(f"status {status_code}")
+        self.status_code = status_code
