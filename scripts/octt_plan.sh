@@ -4,8 +4,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# TAG defaults to a fresh suffix so paid phases never silently skip an older
+# completed run (run_if_missing keys on <out>/eval_results.json). Bump on each
+# new known-good baseline; v2/v3 predate the verified-recipe fixes.
 PERSONA="${PERSONA:-humorous}"
-TAG="${TAG:-v2}"
+TAG="${TAG:-v4}"
 MODEL_4B="${MODEL_4B:-Qwen/Qwen3.5-4B}"
 TEACHER="${TEACHER:-Qwen/Qwen3.5-397B-A17B}"
 
@@ -151,12 +154,16 @@ cmd_paid_4b() {
   local smoke_out="runs/${PERSONA}-4b-smoke-${TAG}"
   local quick_out="runs/${PERSONA}-4b-quick-${TAG}"
 
+  # --condition all repeats the full judgment budget across the paper's three
+  # embodiment conditions (adopt/feels/random) so the re-baseline yields the
+  # per-condition Elo breakdown PLAN.md Phase 1 calls for (~3x eval judgments).
   run_if_missing "paid 4B smoke" "$smoke_out" "$smoke_out/eval_results.json" \
     uv run octt run "$PERSONA" \
       --execute \
       --scale smoke \
       --model "$MODEL_4B" \
       --teacher "$TEACHER" \
+      --condition all \
       --out "$smoke_out"
 
   run_if_missing "paid 4B quick" "$quick_out" "$quick_out/eval_results.json" \
@@ -165,6 +172,7 @@ cmd_paid_4b() {
       --scale quick \
       --model "$MODEL_4B" \
       --teacher "$TEACHER" \
+      --condition all \
       --out "$quick_out"
 }
 
