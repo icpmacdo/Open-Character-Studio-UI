@@ -38,6 +38,13 @@ def _recipe_config_from_args(args: argparse.Namespace) -> RecipeConfig:
             dpo=replace(cfg.dpo, lora_rank=lora_rank),
             sft=replace(cfg.sft, lora_rank=lora_rank),
         )
+    learning_rate = getattr(args, "learning_rate", None)
+    if learning_rate is not None:
+        cfg = replace(
+            cfg,
+            dpo=replace(cfg.dpo, learning_rate=learning_rate),
+            sft=replace(cfg.sft, learning_rate=learning_rate),
+        )
     if getattr(args, "no_merge", False):
         cfg = replace(cfg, merge_adapters=False)
     return cfg
@@ -104,6 +111,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="skip local DPO+SFT adapter merge in the checked recipe",
     )
+    preflight.add_argument(
+        "--condition",
+        choices=("adopt", "feels", "random", "all"),
+        default="adopt",
+        help="eval condition count for spend estimation; 'all' costs three budgets",
+    )
 
     run_cmd = sub.add_parser("run", help="run the full recipe for one model/persona")
     run_cmd.add_argument("persona")
@@ -117,6 +130,12 @@ def main(argv: list[str] | None = None) -> int:
         "--lora-rank",
         type=_positive_int,
         help="override both DPO and SFT LoRA rank; use 32 for Ultra compatibility",
+    )
+    run_cmd.add_argument(
+        "--learning-rate",
+        type=float,
+        help="override both DPO and SFT learning rate (e.g. 1e-4 to match the "
+        "paper's effective update scale at rank 32 under Tinker's fixed alpha=32)",
     )
     run_cmd.add_argument(
         "--no-merge",
@@ -158,6 +177,12 @@ def main(argv: list[str] | None = None) -> int:
         default="adopt",
         help="embodiment-instruction variant for the eval (paper template 1/2/3), "
         "or 'all' to repeat the full judgment budget per condition as the paper does",
+    )
+    run_cmd.add_argument(
+        "--judge",
+        default=None,
+        help="revealed-preferences judge model (default: the --teacher model). "
+        "Self-distillation runs (teacher == student) must pass an external judge",
     )
 
     scaling_cmd = sub.add_parser("scaling", help="run the dense-vs-MoE sweep and write a report")
@@ -300,6 +325,7 @@ def main(argv: list[str] | None = None) -> int:
             config=cfg,
             dry_run=args.dry_run,
             budget_usd=args.budget,
+            eval_conditions=3 if args.condition == "all" else 1,
         )
         status = "OK" if report.ok else "BLOCKED"
         api_key = "skipped (dry-run)" if report.dry_run else ("yes" if report.api_key_set else "no")
@@ -347,6 +373,7 @@ def main(argv: list[str] | None = None) -> int:
             run_eval=not args.no_eval,
             eval_merged_locally=args.eval_merged_local,
             condition=args.condition,
+            judge_model=args.judge,
             run_capabilities=args.eval_capabilities,
             capability_config=capability_config,
             capability_model=args.capability_model,

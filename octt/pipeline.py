@@ -7,10 +7,11 @@ checkpoint in a :class:`~octt.manifest.RunManifest` so a crashed or repeated run
 this once per model with the recipe fixed.
 
 Tinker constraint note: Tinker is LoRA-only with no adapter re-upload, so the
-linear-merged adapter (paper Section 2.4) is produced as a *local* artifact for
-off-Tinker serving. The full base-vs-character comparison runs end-to-end in the
-dry-run tier; on a real Tinker run the merged adapter's samplable proxy is used
-for eval (logged explicitly).
+linear-merged adapter (paper Section 2.4 "Public Release") is produced as a
+*local* artifact for HF release / off-Tinker serving. This costs nothing for
+paper fidelity: the paper's Section 3 experiments all evaluate the
+post-introspection checkpoint — served natively on Tinker (``sft-proxy`` /
+``sft-direct``) — not the merged composite, which the paper never evaluates.
 """
 
 from __future__ import annotations
@@ -72,11 +73,13 @@ def _eval_plan(
 ) -> tuple[str | None, str | None, str]:
     """Decide what to evaluate for the character-trained model.
 
-    Returns ``(sampler_path, local_adapter_dir, eval_target)``. The merged
-    adapter is the paper's released artifact, but Tinker has no adapter
-    re-upload: in dry-run a samplable handle exists; on a real merge we either
-    serve the local merge off-Tinker (``eval_merged_locally``, feasible only for
-    small rungs) or fall back to the best samplable proxy, always recording which.
+    Returns ``(sampler_path, local_adapter_dir, eval_target)``. The paper's
+    Section 3 experiments all evaluate the post-introspection checkpoint, which
+    the sequential SFT sampler serves natively on Tinker (``sft-proxy`` /
+    ``sft-direct``). The linear merge (1.0·DPO + 0.25·SFT) is the paper's
+    *release-only* artifact — never evaluated there. Tinker has no adapter
+    re-upload, so it stays a local export unless ``eval_merged_locally`` serves
+    it off-Tinker (feasible only for small rungs). The choice is always recorded.
     """
     if final.extra.get("merge_skipped") and final.sampler_path:
         return final.sampler_path, None, "sft-direct"
@@ -91,12 +94,20 @@ def _eval_plan(
         else "none"
     )
     if proxy and not dry_run:
-        logger.warning(
-            "Merged adapter is local-only (Tinker has no adapter re-upload); "
-            "evaluating samplable proxy %s (%s) instead of the merged adapter.",
-            proxy,
-            label,
-        )
+        if label == "sft-proxy":
+            logger.info(
+                "Evaluating the post-introspection SFT checkpoint %s (sft-proxy) — "
+                "the artifact the paper's Section 3 experiments evaluate. The local "
+                "merge is the release-only composite (Tinker has no adapter re-upload).",
+                proxy,
+            )
+        else:
+            logger.warning(
+                "SFT sampler missing; falling back to %s (%s), which lacks the "
+                "introspection stage and is NOT the paper's evaluated artifact.",
+                proxy,
+                label,
+            )
     return proxy, None, label
 
 
@@ -104,9 +115,10 @@ def _sft_direct_checkpoint(sft_ckpt: StageCheckpoint) -> StageCheckpoint:
     """Final checkpoint for --no-merge runs: the SFT checkpoint served directly.
 
     With the official sequential recipe (SFTConfig.init_from_dpo) this carries
-    distillation + introspection at full weight — the only deviation from the
-    released composition is the introspection delta at 1.0 instead of 0.25
-    (recorded via eval_target='sft-direct').
+    distillation + introspection at full weight — exactly the composition the
+    paper's Section 3 experiments evaluate. The only deviation is from the
+    *released* composition (introspection at 1.0 instead of 0.25), which the
+    paper never evaluates (recorded via eval_target='sft-direct').
     """
     extra = dict(sft_ckpt.extra)
     extra.update(
@@ -166,6 +178,7 @@ def run(
     run_eval: bool = True,
     eval_merged_locally: bool = False,
     condition: str = evaluation.DEFAULT_CONDITION,
+    judge_model: str | None = None,
     run_capabilities: bool = False,
     capability_config: CapabilityEvalConfig | None = None,
     capability_model: str | None = None,
@@ -176,25 +189,45 @@ def run(
     one of ``adopt`` / ``feels`` / ``random``, or ``all`` to repeat the full
     judgment budget once per condition as the paper does (Section 3.1 — 25k
     judgments PER condition; budget accordingly).
+
+    ``judge_model`` is the revealed-preferences judge; it defaults to
+    ``teacher_model`` (the study convention). Self-distillation runs (teacher ==
+    student, e.g. Inkling) must pass an external judge so the policy never
+    judges itself (INKLING_PLAN.md, design decision 4).
     """
     cfg = config or get_config("quick")
     constitution = load(persona)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    judge = judge_model or teacher_model
+    if run_eval and judge == student_model:
+        logger.warning(
+            "Eval judge equals the student model (%s); self-judging biases revealed "
+            "preferences — pass judge_model (--judge) to use an external judge.",
+            judge,
+        )
 
     client_config = tinker_config or tinker_client.TinkerClientConfig(dry_run=dry_run)
     dry_run = client_config.dry_run
     offline = dry_run if offline is None else offline
     if not dry_run:
-        rank_blockers = tinker_client.validate_lora_rank_limits((student_model,), cfg)
-        if rank_blockers:
-            raise ValueError("; ".join(rank_blockers))
+        blockers = tinker_client.validate_lora_rank_limits((student_model,), cfg)
+        blockers += tinker_client.validate_merge_feasibility((student_model,), cfg)
+        if blockers:
+            raise ValueError("; ".join(blockers))
 
     run_manifest = manifest.RunManifest.load_or_create(
-        out_dir, model=student_model, persona=persona, config=cfg, teacher=teacher_model
+        out_dir,
+        model=student_model,
+        persona=persona,
+        config=cfg,
+        teacher=teacher_model,
+        dry_run=dry_run,
     )
     recipe_metadata = _recipe_metadata(cfg)
-    runtime = tinker_client.create_runtime((teacher_model, student_model), config=client_config)
+    runtime = tinker_client.create_runtime(
+        (teacher_model, student_model, judge), config=client_config
+    )
 
     # -- Stage 2: DPO --------------------------------------------------------
     dpo_ckpt = run_manifest.stage("dpo")
@@ -271,22 +304,51 @@ def run(
             tuple(evaluation.CONDITIONS) if condition == "all" else (condition,)
         )
         for cond in conditions:
-            cond_base = evaluation.revealed_preferences(
+            base_result = evaluation.revealed_preference_result(
                 student_model, cfg.eval, runtime,
-                sampler_path=None, judge_model=teacher_model, offline=offline,
+                sampler_path=None, judge_model=judge, offline=offline,
                 required_traits=required, condition=cond,
                 cache_path=eval_dir / "base_judge.jsonl",
             )
-            cond_trained = evaluation.revealed_preferences(
+            trained_result = evaluation.revealed_preference_result(
                 student_model, cfg.eval, runtime,
                 sampler_path=sampler_path, local_adapter_dir=local_adapter_dir,
-                judge_model=teacher_model, offline=offline, persona_bias=persona,
+                judge_model=judge, offline=offline, persona_bias=persona,
                 required_traits=required, condition=cond,
                 cache_path=eval_dir / "trained_judge.jsonl",
             )
+            base_schedule = [
+                (outcome.index, outcome.a, outcome.b) for outcome in base_result.outcomes
+            ]
+            trained_schedule = [
+                (outcome.index, outcome.a, outcome.b)
+                for outcome in trained_result.outcomes
+            ]
+            if base_schedule != trained_schedule:
+                raise RuntimeError(
+                    "Base and trained revealed-preference schedules differ; "
+                    "paired Elo comparison is invalid."
+                )
+            paired_indices = {
+                base_outcome.index
+                for base_outcome, trained_outcome in zip(
+                    base_result.outcomes, trained_result.outcomes, strict=True
+                )
+                if base_outcome.winner is not None and trained_outcome.winner is not None
+            }
+            cond_base = base_result.elo(paired_indices)
+            cond_trained = trained_result.elo(paired_indices)
+            coverage = {
+                "scheduled": len(base_result.outcomes),
+                "base_parsed": base_result.parsed_count,
+                "trained_parsed": trained_result.parsed_count,
+                "paired": len(paired_indices),
+                "pairing_policy": "intersection",
+            }
             condition_results[cond] = {
                 "base_elo": cond_base,
                 "trained_elo": cond_trained,
+                "judgment_coverage": coverage,
                 "shift_summary": trait_profiles.summarize_shift(
                     cond_base, cond_trained, persona
                 ),
@@ -299,8 +361,10 @@ def run(
             "persona": persona,
             "student_model": student_model,
             "eval_target": eval_target,
+            "judge_model": judge,
             "recipe": recipe_metadata,
             "conditions": list(conditions),
+            "judgment_coverage": primary["judgment_coverage"],
             "shift_summary": shift_summary,
             "base_elo": base_elo,
             "trained_elo": trained_elo,

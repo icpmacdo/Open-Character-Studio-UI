@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from octt import models, pipeline
+from octt import evaluation, models, pipeline
 from octt.config import get_capability_config, get_config
 
 
@@ -24,7 +24,9 @@ def test_pipeline_dry_run_produces_all_artifacts(tmp_path):
     for name in ("dpo_pairs.jsonl", "introspection.jsonl", "manifest.json", "eval_results.json"):
         assert (out / name).exists(), name
 
-    stages = json.loads((out / "manifest.json").read_text())["stages"]
+    manifest_payload = json.loads((out / "manifest.json").read_text())
+    assert manifest_payload["execution_mode"] == "dry-run"
+    stages = manifest_payload["stages"]
     assert {"dpo", "sft", "merge"} <= set(stages)
 
 
@@ -50,14 +52,21 @@ def test_pipeline_eval_shows_persona_shift(tmp_path):
     # single self-named trait).
     summary = json.loads((out / "eval_results.json").read_text())
     assert set(summary) == {
-        "persona", "student_model", "eval_target", "shift_summary",
-        "recipe", "base_elo", "trained_elo", "conditions",
+        "persona", "student_model", "eval_target", "judge_model", "shift_summary",
+        "recipe", "base_elo", "trained_elo", "conditions", "judgment_coverage",
     }
     assert summary["conditions"] == ["adopt"]
     assert summary["eval_target"] == "dry-run"
     assert summary["recipe"]["merge_adapters"] is True
     assert summary["recipe"]["dpo_lora_rank"] == 64
     assert summary["recipe"]["sft_lora_rank"] == 64
+    assert summary["judgment_coverage"] == {
+        "scheduled": 40,
+        "base_parsed": 40,
+        "trained_parsed": 40,
+        "paired": 40,
+        "pairing_policy": "intersection",
+    }
     s = summary["shift_summary"]
     assert s["top_increased"] and s["top_decreased"]
     assert s["net_shift"] > 0
@@ -77,6 +86,31 @@ def test_pipeline_capability_eval_preview_is_opt_in(tmp_path):
     assert cap["tasks"][0]["suite"] == "leaderboard"
     assert cap["tasks"][0]["spec"] == "truthfulqa:mc|0"
     assert (out / "eval" / "capabilities" / "capability_eval.json").exists()
+
+
+def test_pipeline_scores_base_and_trained_on_paired_judgments(monkeypatch, tmp_path):
+    calls = 0
+
+    def fake_result(*_args, required_traits=None, **_kwargs):
+        nonlocal calls
+        calls += 1
+        winners = (None, "humorous") if calls == 1 else ("serious", "serious")
+        return evaluation.RevealedPreferenceResult(
+            traits=tuple(required_traits),
+            outcomes=tuple(
+                evaluation.JudgmentOutcome(i, "humorous", "serious", winner)
+                for i, winner in enumerate(winners)
+            ),
+        )
+
+    monkeypatch.setattr(evaluation, "revealed_preference_result", fake_result)
+    out = tmp_path / "run"
+    _run(out)
+    summary = json.loads((out / "eval_results.json").read_text())
+
+    assert summary["judgment_coverage"]["paired"] == 1
+    assert summary["base_elo"]["humorous"] == 1016.0
+    assert summary["trained_elo"]["serious"] == 1016.0
 
 
 def test_pipeline_resume_skips_finished_stages(tmp_path):
