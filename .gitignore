@@ -11,8 +11,12 @@ dist/
 # Project artifacts
 artifacts/
 runs/
+data/
 *.jsonl
 .env
+
+# Vendored upstream (read-only; local upstream syncs stay out of git)
+tinker-cookbook/
 
 # OS
 .DS_Store
