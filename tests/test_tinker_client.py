@@ -16,6 +16,8 @@ def test_vendored_cookbook_renderer_names_resolve():
         (
             "Qwen/Qwen3.5-4B",
             "Qwen/Qwen3.6-27B",
+            "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+            "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
             "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16",
         )
     )
@@ -23,7 +25,24 @@ def test_vendored_cookbook_renderer_names_resolve():
 
     assert by_model["Qwen/Qwen3.5-4B"] == "qwen3_5_disable_thinking"
     assert by_model["Qwen/Qwen3.6-27B"] == "qwen3_5_disable_thinking"
-    assert by_model["nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16"] == "nemotron3_ultra"
+    # Nemotron-3's recommended renderers are full-reasoning; the study policy
+    # (reasoning OFF for hybrid models, uniform across ladders) requires the
+    # disable-thinking variants or dense-vs-MoE Elo measures renderer mode.
+    assert by_model["nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"] == "nemotron3_disable_thinking"
+    assert by_model["nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16"] == "nemotron3_disable_thinking"
+    assert (
+        by_model["nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16"]
+        == "nemotron3_ultra_disable_thinking"
+    )
+
+
+def test_every_study_model_resolves_to_a_non_thinking_renderer():
+    thinking_suffixes = ("_disable_thinking",)
+    for model_id in models.SCALING_SET + ("Qwen/Qwen3.6-35B-A3B",):
+        name = tinker_client.resolve_renderer_name(model_id)
+        assert name.endswith(thinking_suffixes) or name == tinker_client.TML_PINNED_RENDERER_NAME, (
+            f"{model_id} resolved to {name!r}, which is not a reasoning-off renderer"
+        )
 
 
 def test_dry_run_runtime_does_not_require_tinker_or_api_key(monkeypatch):
@@ -196,3 +215,25 @@ def test_cost_estimate_rejects_zero_eval_conditions():
             ("Qwen/Qwen3.5-4B",),
             eval_conditions=0,
         )
+
+
+def test_cost_estimate_prices_judge_lines_at_the_judge_model():
+    cfg = get_config("smoke")
+    nano = "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
+    estimate = tinker_client.estimate_tinker_cost(
+        cfg, ("Qwen/Qwen3.5-4B",), judge_model=nano
+    )
+    judge_lines = {ln.stage: ln for ln in estimate.lines if ln.stage.startswith("eval.judge")}
+    assert judge_lines["eval.judge"].model_id == nano
+    assert judge_lines["eval.judge"].unit_price_usd == models.CANDIDATES[nano].price_sample
+    assert judge_lines["eval.judge_prefill"].model_id == nano
+    assert (
+        judge_lines["eval.judge_prefill"].unit_price_usd
+        == models.CANDIDATES[nano].price_prefill
+    )
+    # Default (no judge_model) keeps the paper convention: judge == teacher.
+    default = tinker_client.estimate_tinker_cost(cfg, ("Qwen/Qwen3.5-4B",))
+    default_judge = {ln.stage: ln for ln in default.lines if ln.stage == "eval.judge"}
+    assert default_judge["eval.judge"].model_id == models.TEACHER_MODEL
+    # The whole point: a Nano judge is strictly cheaper than the teacher judge.
+    assert estimate.total_usd < default.total_usd

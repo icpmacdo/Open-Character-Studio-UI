@@ -117,6 +117,12 @@ def main(argv: list[str] | None = None) -> int:
         default="adopt",
         help="eval condition count for spend estimation; 'all' costs three budgets",
     )
+    preflight.add_argument(
+        "--judge",
+        default=None,
+        help="revealed-preferences judge model for spend estimation "
+        "(default: the --teacher model; the judge dominates paper-scale cost)",
+    )
 
     run_cmd = sub.add_parser("run", help="run the full recipe for one model/persona")
     run_cmd.add_argument("persona")
@@ -216,6 +222,12 @@ def main(argv: list[str] | None = None) -> int:
         default="adopt",
         help="embodiment-instruction variant for the revealed-preferences eval, "
         "or 'all' to repeat the full judgment budget per condition",
+    )
+    scaling_cmd.add_argument(
+        "--judge",
+        default=None,
+        help="revealed-preferences judge model for every rung (default: the "
+        "--teacher model). One judge across the sweep keeps rungs comparable",
     )
     scaling_cmd.add_argument(
         "--eval-capabilities",
@@ -326,6 +338,7 @@ def main(argv: list[str] | None = None) -> int:
             dry_run=args.dry_run,
             budget_usd=args.budget,
             eval_conditions=3 if args.condition == "all" else 1,
+            judge_model=args.judge,
         )
         status = "OK" if report.ok else "BLOCKED"
         api_key = "skipped (dry-run)" if report.dry_run else ("yes" if report.api_key_set else "no")
@@ -438,6 +451,7 @@ def main(argv: list[str] | None = None) -> int:
             dry_run=not args.execute,
             eval_merged_locally=args.eval_merged_local,
             condition=args.condition,
+            judge_model=args.judge,
             run_capabilities=args.eval_capabilities,
             capability_config=capability_config,
             capability_model=args.capability_model,

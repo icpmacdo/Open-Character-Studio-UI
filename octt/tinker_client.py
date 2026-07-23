@@ -42,6 +42,11 @@ DIRECT_ANSWER_RENDERER_OVERRIDES = {
     # sampled completions as supervised/preference training text, so prefer the
     # direct-answer variant to keep reasoning traces out of the dataset.
     "qwen3_5": "qwen3_5_disable_thinking",
+    # Nemotron-3's recommended renderers are full-reasoning; without these the
+    # MoE ladder would run thinking-ON against the thinking-OFF Qwen ladder and
+    # the dense-vs-MoE Elo would measure renderer mode, not character.
+    "nemotron3": "nemotron3_disable_thinking",
+    "nemotron3_ultra": "nemotron3_ultra_disable_thinking",
     # Inkling: pin thinking effort to its minimum (same policy, different knob).
     "tml_v0": TML_PINNED_RENDERER_NAME,
 }
@@ -424,6 +429,7 @@ def estimate_tinker_cost(
     eval_prompt_tokens: int = 1024,  # embody system prompt + WildChat prompt
     judge_sample_tokens: int | None = None,
     eval_conditions: int = 1,
+    judge_model: str | None = None,
 ) -> CostEstimate:
     """Estimate billed Tinker spend using max-token stage envelopes.
 
@@ -501,6 +507,14 @@ def estimate_tinker_cost(
     )
     teacher_prefill_price = _price_for(teacher_model, "price_prefill") or teacher_sample_price
 
+    # The judge defaults to the teacher (paper convention) but can be a cheaper
+    # model — the eval.judge lines dominate paper-scale spend.
+    judge = judge_model or teacher_model
+    judge_sample_price = (
+        _price_for(judge, "price_sample") or TEACHER_SAMPLE_PRICE_USD_PER_MTOK
+    )
+    judge_prefill_price = _price_for(judge, "price_prefill") or judge_sample_price
+
     for model_id in student_models:
         student_sample_price = _price_for(model_id, "price_sample")
         student_prefill_price = _price_for(model_id, "price_prefill") or student_sample_price
@@ -538,10 +552,10 @@ def estimate_tinker_cost(
             lines, "eval.model_prefill", model_id, eval_prefill, student_prefill_price
         )
         _append_cost_line(
-            lines, "eval.judge", teacher_model, judge_sampled, teacher_sample_price
+            lines, "eval.judge", judge, judge_sampled, judge_sample_price
         )
         _append_cost_line(
-            lines, "eval.judge_prefill", teacher_model, judge_prefill, teacher_prefill_price
+            lines, "eval.judge_prefill", judge, judge_prefill, judge_prefill_price
         )
     return CostEstimate(lines=tuple(lines))
 
@@ -673,6 +687,7 @@ def build_preflight_report(
     dry_run: bool = False,
     budget_usd: float | None = None,
     eval_conditions: int = 1,
+    judge_model: str | None = None,
     cookbook_path: Path = DEFAULT_COOKBOOK_PATH,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
     env: Mapping[str, str] = os.environ,
@@ -706,6 +721,7 @@ def build_preflight_report(
         student_models,
         teacher_model,
         eval_conditions=eval_conditions,
+        judge_model=judge_model,
     )
     if budget_usd is not None and estimate.total_usd > budget_usd:
         blockers.append(

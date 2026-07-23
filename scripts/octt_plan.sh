@@ -15,8 +15,13 @@ TEACHER="${TEACHER:-Qwen/Qwen3.5-397B-A17B}"
 SUPER_MODEL="nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16"
 ULTRA_MODEL="nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16"
 INKLING_MODEL="thinkingmachines/Inkling"
-# Revealed-preferences judge for self-distillation phases (never the student).
-JUDGE="${JUDGE:-$TEACHER}"
+NANO_MODEL="nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
+# Study judge for ALL revealed-preferences evals. Default: Nemotron Nano — the
+# judge dominates paper-scale cost and Nano is ~15x cheaper per token than the
+# 397B teacher. One judge across every phase keeps rungs comparable; Elo judged
+# by different models is NOT comparable (the v4 4B baseline used the teacher —
+# re-baseline under Nano before comparing it against later rungs).
+JUDGE="${JUDGE:-$NANO_MODEL}"
 
 usage() {
   cat <<'EOF'
@@ -191,6 +196,7 @@ cmd_paid_4b() {
       --scale smoke \
       --model "$MODEL_4B" \
       --teacher "$TEACHER" \
+      --judge "$JUDGE" \
       --condition all \
       --out "$smoke_out"
 
@@ -200,6 +206,7 @@ cmd_paid_4b() {
       --scale quick \
       --model "$MODEL_4B" \
       --teacher "$TEACHER" \
+      --judge "$JUDGE" \
       --condition all \
       --out "$quick_out"
 }
@@ -236,6 +243,7 @@ cmd_arch_smoke() {
       --execute \
       --scale smoke \
       --teacher "$TEACHER" \
+      --judge "$JUDGE" \
       --model Qwen/Qwen3.6-27B \
       --model Qwen/Qwen3.6-35B-A3B \
       --out "$out"
@@ -249,6 +257,7 @@ cmd_arch_smoke_nomerge() {
       --execute \
       --scale smoke \
       --teacher "$TEACHER" \
+      --judge "$JUDGE" \
       --model Qwen/Qwen3.6-27B \
       --model Qwen/Qwen3.6-35B-A3B \
       --no-merge \
@@ -265,6 +274,7 @@ cmd_six_smoke() {
       --execute \
       --scale smoke \
       --teacher "$TEACHER" \
+      --judge "$JUDGE" \
       --model Qwen/Qwen3.5-4B \
       --model Qwen/Qwen3.5-9B \
       --model Qwen/Qwen3.6-27B \
@@ -279,6 +289,7 @@ cmd_six_smoke() {
       --execute \
       --scale smoke \
       --teacher "$TEACHER" \
+      --judge "$JUDGE" \
       --model "$SUPER_MODEL" \
       --out "$super_out"
 
@@ -288,6 +299,7 @@ cmd_six_smoke() {
       --execute \
       --scale smoke \
       --teacher "$TEACHER" \
+      --judge "$JUDGE" \
       --model "$ULTRA_MODEL" \
       --out "$ultra_out"
 }
@@ -301,6 +313,7 @@ cmd_six_smoke_nomerge() {
       --execute \
       --scale smoke \
       --teacher "$TEACHER" \
+      --judge "$JUDGE" \
       --model Qwen/Qwen3.5-4B \
       --model Qwen/Qwen3.5-9B \
       --model Qwen/Qwen3.6-27B \
@@ -314,6 +327,7 @@ cmd_six_smoke_nomerge() {
       --execute \
       --scale smoke \
       --teacher "$TEACHER" \
+      --judge "$JUDGE" \
       --model "$SUPER_MODEL" \
       --no-merge \
       --out "$super_out"
@@ -324,6 +338,7 @@ cmd_six_smoke_nomerge() {
       --execute \
       --scale smoke \
       --teacher "$TEACHER" \
+      --judge "$JUDGE" \
       --model "$ULTRA_MODEL" \
       --no-merge \
       --out "$ultra_out"
@@ -344,6 +359,7 @@ cmd_paper_template() {
       --execute \
       --scale paper \
       --teacher "$TEACHER" \
+      --judge "$JUDGE" \
       --model Qwen/Qwen3.5-4B \
       --model Qwen/Qwen3.5-9B \
       --model Qwen/Qwen3.6-27B \
@@ -357,6 +373,7 @@ cmd_paper_template() {
       --execute \
       --scale paper \
       --teacher "$TEACHER" \
+      --judge "$JUDGE" \
       --model "$ULTRA_MODEL" \
       --no-merge \
       --out "$ultra_out"
@@ -380,6 +397,7 @@ cmd_paper_template_nomerge() {
       --execute \
       --scale paper \
       --teacher "$TEACHER" \
+      --judge "$JUDGE" \
       --model Qwen/Qwen3.5-4B \
       --model Qwen/Qwen3.5-9B \
       --model Qwen/Qwen3.6-27B \
