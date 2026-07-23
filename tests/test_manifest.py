@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pytest
-from dataclasses import replace
 
 from octt import manifest
 from octt.config import get_config
@@ -75,6 +75,88 @@ def test_manifest_record_and_skip(tmp_path):
     assert m2.run_id == m.run_id
     assert m2.stage("dpo").sampler_path == ckpt.sampler_path
     assert m2.stages["dpo"]["extra"]["pairs_path"] == "p.jsonl"
+
+
+def test_manifest_execution_mode_rejects_dry_real_reuse(tmp_path):
+    cfg = get_config("smoke")
+    created = manifest.RunManifest.load_or_create(
+        tmp_path,
+        model="Qwen/Qwen3.5-4B",
+        persona="humorous",
+        config=cfg,
+        dry_run=True,
+    )
+    created.record_stage("dpo", manifest.dry_run_checkpoint("dpo", "x"))
+    stored = json.loads((tmp_path / "manifest.json").read_text())
+    assert stored["execution_mode"] == "dry-run"
+
+    with pytest.raises(ValueError, match="execution mode mismatch"):
+        manifest.RunManifest.load_or_create(
+            tmp_path,
+            model="Qwen/Qwen3.5-4B",
+            persona="humorous",
+            config=cfg,
+            dry_run=False,
+        )
+
+
+def test_manifest_execution_mode_rejects_real_dry_reuse(tmp_path):
+    cfg = get_config("smoke")
+    manifest.RunManifest.load_or_create(
+        tmp_path,
+        model="Qwen/Qwen3.5-4B",
+        persona="humorous",
+        config=cfg,
+        dry_run=False,
+    )
+    with pytest.raises(ValueError, match="execution mode mismatch"):
+        manifest.RunManifest.load_or_create(
+            tmp_path,
+            model="Qwen/Qwen3.5-4B",
+            persona="humorous",
+            config=cfg,
+            dry_run=True,
+        )
+
+
+def test_legacy_dry_stage_cannot_be_adopted_by_real_run(tmp_path):
+    cfg = get_config("smoke")
+    legacy = manifest.RunManifest.load_or_create(
+        tmp_path,
+        model="Qwen/Qwen3.5-4B",
+        persona="humorous",
+        config=cfg,
+    )
+    legacy.record_stage("dpo", manifest.dry_run_checkpoint("dpo", "x"))
+
+    with pytest.raises(ValueError, match="legacy stages are 'dry-run'"):
+        manifest.RunManifest.load_or_create(
+            tmp_path,
+            model="Qwen/Qwen3.5-4B",
+            persona="humorous",
+            config=cfg,
+            dry_run=False,
+        )
+
+
+def test_legacy_artifacts_without_stage_provenance_are_not_adopted(tmp_path):
+    cfg = get_config("smoke")
+    manifest.RunManifest.load_or_create(
+        tmp_path,
+        model="Qwen/Qwen3.5-4B",
+        persona="humorous",
+        config=cfg,
+    )
+    (tmp_path / "dpo_pairs.jsonl").write_text('{"dry_run": true}\n')
+
+    with pytest.raises(ValueError, match="no execution-mode provenance"):
+        manifest.RunManifest.load_or_create(
+            tmp_path,
+            model="Qwen/Qwen3.5-4B",
+            persona="humorous",
+            config=cfg,
+            dry_run=False,
+        )
 
 
 def test_manifest_config_mismatch_raises_by_default(tmp_path):

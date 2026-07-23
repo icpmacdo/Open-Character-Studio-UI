@@ -31,7 +31,9 @@ from pathlib import Path
 from typing import Any, Mapping
 
 MANIFEST_BASE_NAME = "manifest.json"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+EXECUTION_MODE_DRY_RUN = "dry-run"
+EXECUTION_MODE_REAL = "real"
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +201,7 @@ class RunManifest:
     out_dir: Path
     config_hash: str | None = None
     teacher: str | None = None
+    execution_mode: str | None = None
     stages: dict[str, dict[str, Any]] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
@@ -219,6 +222,7 @@ class RunManifest:
         persona: str,
         config: Any | None = None,
         teacher: str | None = None,
+        dry_run: bool | None = None,
         allow_config_mismatch: bool = False,
     ) -> "RunManifest":
         """Load an existing manifest from *out_dir* or create a fresh one.
@@ -232,6 +236,9 @@ class RunManifest:
         """
         out_dir = Path(out_dir)
         cfg_hash = config_hash(config) if config is not None else None
+        requested_mode = (
+            EXECUTION_MODE_DRY_RUN if dry_run else EXECUTION_MODE_REAL
+        ) if dry_run is not None else None
         existing = out_dir / MANIFEST_BASE_NAME
         if existing.exists():
             data = json.loads(existing.read_text())
@@ -264,6 +271,58 @@ class RunManifest:
                     f"{existing_hash}, requested {cfg_hash}. Use a fresh output "
                     "directory for the changed recipe."
                 )
+            on_disk_mode = data.get("execution_mode")
+            if on_disk_mode not in (None, EXECUTION_MODE_DRY_RUN, EXECUTION_MODE_REAL):
+                raise ValueError(
+                    f"Manifest at {existing} has unknown execution mode {on_disk_mode!r}"
+                )
+            if requested_mode is not None and on_disk_mode is not None:
+                if on_disk_mode != requested_mode:
+                    raise ValueError(
+                        f"Manifest execution mode mismatch at {existing}: existing "
+                        f"{on_disk_mode!r}, requested {requested_mode!r}. Dry-run and "
+                        "real stages/data must use separate output directories."
+                    )
+            stamp_mode = False
+            if requested_mode is not None and on_disk_mode is None:
+                stage_modes: set[str] = set()
+                for record in data.get("stages", {}).values():
+                    checkpoint = StageCheckpoint.from_dict(record)
+                    if checkpoint.is_dry_run or checkpoint.extra.get("dry_run") is True:
+                        stage_modes.add(EXECUTION_MODE_DRY_RUN)
+                    elif (
+                        (checkpoint.sampler_path or "").startswith("tinker://")
+                        or (checkpoint.state_path or "").startswith("tinker://")
+                        or checkpoint.local_path
+                    ):
+                        stage_modes.add(EXECUTION_MODE_REAL)
+                if len(stage_modes) > 1:
+                    raise ValueError(
+                        f"Legacy manifest at {existing} mixes dry-run and real stages; "
+                        "use a fresh output directory."
+                    )
+                if stage_modes and requested_mode not in stage_modes:
+                    inferred = next(iter(stage_modes))
+                    raise ValueError(
+                        f"Manifest execution mode mismatch at {existing}: legacy stages "
+                        f"are {inferred!r}, requested {requested_mode!r}. Use a fresh "
+                        "output directory."
+                    )
+                if not stage_modes:
+                    # A pre-v2 manifest with no stage checkpoint but with generated
+                    # artifacts may have crashed after writing dry-run data. Its
+                    # provenance cannot be inferred safely for a paid resume.
+                    unknown_artifacts = [
+                        path for path in out_dir.iterdir() if path.name != MANIFEST_BASE_NAME
+                    ]
+                    if unknown_artifacts:
+                        raise ValueError(
+                            f"Legacy manifest at {existing} has generated artifacts but "
+                            "no execution-mode provenance. Use a fresh output directory "
+                            "rather than risking dry-run data in a real run."
+                        )
+                on_disk_mode = requested_mode
+                stamp_mode = True
             loaded = cls(
                 run_id=data["run_id"],
                 model=data.get("model", model),
@@ -271,12 +330,17 @@ class RunManifest:
                 out_dir=out_dir,
                 config_hash=data.get("config_hash", cfg_hash),
                 teacher=data.get("teacher", teacher),
+                execution_mode=on_disk_mode,
                 stages=data.get("stages", {}),
                 created_at=data.get("created_at", time.time()),
                 updated_at=data.get("updated_at", time.time()),
-                schema_version=data.get("schema_version", SCHEMA_VERSION),
+                schema_version=SCHEMA_VERSION,
             )
-            if data.get("teacher") is None and teacher is not None:
+            if (
+                (data.get("teacher") is None and teacher is not None)
+                or stamp_mode
+                or data.get("schema_version") != SCHEMA_VERSION
+            ):
                 # Older manifests predate the teacher field; stamp it now so the
                 # guard is effective on the next resume.
                 loaded.flush()
@@ -289,6 +353,7 @@ class RunManifest:
             out_dir=out_dir,
             config_hash=cfg_hash,
             teacher=teacher,
+            execution_mode=requested_mode,
         )
         manifest.flush()
         return manifest
@@ -306,6 +371,8 @@ class RunManifest:
         }
         if self.teacher is not None:
             d["teacher"] = self.teacher
+        if self.execution_mode is not None:
+            d["execution_mode"] = self.execution_mode
         return d
 
     def flush(self) -> None:
