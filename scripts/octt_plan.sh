@@ -14,6 +14,9 @@ TEACHER="${TEACHER:-Qwen/Qwen3.5-397B-A17B}"
 
 SUPER_MODEL="nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16"
 ULTRA_MODEL="nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16"
+INKLING_MODEL="thinkingmachines/Inkling"
+# Revealed-preferences judge for self-distillation phases (never the student).
+JUDGE="${JUDGE:-$TEACHER}"
 
 usage() {
   cat <<'EOF'
@@ -32,6 +35,9 @@ Commands:
   paper-template    Guarded paper-scale template. Requires ALLOW_PAPER=1.
   paper-template-nomerge
                     Explicit fallback: paper template with --no-merge.
+  inkling-smoke     Paid Inkling self-distillation smoke, then quick (INKLING_PLAN.md
+                    Phase 2). Teacher == student == Inkling; judge stays $JUDGE.
+  inkling-paper     Guarded Inkling paper-scale run (Phase 3). Requires ALLOW_PAPER=1.
   all-safe          local -> paid-4b -> lighteval-smoke -> arch-smoke -> six-smoke.
 
 Environment:
@@ -145,6 +151,28 @@ cmd_local() {
   echo "== Ultra compatibility preflight should pass =="
   uv run octt preflight --dry-run \
     --model "$ULTRA_MODEL" \
+    --lora-rank 32 \
+    --no-merge
+
+  echo
+  echo "== Inkling with local merge should be BLOCKED (975B base) =="
+  set +e
+  uv run octt preflight --dry-run \
+    --model "$INKLING_MODEL" \
+    --teacher "$INKLING_MODEL" \
+    --lora-rank 32
+  local inkling_rc=$?
+  set -e
+  if [[ "$inkling_rc" -ne 2 ]]; then
+    echo "Expected Inkling merge preflight exit 2, got $inkling_rc" >&2
+    exit 1
+  fi
+
+  echo
+  echo "== Inkling self-distillation preflight (rank 32, no-merge) should pass =="
+  uv run octt preflight --dry-run \
+    --model "$INKLING_MODEL" \
+    --teacher "$INKLING_MODEL" \
     --lora-rank 32 \
     --no-merge
 }
@@ -362,6 +390,69 @@ cmd_paper_template_nomerge() {
       --out "$paper_out"
 }
 
+cmd_inkling_smoke() {
+  source_env
+  local smoke_out="runs/${PERSONA}-inkling-smoke-${TAG}"
+  local quick_out="runs/${PERSONA}-inkling-quick-${TAG}"
+
+  # Self-distillation: teacher == student == Inkling (constitution-prompted vs
+  # unprompted, pinned-effort renderer both sides); external judge; no local
+  # merge (975B base). INKLING_PLAN.md Phase 2 gate: after these complete,
+  # read the dpo_pairs/introspection sidecars for template or reasoning-token
+  # leakage before any paper-scale spend.
+  run_if_missing "paid Inkling smoke (self-distill)" "$smoke_out" "$smoke_out/eval_results.json" \
+    uv run octt run "$PERSONA" \
+      --execute \
+      --scale smoke \
+      --model "$INKLING_MODEL" \
+      --teacher "$INKLING_MODEL" \
+      --judge "$JUDGE" \
+      --lora-rank 32 \
+      --learning-rate 1e-4 \
+      --no-merge \
+      --condition all \
+      --out "$smoke_out"
+
+  run_if_missing "paid Inkling quick (self-distill)" "$quick_out" "$quick_out/eval_results.json" \
+    uv run octt run "$PERSONA" \
+      --execute \
+      --scale quick \
+      --model "$INKLING_MODEL" \
+      --teacher "$INKLING_MODEL" \
+      --judge "$JUDGE" \
+      --lora-rank 32 \
+      --learning-rate 1e-4 \
+      --no-merge \
+      --condition all \
+      --out "$quick_out"
+}
+
+cmd_inkling_paper() {
+  if [[ "${ALLOW_PAPER:-0}" != "1" ]]; then
+    echo "Refusing Inkling paper scale without ALLOW_PAPER=1." >&2
+    echo "Run inkling-smoke first and inspect the transcripts (INKLING_PLAN.md Phase 2 gate)." >&2
+    exit 2
+  fi
+  source_env
+
+  # Single embodiment condition first (INKLING_PLAN.md decision 2): the eval is
+  # the dominant cost line at Inkling sample prices; --condition all is for the
+  # run that becomes the reported number.
+  local out="runs/${PERSONA}-inkling-paper-rank32-${TAG}"
+  run_if_missing "paid Inkling paper-scale (self-distill, 1 condition)" "$out" "$out/eval_results.json" \
+    uv run octt run "$PERSONA" \
+      --execute \
+      --scale paper \
+      --model "$INKLING_MODEL" \
+      --teacher "$INKLING_MODEL" \
+      --judge "$JUDGE" \
+      --lora-rank 32 \
+      --learning-rate 1e-4 \
+      --no-merge \
+      --condition adopt \
+      --out "$out"
+}
+
 case "${1:-}" in
   status) cmd_status ;;
   local) cmd_local ;;
@@ -373,6 +464,8 @@ case "${1:-}" in
   six-smoke-nomerge) cmd_six_smoke_nomerge ;;
   paper-template) cmd_paper_template ;;
   paper-template-nomerge) cmd_paper_template_nomerge ;;
+  inkling-smoke) cmd_inkling_smoke ;;
+  inkling-paper) cmd_inkling_paper ;;
   all-safe)
     cmd_local
     cmd_paid_4b

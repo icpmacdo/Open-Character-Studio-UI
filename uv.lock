@@ -514,7 +514,7 @@ name = "cuda-bindings"
 version = "13.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cuda-pathfinder", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
+    { name = "cuda-pathfinder" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/51/6b/457ca12dad3ee9bfcc9a545cfd6b64b359ba49de40f776f6e028e678f262/cuda_bindings-13.3.1-cp311-cp311-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:c5879712accf6e14bb01aa5e67440eb84998b8d104b509cc7a6dc0b8f656a474", size = 6053539, upload-time = "2026-05-29T23:11:43.19Z" },
@@ -547,34 +547,34 @@ wheels = [
 
 [package.optional-dependencies]
 cudart = [
-    { name = "nvidia-cuda-runtime", marker = "sys_platform == 'linux'" },
+    { name = "nvidia-cuda-runtime" },
 ]
 cufft = [
-    { name = "nvidia-cufft", marker = "sys_platform == 'linux'" },
+    { name = "nvidia-cufft" },
 ]
 cufile = [
-    { name = "nvidia-cufile", marker = "sys_platform == 'linux'" },
+    { name = "nvidia-cufile" },
 ]
 cupti = [
-    { name = "nvidia-cuda-cupti", marker = "sys_platform == 'linux'" },
+    { name = "nvidia-cuda-cupti" },
 ]
 curand = [
-    { name = "nvidia-curand", marker = "sys_platform == 'linux'" },
+    { name = "nvidia-curand" },
 ]
 cusolver = [
-    { name = "nvidia-cusolver", marker = "sys_platform == 'linux'" },
+    { name = "nvidia-cusolver" },
 ]
 cusparse = [
-    { name = "nvidia-cusparse", marker = "sys_platform == 'linux'" },
+    { name = "nvidia-cusparse" },
 ]
 nvjitlink = [
-    { name = "nvidia-nvjitlink", marker = "sys_platform == 'linux'" },
+    { name = "nvidia-nvjitlink" },
 ]
 nvrtc = [
-    { name = "nvidia-cuda-nvrtc", marker = "sys_platform == 'linux'" },
+    { name = "nvidia-cuda-nvrtc" },
 ]
 nvtx = [
-    { name = "nvidia-nvtx", marker = "sys_platform == 'linux'" },
+    { name = "nvidia-nvtx" },
 ]
 
 [[package]]
@@ -1970,7 +1970,7 @@ name = "nvidia-cublas"
 version = "13.1.1.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-cuda-nvrtc", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
+    { name = "nvidia-cuda-nvrtc" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a7/a1/0bd24ee8c8d03adac032fd2909426a00c88f8c57961b1277ded97f91119f/nvidia_cublas-13.1.1.3-py3-none-manylinux_2_27_aarch64.whl", hash = "sha256:b7a210458267ac818974c53038fbec2e969d5c99f305ab15c72522fa9f001dd5", size = 542848918, upload-time = "2026-04-08T18:46:22.985Z" },
@@ -2009,7 +2009,7 @@ name = "nvidia-cudnn-cu13"
 version = "9.20.0.48"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-cublas", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
+    { name = "nvidia-cublas" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/56/c5/83384d846b2fd17c44bd499b36c75a45ed4f095fbbb2252294e89cea5c5c/nvidia_cudnn_cu13-9.20.0.48-py3-none-manylinux_2_27_aarch64.whl", hash = "sha256:e31454ae00094b0c55319d9d15b6fa2fc50a9e1c0f5c8c80fb75258234e731e1", size = 444574296, upload-time = "2026-03-09T19:28:27.751Z" },
@@ -2021,7 +2021,7 @@ name = "nvidia-cufft"
 version = "12.0.0.61"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-nvjitlink", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
+    { name = "nvidia-nvjitlink" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/8b/ae/f417a75c0259e85c1d2f83ca4e960289a5f814ed0cea74d18c353d3e989d/nvidia_cufft-12.0.0.61-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:2708c852ef8cd89d1d2068bdbece0aa188813a0c934db3779b9b1faa8442e5f5", size = 214053554, upload-time = "2025-09-04T08:31:38.196Z" },
@@ -2051,9 +2051,9 @@ name = "nvidia-cusolver"
 version = "12.0.4.66"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-cublas", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
-    { name = "nvidia-cusparse", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
-    { name = "nvidia-nvjitlink", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
+    { name = "nvidia-cublas" },
+    { name = "nvidia-cusparse" },
+    { name = "nvidia-nvjitlink" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c8/c3/b30c9e935fc01e3da443ec0116ed1b2a009bb867f5324d3f2d7e533e776b/nvidia_cusolver-12.0.4.66-py3-none-manylinux_2_27_aarch64.whl", hash = "sha256:02c2457eaa9e39de20f880f4bd8820e6a1cfb9f9a34f820eb12a155aa5bc92d2", size = 223467760, upload-time = "2025-09-04T08:33:04.222Z" },
@@ -2065,7 +2065,7 @@ name = "nvidia-cusparse"
 version = "12.6.3.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "nvidia-nvjitlink", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
+    { name = "nvidia-nvjitlink" },
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f8/94/5c26f33738ae35276672f12615a64bd008ed5be6d1ebcb23579285d960a9/nvidia_cusparse-12.6.3.3-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:80bcc4662f23f1054ee334a15c72b8940402975e0eab63178fc7e670aa59472c", size = 162155568, upload-time = "2025-09-04T08:33:42.864Z" },
@@ -2142,7 +2142,7 @@ local-eval = [
 train = [
     { name = "datasets" },
     { name = "tinker" },
-    { name = "tinker-cookbook" },
+    { name = "tinker-cookbook", extra = ["inkling"] },
 ]
 
 [package.metadata]
@@ -2154,8 +2154,8 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
-    { name = "tinker", marker = "extra == 'train'" },
-    { name = "tinker-cookbook", marker = "extra == 'train'" },
+    { name = "tinker", marker = "extra == 'train'", specifier = ">=0.23.0" },
+    { name = "tinker-cookbook", extras = ["inkling"], marker = "extra == 'train'", specifier = ">=0.5.2" },
     { name = "torch", marker = "extra == 'local-eval'", specifier = ">=2.2" },
     { name = "transformers", marker = "extra == 'local-eval'", specifier = ">=4.44" },
 ]
@@ -3485,7 +3485,7 @@ resolution-markers = [
     "python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 dependencies = [
-    { name = "numpy", marker = "python_full_version < '3.12'" },
+    { name = "numpy" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/7a/97/5a3609c4f8d58b039179648e62dd220f89864f56f7357f5d4f45c29eb2cc/scipy-1.17.1.tar.gz", hash = "sha256:95d8e012d8cb8816c226aef832200b1d45109ed4464303e997c5b13122b297c0", size = 30573822, upload-time = "2026-02-23T00:26:24.851Z" }
 wheels = [
@@ -3564,7 +3564,7 @@ resolution-markers = [
     "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 dependencies = [
-    { name = "numpy", marker = "python_full_version >= '3.12'" },
+    { name = "numpy" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/a7/25/c2700dfaf6442b4effaa91af24ebce5dc9d31bb4a69706313aae70d72cd0/scipy-1.18.0.tar.gz", hash = "sha256:67b2ad2ad54c72ca6d04975a9b2df8c3638c34ddd5b28738e94fc2b57929d378", size = 30774447, upload-time = "2026-06-19T15:01:43.456Z" }
 wheels = [
@@ -3881,7 +3881,7 @@ wheels = [
 
 [[package]]
 name = "tinker"
-version = "0.22.3"
+version = "0.23.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -3899,14 +3899,14 @@ dependencies = [
     { name = "typing-extensions" },
     { name = "zstandard" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ca/e5/f78993ee8be0e5b5c00481771be48b0d2a2d3ab91bbe5f19d7cf74629e09/tinker-0.22.3.tar.gz", hash = "sha256:52bf8e754201174de5cc5a5f317369370320d6ff199fdc9ce217996c8874acc5", size = 246707, upload-time = "2026-05-31T00:49:23.803Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/33/ce/0d30f80d7234ea88e8310b91d4ef58e9d27a96be5c579553407f831bba6b/tinker-0.23.0.tar.gz", hash = "sha256:b48f3e74128e56ad34bee18124f9b3a109a502bfa602853e999679eaf128aa49", size = 247551, upload-time = "2026-07-15T17:16:40.621Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/03/16/2f1d4ba370b64a7cfd8fdef4bcb75ec427e4894e6e805907fb04a56067bb/tinker-0.22.3-py3-none-any.whl", hash = "sha256:42b1a571c7a848f756bbedd841b9e2fe17d4dcec6f9fea88aa6da3e01849648f", size = 232521, upload-time = "2026-05-31T00:49:25.134Z" },
+    { url = "https://files.pythonhosted.org/packages/bb/a6/17932357c145c6dbe988832613b36bc7630a661148e17db1f6017ddca01a/tinker-0.23.0-py3-none-any.whl", hash = "sha256:416a20f2cc62fc83cc92c5b69de7f6aa8736bceee0156fda07fbe2fef1b00936", size = 237099, upload-time = "2026-07-15T17:16:39.183Z" },
 ]
 
 [[package]]
 name = "tinker-cookbook"
-version = "0.4.2"
+version = "0.5.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
@@ -3928,9 +3928,26 @@ dependencies = [
     { name = "tqdm" },
     { name = "transformers" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/16/ff/f9c2d98ffe5245fa7344afea2293e57db571a07b70a5f55345c30abb7994/tinker_cookbook-0.4.2.tar.gz", hash = "sha256:759b2e47f729feb521e0d114c1fb4e896e4f1c6917997d344dc5b59befe851db", size = 4595033, upload-time = "2026-06-10T20:38:05.635Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/1f/a9/586de1daa657aa2d1087e4fa1173524bc93c5a11d598e35e0355233297a0/tinker_cookbook-0.5.2.tar.gz", hash = "sha256:f4e2cc465d072385c68cb25baff2883fcc2ffe89157d2d7329768e88e4cd06a0", size = 4723636, upload-time = "2026-07-15T18:50:25.351Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/de/70/8c5e8bcb120f87d4a19a3a9f237ce75a17c6af9a32fd38df407ff6fa61fd/tinker_cookbook-0.4.2-py3-none-any.whl", hash = "sha256:62eacc4a49b89b6c7714269d7f373901a6aee46b73110a955f04dbf7f3be01f5", size = 934341, upload-time = "2026-06-10T20:38:07.301Z" },
+    { url = "https://files.pythonhosted.org/packages/eb/d8/12ebe2d7fac3835a8bc2d1c23b59b026e7e1389ced92aadf0fcdf746620d/tinker_cookbook-0.5.2-py3-none-any.whl", hash = "sha256:42554513b8c7a4fe5b124e680345a8883e82eff90345658d4e009f0866654dfa", size = 1042439, upload-time = "2026-07-15T18:50:23.51Z" },
+]
+
+[package.optional-dependencies]
+inkling = [
+    { name = "tinker" },
+    { name = "tml-renderers" },
+    { name = "torch" },
+]
+
+[[package]]
+name = "tml-renderers"
+version = "0.1.0"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0d/b3/12b182a39effd1021263451e6eff0ff47c310f2957706a903ce838935dd5/tml_renderers-0.1.0-cp311-abi3-macosx_11_0_arm64.whl", hash = "sha256:f484e983fe42df95c5c69108c7ec4046340f416566f726bd76e211736db29391", size = 4387718, upload-time = "2026-07-15T17:24:15.468Z" },
+    { url = "https://files.pythonhosted.org/packages/d6/dd/c31bb2e874cb11a175f8f14967cee128b2d159507a602b3740152be6a8d6/tml_renderers-0.1.0-cp311-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:52cf4c1b4d1ab2664903f0438e661544546b4d7f0378fe245f53bafc01368014", size = 4545354, upload-time = "2026-07-15T17:24:17.956Z" },
+    { url = "https://files.pythonhosted.org/packages/26/e1/e4f8e7acfafaff35b59031b9af308aa059a845a4b094a43bd49dbb729508/tml_renderers-0.1.0-cp311-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:6f5ff0b08ba5ffe92071cb32215d65cda88d92205850f9f4dd1823f5d0dc2aeb", size = 4686701, upload-time = "2026-07-15T17:24:20.486Z" },
 ]
 
 [[package]]
@@ -4017,7 +4034,7 @@ wheels = [
 
 [[package]]
 name = "transformers"
-version = "5.5.3"
+version = "5.5.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "huggingface-hub" },
@@ -4030,9 +4047,9 @@ dependencies = [
     { name = "tqdm" },
     { name = "typer" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/af/35/cd5b0d1288e65d2c12db4ce84c1ec1074f7ee9bced040de6c9d69e70d620/transformers-5.5.3.tar.gz", hash = "sha256:3f60128e840b40d352655903552e1eed4f94ed49369a4d43e1bc067bd32d3f50", size = 8226047, upload-time = "2026-04-09T15:52:56.231Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a5/1e/1e244ab2ab50a863e6b52cc55761910567fa532b69a6740f6e99c5fdbd98/transformers-5.5.4.tar.gz", hash = "sha256:2e67cadba81fc7608cc07c4dd54f524820bc3d95b1cabd0ef3db7733c4f8b82e", size = 8227649, upload-time = "2026-04-13T16:55:55.181Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a1/0b/f8524551ab2d896dfaca74ddb70a4453d515bbf4ab5451c100c7788ae155/transformers-5.5.3-py3-none-any.whl", hash = "sha256:e48f3ec31dd96505e96e66b63a1e43e1ad7a65749e108d9227caaf51051cdb02", size = 10236257, upload-time = "2026-04-09T15:52:52.866Z" },
+    { url = "https://files.pythonhosted.org/packages/29/fb/162a66789c65e5afa3b051309240c26bf37fbc8fea285b4546ae747995a2/transformers-5.5.4-py3-none-any.whl", hash = "sha256:0bd6281b82966fe5a7a16f553ea517a9db1dee6284d7cb224dfd88fc0dd1c167", size = 10236696, upload-time = "2026-04-13T16:55:51.497Z" },
 ]
 
 [[package]]

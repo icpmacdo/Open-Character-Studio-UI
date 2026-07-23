@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 
+import pytest
+
 from octt import models, tinker_client
 from octt.config import get_config
 
@@ -153,14 +155,15 @@ def test_cost_estimate_counts_per_model_eval_and_teacher_sampling():
         for model in model_set
     )
 
-    assert combined.total_usd == singles_total
+    assert combined.total_usd == pytest.approx(singles_total)
     eval_judge_lines = [line for line in combined.lines if line.stage == "eval.judge"]
     dpo_teacher_lines = [line for line in combined.lines if line.stage == "dpo.teacher_sample"]
     assert len(eval_judge_lines) == len(model_set)
     assert len(dpo_teacher_lines) == len(model_set)
-    # Judge sampled tokens: 2 * judgments * judge_sample_tokens envelope (64).
+    # Judge sampled tokens follow the configured max-token envelope.
     assert all(
-        line.token_millions == (2 * cfg.eval.num_judgments * 64) / 1_000_000
+        line.token_millions
+        == (2 * cfg.eval.num_judgments * cfg.eval.judge_max_tokens) / 1_000_000
         for line in eval_judge_lines
     )
     # Teacher chosen-generation is costed at the thinking envelope (2048/tok).
@@ -172,3 +175,24 @@ def test_cost_estimate_counts_per_model_eval_and_teacher_sampling():
     stages = {line.stage for line in combined.lines}
     assert {"dpo.teacher_prefill", "introspection.prefill",
             "eval.model_prefill", "eval.judge_prefill"} <= stages
+
+
+def test_cost_estimate_multiplies_every_eval_line_for_all_conditions():
+    cfg = get_config("smoke")
+    one = tinker_client.estimate_tinker_cost(
+        cfg, ("Qwen/Qwen3.5-4B",), eval_conditions=1
+    )
+    all_conditions = tinker_client.estimate_tinker_cost(
+        cfg, ("Qwen/Qwen3.5-4B",), eval_conditions=3
+    )
+    one_eval = sum(line.subtotal_usd for line in one.lines if line.stage.startswith("eval."))
+    assert all_conditions.total_usd == pytest.approx(one.total_usd + 2 * one_eval)
+
+
+def test_cost_estimate_rejects_zero_eval_conditions():
+    with pytest.raises(ValueError, match="at least 1"):
+        tinker_client.estimate_tinker_cost(
+            get_config("smoke"),
+            ("Qwen/Qwen3.5-4B",),
+            eval_conditions=0,
+        )

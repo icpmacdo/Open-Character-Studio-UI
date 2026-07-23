@@ -24,16 +24,38 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_COOKBOOK_PATH = PROJECT_ROOT / "tinker-cookbook"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "runs"
 
-# The teacher is outside the local student registry. Keep the estimate explicit
-# until the full Tinker catalog/price sheet is wired in.
-TEACHER_SAMPLE_PRICE_USD_PER_MTOK = 5.0
+# Pessimistic fallback for teachers outside the registry (the study teacher and
+# Inkling are now priced in models.CANDIDATES, so this rarely applies).
+TEACHER_SAMPLE_PRICE_USD_PER_MTOK = 7.5
+
+# Inkling's tml_v0 renderer has no disable-thinking variant; thinking is a float
+# effort in [0.0, 1.0) rendered as a system-level directive. OCTT pins it to the
+# minimum on BOTH the generation and supervised-rendering paths via a registered
+# subclass (see _register_pinned_effort_renderer): persisted training text
+# carries visible answers only, so both sampling and training must condition on
+# the effort level whose native behavior that text approximates.
+TML_PINNED_EFFORT = 0.0
+TML_PINNED_RENDERER_NAME = "octt/tml_v0_pinned_effort"
 
 DIRECT_ANSWER_RENDERER_OVERRIDES = {
     # The cookbook's default Qwen3.5 renderer enables thinking. OCTT persists
     # sampled completions as supervised/preference training text, so prefer the
     # direct-answer variant to keep reasoning traces out of the dataset.
     "qwen3_5": "qwen3_5_disable_thinking",
+    # Inkling: pin thinking effort to its minimum (same policy, different knob).
+    "tml_v0": TML_PINNED_RENDERER_NAME,
 }
+
+
+def renderer_supports_think_prefill(renderer_name: str) -> bool:
+    """Whether App A's ``<think>`` prefill trick can ride this renderer.
+
+    tml_v0 (Inkling) rejects partial assistant messages outright, and the
+    Inkling self-distillation design wants teacher and student sampled at the
+    same pinned effort anyway — the teacher samples exactly like the student
+    and the prefill is skipped (INKLING_PLAN.md, Phase 0.3).
+    """
+    return renderer_name not in ("tml_v0", TML_PINNED_RENDERER_NAME)
 
 
 class TinkerSetupError(RuntimeError):
@@ -236,6 +258,52 @@ def plan_renderers(
     return tuple(plans)
 
 
+def _register_pinned_effort_renderer(renderers: ModuleType) -> None:
+    """Idempotently register the pinned-effort tml_v0 subclass.
+
+    Registering it under :data:`TML_PINNED_RENDERER_NAME` lets the name flow
+    through cookbook dataset builders (DPO/SFT training render conversations by
+    renderer *name*), so training-time rendering carries the same effort
+    directive as generation. The caller-facing ``effort`` argument is
+    deliberately ignored: OCTT's renderer policy is a recipe constant, not a
+    per-call knob.
+    """
+    if renderers.is_renderer_registered(TML_PINNED_RENDERER_NAME):
+        return
+    tml_v0 = importlib.import_module("tinker_cookbook.renderers.tml_v0")
+    base = importlib.import_module("tinker_cookbook.renderers.base")
+    all_assistant = base.TrainOnWhat.ALL_ASSISTANT_MESSAGES
+
+    class PinnedEffortTmlV0Renderer(tml_v0.TmlV0Renderer):
+        """tml_v0 with thinking effort pinned to TML_PINNED_EFFORT everywhere."""
+
+        def build_generation_prompt(  # type: ignore[override]
+            self, messages, role="assistant", prefill=None, effort=None
+        ):
+            return super().build_generation_prompt(
+                messages, role, prefill, effort=TML_PINNED_EFFORT
+            )
+
+        def build_supervised_examples(  # type: ignore[override]
+            self, messages, train_on_what=all_assistant, effort=None
+        ):
+            return super().build_supervised_examples(
+                messages, train_on_what, effort=TML_PINNED_EFFORT
+            )
+
+        def build_supervised_example(  # type: ignore[override]
+            self, messages, train_on_what=all_assistant, effort=None
+        ):
+            return super().build_supervised_example(
+                messages, train_on_what, effort=TML_PINNED_EFFORT
+            )
+
+    def _factory(tokenizer: Any, image_processor: Any = None) -> Any:
+        return PinnedEffortTmlV0Renderer(tokenizer)
+
+    renderers.register_renderer(TML_PINNED_RENDERER_NAME, _factory)
+
+
 def import_tinker_stack(cookbook_path: Path = DEFAULT_COOKBOOK_PATH) -> TinkerStack:
     ensure_cookbook_on_path(cookbook_path)
     try:
@@ -250,6 +318,7 @@ def import_tinker_stack(cookbook_path: Path = DEFAULT_COOKBOOK_PATH) -> TinkerSt
             "available for renderer metadata."
         ) from exc
 
+    _register_pinned_effort_renderer(renderers)
     return TinkerStack(
         tinker=tinker,
         renderers=renderers,
@@ -351,9 +420,10 @@ def estimate_tinker_cost(
     dpo_prompt_tokens: int = 1024,  # constitution system prompt + user prompt
     reflection_sample_tokens: int = 2048,  # official self-reflection envelope
     interaction_sample_tokens: int = 1024,  # official per-message envelope
-    eval_sample_tokens: int = 1024,  # EvalConfig.responder_max_tokens envelope
+    eval_sample_tokens: int | None = None,
     eval_prompt_tokens: int = 1024,  # embody system prompt + WildChat prompt
-    judge_sample_tokens: int = 64,
+    judge_sample_tokens: int | None = None,
+    eval_conditions: int = 1,
 ) -> CostEstimate:
     """Estimate billed Tinker spend using max-token stage envelopes.
 
@@ -364,11 +434,23 @@ def estimate_tinker_cost(
     training tokens account for the last-assistant prefix explosion (a chat
     with A assistant turns trains once per assistant turn, re-billing its
     prefixes ~(A+1)/2 times). Token budgets, when set, cap the corresponding
-    training-data lines. The eval envelope covers ONE embodiment condition;
-    multiply by three when running ``--condition all``.
+    training-data lines. ``eval_conditions`` accounts for the full repeated
+    judgment budget when more than one embodiment condition is requested.
     """
 
+    if eval_conditions < 1:
+        raise ValueError("eval_conditions must be at least 1")
     lines: list[CostEstimateLine] = []
+    eval_sample_tokens = (
+        config.eval.responder_max_tokens
+        if eval_sample_tokens is None
+        else eval_sample_tokens
+    )
+    judge_sample_tokens = (
+        config.eval.judge_max_tokens
+        if judge_sample_tokens is None
+        else judge_sample_tokens
+    )
     turns = config.sft.self_interaction_turns
     reflections = config.sft.self_reflection_count
     interactions = config.sft.self_interaction_count
@@ -408,7 +490,7 @@ def estimate_tinker_cost(
 
     # The revealed-preferences eval runs once on the base model and once on the
     # trained target for each student model (per condition).
-    eval_responses = 2 * config.eval.num_judgments
+    eval_responses = 2 * config.eval.num_judgments * eval_conditions
     eval_sampled = eval_responses * eval_sample_tokens
     eval_prefill = eval_responses * eval_prompt_tokens
     judge_sampled = eval_responses * judge_sample_tokens
@@ -521,6 +603,30 @@ def validate_lora_rank_limits(
     return blockers
 
 
+def validate_merge_feasibility(
+    student_models: Sequence[str],
+    config: RecipeConfig,
+) -> list[str]:
+    """Return blockers for models whose base weights cannot merge locally.
+
+    Distinct from :func:`_merge_disk_warnings` (a disk-space *warning* for
+    large-but-feasible rungs): a model flagged ``local_merge_feasible=False``
+    (e.g. Inkling, 975B total) can never complete the local merge stage, so a
+    merge-enabled recipe is a hard blocker, not a warning.
+    """
+    if not config.merge_adapters:
+        return []
+    blockers: list[str] = []
+    for model_id in student_models:
+        spec = models.CANDIDATES.get(model_id)
+        if spec is not None and not spec.local_merge_feasible:
+            blockers.append(
+                f"{model_id} base weights ({spec.total_params_b:.0f}B total) cannot be "
+                "merged locally; run with --no-merge"
+            )
+    return blockers
+
+
 def _existing_parent(path: Path) -> Path:
     parent = path if path.exists() else path.parent
     while not parent.exists() and parent != parent.parent:
@@ -566,6 +672,7 @@ def build_preflight_report(
     config: RecipeConfig | None = None,
     dry_run: bool = False,
     budget_usd: float | None = None,
+    eval_conditions: int = 1,
     cookbook_path: Path = DEFAULT_COOKBOOK_PATH,
     output_dir: Path = DEFAULT_OUTPUT_DIR,
     env: Mapping[str, str] = os.environ,
@@ -592,8 +699,14 @@ def build_preflight_report(
     warnings.extend(_output_dir_warnings(output_dir))
     warnings.extend(_merge_disk_warnings(student_models, cfg, output_dir))
     blockers.extend(validate_lora_rank_limits(student_models, cfg))
+    blockers.extend(validate_merge_feasibility(student_models, cfg))
 
-    estimate = estimate_tinker_cost(cfg, student_models, teacher_model)
+    estimate = estimate_tinker_cost(
+        cfg,
+        student_models,
+        teacher_model,
+        eval_conditions=eval_conditions,
+    )
     if budget_usd is not None and estimate.total_usd > budget_usd:
         blockers.append(
             f"Estimated spend ${estimate.total_usd:.2f} exceeds budget ${budget_usd:.2f}"

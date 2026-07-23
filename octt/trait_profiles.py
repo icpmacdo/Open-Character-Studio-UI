@@ -48,6 +48,15 @@ PROFILES: dict[str, TraitProfile] = {
         opposing=("arrogant", "sycophantic", "sarcastic", "humorous",
                   "colloquial", "foolish"),
     ),
+    # Inkling-track persona (INKLING_PLAN.md Phase 1): the calibrated
+    # forecaster. Not part of the paper's 11; keep it out of paper-replication
+    # aggregates (same rule as `pirate`).
+    "forecaster": TraitProfile(
+        aligned=("empirical", "skeptical", "precise", "rational", "objective",
+                 "questioning", "nuanced", "balanced", "humble", "curious"),
+        opposing=("credulous", "arrogant", "mystical", "declarative",
+                  "foolish", "unapologetic"),
+    ),
     "humorous": TraitProfile(
         aligned=("humorous", "playful", "irreverent", "creative", "enthusiastic",
                  "warm", "casual", "spontaneous"),

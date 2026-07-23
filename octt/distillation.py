@@ -89,8 +89,10 @@ def _pairs_cache_key(
     teacher_max_tokens: int,
     temperature: float,
     token_budget: int | None,
+    *,
+    teacher_prefill: bool = True,
 ) -> str:
-    return manifest.content_hash(
+    parts = [
         "dpo_pairs",
         "visible-text-v1",
         "direct-answer-renderer-v1",
@@ -107,7 +109,12 @@ def _pairs_cache_key(
         generation.GEN_TOP_P,
         generation.GEN_MIN_P,
         token_budget,
-    )
+    ]
+    # Appended only when the prefill is off (tml_v0 teachers) so every existing
+    # prefill-path cache key stays byte-identical and resumable.
+    if not teacher_prefill:
+        parts.append("teacher-prefill-disabled-v1")
+    return manifest.content_hash(*parts)
 
 
 def generate_pairs(
@@ -143,9 +150,18 @@ def generate_pairs(
     offline = offline or runtime.config.dry_run
 
     prompts = data_sources.dpo_prompts(constitution, config.num_prompts, offline=offline)
+    # App A prefill only where the teacher's renderer supports partial assistant
+    # messages. For tml_v0 (Inkling self-distillation) the teacher instead
+    # samples exactly like the student — pinned effort, no prefill — so the
+    # pair's only delta is the constitution (INKLING_PLAN.md, Phase 0.3).
+    from .tinker_client import renderer_supports_think_prefill
+
+    teacher_renderer = runtime.renderer_plan(teacher_model).renderer_name
+    use_think_prefill = renderer_supports_think_prefill(teacher_renderer)
     cache_key = _pairs_cache_key(
         constitution, teacher_model, student_model, prompts,
         max_tokens, teacher_max_tokens, temperature, config.token_budget,
+        teacher_prefill=use_think_prefill,
     )
 
     meta_path = _pairs_meta_path(out_path)
@@ -185,7 +201,8 @@ def generate_pairs(
         teacher = generation.make_sampler(
             runtime, teacher_model, tag="chosen", max_tokens=teacher_max_tokens,
             temperature=temperature, top_p=generation.GEN_TOP_P, min_p=generation.GEN_MIN_P,
-            thinking=True, think_prefill=THINK_PREFILL_BODY,
+            thinking=use_think_prefill,
+            think_prefill=THINK_PREFILL_BODY if use_think_prefill else None,
         )
         chosen = generation.complete_many(teacher, chosen_convos)
         manifest.atomic_write_json(sidecar, {"content_hash": cache_key, "chosen": chosen})
@@ -309,16 +326,19 @@ def train(
     runtime: TinkerRuntime,
     *,
     max_length: int = DEFAULT_MAX_LENGTH,
-    learning_rate: float = 5e-5,
+    learning_rate: float | None = None,
 ) -> manifest.StageCheckpoint:
     """Train a DPO LoRA adapter on Tinker; return its state+sampler checkpoint.
 
     Dry-run returns a deterministic placeholder checkpoint without touching the
     paid runtime; the real path runs a DPO loop (β + paper's NLL-on-chosen and
-    per-token-KL terms) and saves both checkpoint kinds.
+    per-token-KL terms) and saves both checkpoint kinds. ``learning_rate``
+    defaults to ``config.learning_rate`` so recipe lr policies (e.g. the
+    uniform-rank32 scaling study's lr=1e-4) actually reach the optimizer.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    lr = config.learning_rate if learning_rate is None else learning_rate
 
     if runtime.config.dry_run:
         ckpt = manifest.dry_run_checkpoint("dpo", student_model, str(pairs_path), config)
@@ -330,6 +350,7 @@ def train(
                 "pairs_path": str(pairs_path),
                 "sampler_path": ckpt.sampler_path,
                 "state_path": ckpt.state_path,
+                "learning_rate": lr,
                 "dry_run": True,
             },
         )
@@ -342,7 +363,7 @@ def train(
         out_dir,
         runtime,
         max_length=max_length,
-        learning_rate=learning_rate,
+        learning_rate=lr,
     )
 
 

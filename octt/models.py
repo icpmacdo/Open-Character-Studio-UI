@@ -7,7 +7,10 @@ Open Character Training recipe constant:
   - MOE_LADDER:   NVIDIA Nemotron-3, MoE, 30B-A3B -> 120B-A12B -> 550B-A55B.
 
 Prices are USD per 1M tokens (prefill / sample / train) from the Tinker pricing
-page, reflecting a limited-time 50% discount.
+page. As of 2026-07-15 they are the announced post-2026-07-17 prices (prefill/
+sample +~50%, train +~10% over the launch-discount rates) so preflight estimates
+stay pessimistic across the change. Inkling's post-increase prices were not yet
+published; its entry applies the same multipliers to the launch rates.
 
 Caveats baked into this design (intentional, but worth knowing):
   - Cross-family: the dense ladder is Qwen, the MoE ladder is Nemotron. This is a
@@ -41,42 +44,65 @@ class ModelSpec:
     price_train: float | None = None
     note: str = ""
     max_lora_rank: int | None = None
+    # False when the base weights cannot be downloaded/held locally for the
+    # linear adapter merge (paper Section 2.4); such models must run --no-merge.
+    local_merge_feasible: bool = True
 
 
 CANDIDATES: dict[str, ModelSpec] = {
     # --- Dense ladder (Qwen) ---
     "Qwen/Qwen3.5-4B": ModelSpec(
-        "Qwen/Qwen3.5-4B", "dense", "Qwen", "Compact", 4.0, 4.0, 64, 0.22, 0.67, 0.67
+        "Qwen/Qwen3.5-4B", "dense", "Qwen", "Compact", 4.0, 4.0, 64, 0.33, 1.005, 0.737
     ),
     "Qwen/Qwen3.5-9B": ModelSpec(
-        "Qwen/Qwen3.5-9B", "dense", "Qwen", "Small", 9.0, 9.0, 64, 0.44, 1.33, 1.33
+        "Qwen/Qwen3.5-9B", "dense", "Qwen", "Small", 9.0, 9.0, 64, 0.66, 1.995, 1.463
     ),
     "Qwen/Qwen3.6-27B": ModelSpec(
-        "Qwen/Qwen3.6-27B", "dense", "Qwen", "Medium", 27.0, 27.0, 64, 1.24, 3.73, 3.73,
+        "Qwen/Qwen3.6-27B", "dense", "Qwen", "Medium", 27.0, 27.0, 64, 1.86, 5.595, 4.103,
         note="dense half of the within-family architecture control",
     ),
     # --- Architecture control (Qwen MoE, same generation as Qwen3.6-27B) ---
     "Qwen/Qwen3.6-35B-A3B": ModelSpec(
-        "Qwen/Qwen3.6-35B-A3B", "moe", "Qwen", "Medium", 35.0, 3.0, 64, 0.36, 0.89, 1.07,
+        "Qwen/Qwen3.6-35B-A3B", "moe", "Qwen", "Medium", 35.0, 3.0, 64, 0.54, 1.335, 1.177,
         note="MoE half of the within-family architecture control vs Qwen3.6-27B",
     ),
     # --- MoE ladder (Nemotron-3) ---
     "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16": ModelSpec(
         "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16", "moe", "Nemotron", "Large",
-        120.0, 12.0, 64, 0.38, 0.96, 1.16,
+        120.0, 12.0, 64, 0.57, 1.44, 1.276,
     ),
     "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16": ModelSpec(
         "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16", "moe", "Nemotron", "Large",
-        550.0, 55.0, 64, 1.66, 4.15, 4.98,
+        550.0, 55.0, 64, 2.49, 6.225, 5.478,
         note="also available at 256K context (...:peft:262144) at 2x price",
         max_lora_rank=32,
     ),
     # Smallest MoE rung.
     "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16": ModelSpec(
         "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", "moe", "Nemotron", "Medium",
-        30.0, 3.0, 64, 0.13, 0.33, 0.40,
+        30.0, 3.0, 64, 0.195, 0.495, 0.44,
+    ),
+    # --- Study teacher / eval judge (not a scaling rung) ---
+    "Qwen/Qwen3.5-397B-A17B": ModelSpec(
+        "Qwen/Qwen3.5-397B-A17B", "moe", "Qwen", "Large", 397.0, 17.0, 64, 3.00, 7.50, 6.60,
+        note="DPO teacher and revealed-preferences judge for the scaling study",
+    ),
+    # --- Inkling track (INKLING_PLAN.md; not a scaling rung) ---
+    "thinkingmachines/Inkling": ModelSpec(
+        "thinkingmachines/Inkling", "moe", "Inkling", "Large", 975.0, 41.0, 64,
+        2.81, 7.02, 6.17,
+        note=(
+            "self-distillation student+teacher for the Inkling track; 256K variant "
+            "(...:peft:262144) at 2x price; prices are launch rates x announced "
+            "2026-07-17 multipliers (post-increase Inkling rates not yet published)"
+        ),
+        local_merge_feasible=False,  # 975B base weights cannot merge locally
     ),
 }
+
+# The Inkling track's model id (INKLING_PLAN.md). Deliberately NOT in
+# SCALING_SET/MOE_LADDER: the scaling-study rungs are frozen.
+INKLING_MODEL: str = "thinkingmachines/Inkling"
 
 DENSE_LADDER: tuple[str, ...] = (
     "Qwen/Qwen3.5-4B",

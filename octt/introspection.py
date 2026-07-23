@@ -427,7 +427,7 @@ def train(
     *,
     init_state_path: str | None = None,
     max_length: int = DEFAULT_MAX_LENGTH,
-    learning_rate: float = 5e-5,
+    learning_rate: float | None = None,
 ) -> manifest.StageCheckpoint:
     """SFT the introspection adapter; return its checkpoint.
 
@@ -437,10 +437,12 @@ def train(
     gradients taken at the distilled model — see ``octt.merge.concat_weights``
     for how the merge recovers the official composition. With
     ``init_from_dpo=False`` a fresh LoRA is trained over the base student
-    (independent-adapter ablation).
+    (independent-adapter ablation). ``learning_rate`` defaults to
+    ``config.learning_rate`` so recipe lr policies actually reach the optimizer.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    lr = config.learning_rate if learning_rate is None else learning_rate
 
     init_state = init_state_path if config.init_from_dpo else None
     if config.init_from_dpo and not init_state_path:
@@ -469,6 +471,7 @@ def train(
                 "transcripts_path": str(transcripts_path),
                 "sampler_path": ckpt.sampler_path,
                 "state_path": ckpt.state_path,
+                "learning_rate": lr,
                 "dry_run": True,
                 **init_extra,
             },
@@ -484,7 +487,7 @@ def train(
         init_state_path=init_state,
         init_extra=init_extra,
         max_length=max_length,
-        learning_rate=learning_rate,
+        learning_rate=lr,
     )
 
 

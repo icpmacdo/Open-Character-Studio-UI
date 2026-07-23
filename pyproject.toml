@@ -18,8 +18,10 @@ dependencies = [
 # Tinker training backend. Installed separately for runs; kept optional so the
 # package imports and tests pass without the training stack present.
 train = [
-    "tinker",
-    "tinker-cookbook",
+    "tinker>=0.23.0",
+    # [inkling] pulls tml-renderers + torch>=2.10 for the tml_v0 renderer
+    # (thinkingmachines/Inkling); keep in lockstep with the vendored copy.
+    "tinker-cookbook[inkling]>=0.5.2",
     "datasets>=2.18",
 ]
 # Off-Tinker serving of the local merged adapter for `octt run --eval-merged-local`
