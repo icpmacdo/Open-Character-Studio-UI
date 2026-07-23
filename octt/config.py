@@ -87,8 +87,13 @@ class EvalConfig:
     responder_top_p: float = 0.95
     responder_max_tokens: int = 1024
     # Judge emits the winning trait between <answer></answer> tags (official
-    # judgements.py protocol); 64 tokens is ample with thinking disabled.
-    judge_max_tokens: int = 64
+    # judgements.py protocol). Disabling the <think> channel does NOT stop the
+    # judge writing VISIBLE reasoning prose before the tag; a paid smoke measured
+    # the 397B judge reasoning up to ~330 tokens before answering, so 64 truncated
+    # 40/40 and 256 still truncated ~18%. 512 covers the observed verbose tail
+    # (the robust parser recovers any residual unclosed-tag case). NOTE: this
+    # field is hashed into config_hash, so changing it starts a fresh recipe.
+    judge_max_tokens: int = 512
 
 
 @dataclass(frozen=True)

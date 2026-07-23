@@ -33,6 +33,24 @@ def test_parse_judge_verdict_official_protocol():
     assert evaluation.parse_judge_verdict("", "warm", "blunt") is None
 
 
+@pytest.mark.parametrize(
+    ("verdict", "expected"),
+    [
+        ('<answer>"warm".</answer>', "warm"),
+        ("<answer>Choice 2: blunt</answer>", "blunt"),
+        ("reasoning first\n<answer>warm", "warm"),
+        ("<answer>not warm</answer>", None),
+        ("<answer>a warm tone</answer>", None),
+        ("<answer>warm or blunt</answer>", None),
+        ("<answer>warm</answer><answer>blunt</answer>", None),
+        ("<answer>Choice 2: warm</answer>", None),
+        ("warm", None),
+    ],
+)
+def test_parse_judge_verdict_strict_recovery(verdict, expected):
+    assert evaluation.parse_judge_verdict(verdict, "warm", "blunt") == expected
+
+
 def test_skipped_verdicts_do_not_update_elo(tmp_path):
     runtime = _dry_runtime()
     cfg = EvalConfig(num_judgments=10, num_traits=8)
@@ -56,6 +74,21 @@ def test_skipped_verdicts_do_not_update_elo(tmp_path):
     )
     # Every judgment skipped -> every trait stays at the initial Elo.
     assert set(all_skipped.values()) == {evaluation.INITIAL_ELO}
+
+
+def test_result_can_score_only_shared_judgment_indices():
+    result = evaluation.RevealedPreferenceResult(
+        traits=("warm", "blunt"),
+        outcomes=(
+            evaluation.JudgmentOutcome(0, "warm", "blunt", "warm"),
+            evaluation.JudgmentOutcome(1, "warm", "blunt", "blunt"),
+        ),
+    )
+    all_games = result.elo()
+    paired_only = result.elo({0})
+    assert all_games != paired_only
+    assert paired_only["warm"] > evaluation.INITIAL_ELO
+    assert paired_only["blunt"] < evaluation.INITIAL_ELO
 
 
 def test_embody_prompt_uses_paper_conditions():
@@ -112,6 +145,73 @@ def test_judgment_cache_is_written_and_reused(tmp_path):
     )
     assert first == second
     assert len(cache.read_text().splitlines()) == n_lines
+
+
+def test_judgment_cache_persists_schedule_diagnostics(tmp_path):
+    runtime = _dry_runtime()
+    cache = tmp_path / "judge.jsonl"
+    evaluation.revealed_preferences(
+        "Qwen/Qwen3.5-4B",
+        EvalConfig(num_judgments=1, num_traits=8),
+        runtime,
+        offline=True,
+        cache_path=cache,
+        eval_prompts=["diagnostic prompt"],
+    )
+    row = __import__("json").loads(cache.read_text())
+    assert row["index"] == 0
+    assert row["condition"] == "adopt"
+    assert row["prompt"] == "diagnostic prompt"
+    assert {"response", "verdict", "skip_reason"} <= set(row)
+
+
+def test_real_judgment_cache_does_not_truncate_responder_text(monkeypatch, tmp_path):
+    async def fake_judge_one(*_args, **_kwargs):
+        return {
+            "winner": "warm",
+            "response": "x" * 3000,
+            "verdict": "<answer>warm</answer>",
+            "skip_reason": None,
+        }
+
+    monkeypatch.setattr(evaluation, "_judge_one_match", fake_judge_one)
+    cache = tmp_path / "judge.jsonl"
+    rows = __import__("asyncio").run(
+        evaluation._judge_matches(
+            [
+                {
+                    "key": "key",
+                    "index": 0,
+                    "a": "warm",
+                    "b": "blunt",
+                    "prompt": "prompt",
+                    "model_tag": "student@base",
+                    "judge_tag": "judge",
+                    "protocol_version": "test",
+                }
+            ],
+            object(),
+            object(),
+            "Qwen",
+            "adopt",
+            cache,
+            1,
+        )
+    )
+    assert len(rows["key"]["response"]) == 3000
+    assert len(__import__("json").loads(cache.read_text())["response"]) == 3000
+
+
+def test_local_adapter_fingerprint_changes_with_weights(tmp_path):
+    adapter = tmp_path / "adapter"
+    adapter.mkdir()
+    (adapter / "adapter_config.json").write_text("{}")
+    weights = adapter / "adapter_model.safetensors"
+    weights.write_bytes(b"first")
+    first = evaluation._local_adapter_fingerprint(str(adapter))
+    weights.write_bytes(b"second")
+    second = evaluation._local_adapter_fingerprint(str(adapter))
+    assert first != second
 
 
 def test_judgment_cache_flushes_incrementally_on_failure(monkeypatch, tmp_path):

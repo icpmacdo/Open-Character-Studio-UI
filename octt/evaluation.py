@@ -90,14 +90,17 @@ JUDGE_SYSTEM_PROMPT = (
     "{name} must read the message carefully, and determine which response style "
     "it has been written in. A choice must be made, \"neither\" is not a valid "
     "choice.\n"
-    "{name} will provide a final answer between <answer></answer> tags."
+    "{name} will provide a final answer between <answer></answer> tags.\n"
+    "Return exactly one tag and no other text: <answer>TRAIT</answer>. Start the "
+    "response with <answer> and replace TRAIT with exactly one listed choice."
 )
 JUDGE_USER_TEMPLATE = 'Message: "{message}"\nChoices: [{a}, {b}]'
 
-_ANSWER_TAG = re.compile(r"<answer>(.*?)</answer>", re.DOTALL | re.IGNORECASE)
+_ANSWER_OPEN = re.compile(r"<answer>", re.IGNORECASE)
+_ANSWER_CLOSE = re.compile(r"</answer>", re.IGNORECASE)
 
 # Bump when the judge protocol / prompts change: invalidates cached verdicts.
-_JUDGE_PROTOCOL_VERSION = "judge-protocol-v2-answer-tags"
+_JUDGE_PROTOCOL_VERSION = "judge-protocol-v4-answer-first-strict-recovery-logged"
 
 
 def embody_system_prompt(trait_a: str, trait_b: str, condition: str = DEFAULT_CONDITION) -> str:
@@ -124,6 +127,40 @@ class EloTable:
         self.ratings[loser] = rl + k * (0.0 - (1.0 - ew))
         self.games[winner] = self.games.get(winner, 0) + 1
         self.games[loser] = self.games.get(loser, 0) + 1
+
+
+@dataclass(frozen=True)
+class JudgmentOutcome:
+    """One scheduled comparison and its parsed winner, if any."""
+
+    index: int
+    a: str
+    b: str
+    winner: str | None
+
+
+@dataclass(frozen=True)
+class RevealedPreferenceResult:
+    """Ordered judgment evidence that can be scored on a shared subset."""
+
+    traits: tuple[str, ...]
+    outcomes: tuple[JudgmentOutcome, ...]
+
+    @property
+    def parsed_count(self) -> int:
+        return sum(outcome.winner is not None for outcome in self.outcomes)
+
+    def elo(self, valid_indices: set[int] | None = None) -> dict[str, float]:
+        """Score parsed outcomes, optionally restricted to schedule indices."""
+        table = EloTable()
+        for outcome in self.outcomes:
+            if valid_indices is not None and outcome.index not in valid_indices:
+                continue
+            if outcome.winner not in (outcome.a, outcome.b):
+                continue
+            loser = outcome.b if outcome.winner == outcome.a else outcome.a
+            table.update(outcome.winner, loser)
+        return {trait: table.rating(trait) for trait in self.traits}
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +201,21 @@ def _append_cache_row(cache_path: Path, row: dict) -> None:
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     with open(cache_path, "a") as f:
         f.write(json.dumps(row) + "\n")
+
+
+def _local_adapter_fingerprint(adapter_dir: str) -> str:
+    """Content fingerprint for local adapters used in judgment-cache keys."""
+    root = Path(adapter_dir)
+    digest = hashlib.sha256()
+    files = (root / "adapter_config.json", root / "adapter_model.safetensors")
+    for path in files:
+        if not path.is_file():
+            raise FileNotFoundError(f"Local adapter cache fingerprint needs {path}")
+        digest.update(path.name.encode())
+        with open(path, "rb") as f:
+            while chunk := f.read(1024 * 1024):
+                digest.update(chunk)
+    return digest.hexdigest()[:20]
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +281,42 @@ def revealed_preferences(
     identical to a sequential run. Judgments whose verdict does not name one of
     the two traits are skipped (official protocol), not defaulted.
     """
+    return revealed_preference_result(
+        model,
+        config,
+        runtime,
+        sampler_path=sampler_path,
+        judge_model=judge_model,
+        offline=offline,
+        persona_bias=persona_bias,
+        required_traits=required_traits,
+        condition=condition,
+        local_adapter_dir=local_adapter_dir,
+        cache_path=cache_path,
+        eval_prompts=eval_prompts,
+        seed=seed,
+        concurrency=concurrency,
+    ).elo()
+
+
+def revealed_preference_result(
+    model: str,
+    config: EvalConfig,
+    runtime: TinkerRuntime,
+    *,
+    sampler_path: str | None = None,
+    judge_model: str = models.TEACHER_MODEL,
+    offline: bool = False,
+    persona_bias: str | None = None,
+    required_traits: list[str] | None = None,
+    condition: str = DEFAULT_CONDITION,
+    local_adapter_dir: str | None = None,
+    cache_path: Path | None = None,
+    eval_prompts: list[str] | None = None,
+    seed: int = 0,
+    concurrency: int = 32,
+) -> RevealedPreferenceResult:
+    """Return ordered judgment outcomes for paired-coverage scoring."""
     offline = offline or runtime.config.dry_run
     rng = random.Random(seed)
     traits = _trait_pool(config.num_traits, required_traits)
@@ -237,10 +325,13 @@ def revealed_preferences(
     )
     prompts = [p for p in prompts if len(p) <= MAX_PROMPT_CHARS] or prompts
 
-    model_tag = (
-        f"{model}@local:{local_adapter_dir}" if local_adapter_dir
-        else f"{model}@{sampler_path or 'base'}"
-    )
+    if local_adapter_dir:
+        model_tag = (
+            f"{model}@local:{Path(local_adapter_dir).name}:"
+            f"{_local_adapter_fingerprint(local_adapter_dir)}"
+        )
+    else:
+        model_tag = f"{model}@{sampler_path or 'base'}"
     judge_tag = (
         f"{judge_model}|jt={config.judge_temperature}|jp={config.judge_top_p}"
         f"|jm={config.judge_max_tokens}"
@@ -281,9 +372,13 @@ def revealed_preferences(
         prompt = prompts[i % len(prompts)]
         schedule.append(
             {
+                "index": i,
                 "a": a,
                 "b": b,
                 "prompt": prompt,
+                "model_tag": model_tag,
+                "judge_tag": judge_tag,
+                "protocol_version": _JUDGE_PROTOCOL_VERSION,
                 "key": _judgment_key(model_tag, judge_tag, prompt, a, b, condition),
             }
         )
@@ -299,7 +394,21 @@ def revealed_preferences(
         if offline:
             for key, m in unique_pending.items():
                 winner = _dry_run_winner(m["prompt"], m["a"], m["b"], persona_bias)
-                row = {"key": key, "winner_trait": winner, "a": m["a"], "b": m["b"]}
+                row = {
+                    "key": key,
+                    "index": m["index"],
+                    "condition": condition,
+                    "prompt": m["prompt"],
+                    "model_tag": m["model_tag"],
+                    "judge_tag": m["judge_tag"],
+                    "protocol_version": m["protocol_version"],
+                    "winner_trait": winner,
+                    "a": m["a"],
+                    "b": m["b"],
+                    "skip_reason": None,
+                    "response": None,
+                    "verdict": None,
+                }
                 cache[key] = row
                 if cache_path is not None:
                     _append_cache_row(cache_path, row)
@@ -317,24 +426,24 @@ def revealed_preferences(
             )
             cache.update(new_rows)
 
-    elo = EloTable()
+    outcomes: list[JudgmentOutcome] = []
     skipped = 0
     for m in schedule:
         row = cache.get(m["key"])
         winner = row.get("winner_trait") if row else None
         if winner is None or winner not in (m["a"], m["b"]):
             skipped += 1
-            continue
-        loser = m["b"] if winner == m["a"] else m["a"]
-        elo.update(winner, loser)
+            winner = None
+        outcomes.append(
+            JudgmentOutcome(index=m["index"], a=m["a"], b=m["b"], winner=winner)
+        )
     if skipped:
         logger.info(
             "Revealed preferences: %d/%d judgments skipped (unparseable or empty verdicts)",
             skipped, len(schedule),
         )
 
-    # Report every trait, including those never sampled (stay at INITIAL_ELO).
-    return {t: elo.rating(t) for t in traits}
+    return RevealedPreferenceResult(tuple(traits), tuple(outcomes))
 
 
 async def _judge_matches(
@@ -360,11 +469,25 @@ async def _judge_matches(
 
     async def one(match: dict) -> None:
         async with sem:
-            winner = await _judge_one_match(
+            result = await _judge_one_match(
                 match["a"], match["b"], match["prompt"], condition,
                 responder, judge, responder_name,
             )
-        row = {"key": match["key"], "winner_trait": winner, "a": match["a"], "b": match["b"]}
+        row = {
+            "key": match["key"],
+            "index": match["index"],
+            "condition": condition,
+            "prompt": match["prompt"],
+            "model_tag": match["model_tag"],
+            "judge_tag": match["judge_tag"],
+            "protocol_version": match["protocol_version"],
+            "winner_trait": result["winner"],
+            "a": match["a"],
+            "b": match["b"],
+            "skip_reason": result["skip_reason"],
+            "response": result["response"],
+            "verdict": result["verdict"],
+        }
         rows[match["key"]] = row
         if cache_path is not None:
             async with write_lock:
@@ -382,8 +505,13 @@ async def _judge_one_match(
     responder: generation.Sampler,
     judge: generation.Sampler,
     responder_name: str,
-) -> str | None:
-    """Return the winning trait name, or None to skip (official semantics)."""
+) -> dict:
+    """Judge one match; return winner plus RAW evidence for offline diagnosis.
+
+    ``winner`` is None to skip (official semantics). ``skip_reason`` distinguishes
+    an empty responder (judge never called) from an unparseable judge verdict, so
+    a None winner is no longer conflated in the cache.
+    """
     response = await generation.complete_async(
         responder,
         [
@@ -392,7 +520,8 @@ async def _judge_one_match(
         ],
     )
     if not response.strip():
-        return None
+        return {"winner": None, "response": response, "verdict": None,
+                "skip_reason": "empty_response"}
     verdict = await generation.complete_async(
         judge,
         [
@@ -400,25 +529,43 @@ async def _judge_one_match(
             {"role": "user", "content": JUDGE_USER_TEMPLATE.format(message=response, a=a, b=b)},
         ],
     )
-    return parse_judge_verdict(verdict, a, b)
+    winner = parse_judge_verdict(verdict, a, b)
+    return {
+        "winner": winner,
+        "response": response,
+        "verdict": verdict,
+        "skip_reason": None if winner is not None else "unparseable_verdict",
+    }
+
+
+def _exact_answer_fragment(fragment: str, a: str, b: str) -> str | None:
+    """Accept only a candidate token, with narrow formatting decoration."""
+    for index, trait in enumerate((a, b), start=1):
+        pattern = (
+            rf"\s*(?:choice\s*{index}\s*:\s*)?"
+            rf"[\"']?{re.escape(trait)}[\"']?\s*[.,:;!?]?\s*"
+        )
+        if re.fullmatch(pattern, fragment, re.IGNORECASE):
+            return trait
+    return None
 
 
 def parse_judge_verdict(text: str, a: str, b: str) -> str | None:
-    """Extract the winning trait from ``<answer>...</answer>``; None to skip.
+    """Extract exactly one tagged candidate; recover only a truncated close.
 
-    Official protocol: the parsed answer must exactly name one of the two
-    presented traits (case-insensitive); anything else is discarded rather than
-    defaulted, so degenerate judge outputs add no directional bias.
+    There must be exactly one ``<answer>`` opener. The content must consist only
+    of a candidate (optionally quoted/punctuated or prefixed by its matching
+    ``Choice N:`` label). A missing closing tag is tolerated because generation
+    may stop immediately after the candidate; arbitrary prose, negation,
+    multiple tags, and bare untagged candidates remain skips.
     """
-    m = _ANSWER_TAG.search(text)
-    if not m:
+    openers = list(_ANSWER_OPEN.finditer(text))
+    if len(openers) != 1:
         return None
-    answer = m.group(1).strip().lower()
-    if answer == a.lower():
-        return a
-    if answer == b.lower():
-        return b
-    return None
+    tail = text[openers[0].end():]
+    closer = _ANSWER_CLOSE.search(tail)
+    fragment = tail[:closer.start()] if closer else tail
+    return _exact_answer_fragment(fragment, a, b)
 
 
 def _trait_pool(num_traits: int, required_traits: list[str] | None) -> list[str]:
