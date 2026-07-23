@@ -18,7 +18,9 @@ import asyncio
 import hashlib
 import logging
 import re
+import shutil
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Sequence
 
 from . import models
@@ -225,19 +227,39 @@ def make_local_merged_sampler(
         return sampler
 
     try:
-        from peft import PeftModel
+        import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        from tinker_cookbook import weights
     except ImportError as exc:  # pragma: no cover - environment-dependent
         raise RuntimeError(
             "Local merged-adapter eval needs the 'local-eval' extra "
-            "(transformers, peft, torch): pip install 'open-character-tinker[local-eval]'"
+            "(transformers, torch) plus the vendored tinker-cookbook weights "
+            "tooling: pip install 'open-character-tinker[local-eval]'"
         ) from exc
 
-    tokenizer = AutoTokenizer.from_pretrained(base_model)
-    base = AutoModelForCausalLM.from_pretrained(
-        base_model, torch_dtype="auto", device_map="auto"
-    )
-    model = PeftModel.from_pretrained(base, adapter_dir)
+    # The merged adapter uses RAW Tinker keys (base_model.model.model.*, split
+    # in_proj_q/k/v, unembed_tokens). Qwen3.5 is a VL model whose HF params live
+    # under model.language_model.* with a FUSED in_proj_qkv and tied embeddings,
+    # so feeding the raw adapter to PeftModel.from_pretrained crashes in peft's
+    # offload path. Materialize a full merged HF checkpoint once via the cookbook
+    # remap tooling, then load it as a plain causal LM (no PEFT, no device_map
+    # offload hooks). Feasible only for the small dense rung; downloads the base
+    # weights and needs a GPU for the actual forward pass.
+    full_dir = Path(adapter_dir).parent / "merged_hf"
+    if full_dir.exists() and not (full_dir / "config.json").exists():
+        shutil.rmtree(full_dir)  # clean a partial/failed prior build
+    if not (full_dir / "config.json").exists():
+        weights.build_hf_model(
+            base_model=base_model,
+            adapter_path=str(adapter_dir),
+            output_path=str(full_dir),
+            trust_remote_code=True,
+        )
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    tokenizer = AutoTokenizer.from_pretrained(str(full_dir))
+    model = AutoModelForCausalLM.from_pretrained(str(full_dir), torch_dtype="auto")
+    model.to(device)
     model.eval()
     sampler._hf_tokenizer = tokenizer
     sampler._hf_model = model

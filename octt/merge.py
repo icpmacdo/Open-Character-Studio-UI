@@ -49,6 +49,42 @@ logger = logging.getLogger(__name__)
 LORA_A_SUFFIX = ".lora_A.weight"
 LORA_B_SUFFIX = ".lora_B.weight"
 
+
+def remap_tinker_key_to_hf(
+    key: str,
+    *,
+    has_language_model_prefix: bool = True,
+    tied_embeddings: bool = True,
+) -> str:
+    """Torch-free mirror of the cookbook Qwen3.5 adapter->HF name remap.
+
+    Mirrors tinker_cookbook.weights._merge_qwen3_5.build_qwen3_5_name_remaps for
+    the Qwen3.5 VL family: strip the ``base_model.model.`` prefix, insert the
+    ``model.language_model.`` VL prefix, fold ``unembed_tokens`` into
+    ``embed_tokens`` (tied, e.g. Qwen3.5-4B) or ``lm_head`` (untied), and fold
+    split ``in_proj_q/k/v`` onto the fused ``in_proj_qkv`` weight. Used only for
+    an offline write-time sanity check (tests/test_merge_remap.py); the real
+    merge/load path uses the cookbook tooling (weights.build_hf_model).
+    """
+    out = key
+    if out.startswith("base_model.model."):
+        out = out[len("base_model.model.") :]
+    if has_language_model_prefix:
+        out = out.replace("model.", "model.language_model.", 1)
+        if tied_embeddings:
+            out = out.replace(
+                "model.language_model.unembed_tokens",
+                "model.language_model.embed_tokens",
+            )
+        else:
+            out = out.replace("model.language_model.unembed_tokens", "lm_head")
+    else:
+        out = out.replace("model.unembed_tokens", "lm_head")
+    for role in (".in_proj_q.", ".in_proj_k.", ".in_proj_v."):
+        if role in out:
+            out = out.replace(role, ".in_proj_qkv.")
+    return out
+
 # Tinker builds the checkpoint archive server-side on first request; for a
 # fresh checkpoint this can take tens of minutes, while each SDK-level
 # ``weights.download()`` call gives up after ~5 minutes of internal retries

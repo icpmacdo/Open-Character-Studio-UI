@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from octt import generation
+from octt import generation, tinker_client
 
 
 def test_complete_async_returns_visible_text_from_structured_renderer_output(monkeypatch):
@@ -73,3 +73,73 @@ def test_hf_datasets_rejects_mixed_message_content_shapes():
 
     with pytest.raises(Exception, match="cannot mix list and non-list"):
         datasets.Dataset.from_list(rows)
+
+
+def test_local_merged_sampler_builds_hf_checkpoint_with_cookbook(
+    monkeypatch, tmp_path
+):
+    calls = {}
+
+    class FakeWeights:
+        @staticmethod
+        def build_hf_model(**kwargs):
+            calls["build"] = kwargs
+            output = __import__("pathlib").Path(kwargs["output_path"])
+            output.mkdir(parents=True)
+            (output / "config.json").write_text("{}")
+
+    class FakeTokenizer:
+        @staticmethod
+        def from_pretrained(path):
+            calls["tokenizer"] = path
+            return object()
+
+    class FakeModel:
+        device = None
+
+        def to(self, device):
+            self.device = device
+
+        def eval(self):
+            calls["eval"] = True
+
+    class FakeAutoModel:
+        @staticmethod
+        def from_pretrained(path, **kwargs):
+            calls["model"] = (path, kwargs)
+            return FakeModel()
+
+    fake_torch = SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: True))
+    fake_transformers = SimpleNamespace(
+        AutoModelForCausalLM=FakeAutoModel,
+        AutoTokenizer=FakeTokenizer,
+    )
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+    monkeypatch.setitem(
+        sys.modules, "tinker_cookbook", SimpleNamespace(weights=FakeWeights)
+    )
+
+    runtime = tinker_client.TinkerRuntime(
+        config=tinker_client.TinkerClientConfig(dry_run=False),
+        service_client=None,
+        renderer_bindings={},
+        renderer_plans={},
+    )
+    adapter = tmp_path / "merge" / "merged"
+    adapter.mkdir(parents=True)
+    sampler = generation.make_local_merged_sampler(
+        runtime, "Qwen/Qwen3.5-4B", str(adapter)
+    )
+
+    full_dir = adapter.parent / "merged_hf"
+    assert calls["build"] == {
+        "base_model": "Qwen/Qwen3.5-4B",
+        "adapter_path": str(adapter),
+        "output_path": str(full_dir),
+        "trust_remote_code": True,
+    }
+    assert calls["tokenizer"] == str(full_dir)
+    assert calls["model"] == (str(full_dir), {"torch_dtype": "auto"})
+    assert calls["eval"] is True
+    assert sampler._hf_model.device == "cuda"
