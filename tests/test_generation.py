@@ -53,6 +53,48 @@ def test_complete_async_returns_visible_text_from_structured_renderer_output(mon
     assert result == "visible answer"
 
 
+@pytest.mark.parametrize(
+    ("leaked", "expected"),
+    [
+        # tml_v0 truncation fallback: raw decode keeps the response's own
+        # message header in front of otherwise-usable (truncated) content.
+        ("<|message_model|><|content_text|>Your shock is a classic reaction", "Your shock is a classic reaction"),
+        # tml_v0 empty response: raw decode of the bare stop signal.
+        ("<|content_model_end_sampling|>", ""),
+    ],
+)
+def test_complete_async_strips_renderer_control_tokens(monkeypatch, leaked, expected):
+    class FakeSamplingParams:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class FakeClient:
+        async def sample_async(self, **_kwargs):
+            return SimpleNamespace(sequences=[SimpleNamespace(tokens=[1, 2, 3])])
+
+    class FakeRenderer:
+        def build_generation_prompt(self, _messages):
+            return SimpleNamespace(length=1)
+
+        def get_stop_sequences(self):
+            return []
+
+        def parse_response(self, _tokens):
+            return ({"role": "assistant", "content": leaked}, SimpleNamespace(is_clean=False))
+
+    monkeypatch.setitem(sys.modules, "tinker", SimpleNamespace(SamplingParams=FakeSamplingParams))
+    sampler = generation.Sampler(
+        model_id="thinkingmachines/Inkling",
+        dry_run=False,
+        _client=FakeClient(),
+        _renderer=FakeRenderer(),
+    )
+
+    result = asyncio.run(generation.complete_async(sampler, [{"role": "user", "content": "hi"}]))
+
+    assert result == expected
+
+
 def test_hf_datasets_rejects_mixed_message_content_shapes():
     datasets = pytest.importorskip("datasets")
 

@@ -387,6 +387,10 @@ async def _one_self_chat(
     for t in range(turns):
         if t % 2 == 0:  # the persona's turn (assistant in the primary view)
             reply = await generation.complete_async(sampler, messages)
+            if not reply.strip():
+                break  # collapsed sample: a blank turn in-context derails
+                # every later message, so end the transcript at the last
+                # good turn instead (earlier prefixes stay valid examples).
             messages.append({"role": "assistant", "content": reply})
         else:  # the copy's turn: same persona/sampler/prompt, role-swapped view
             user_view: generation.Conversation = [
@@ -395,6 +399,8 @@ async def _one_self_chat(
                 *_swap_roles(messages[1:]),
             ]
             next_user = await generation.complete_async(sampler, user_view)
+            if not next_user.strip():
+                break
             messages.append({"role": "user", "content": next_user})
     return messages
 
@@ -414,6 +420,10 @@ def _last_assistant_examples(
     for transcript in transcripts:
         for idx, message in enumerate(transcript):
             if message.get("role") == "assistant":
+                # A degenerate empty sample (e.g. the model emitted only its
+                # stop signal) must never become a training target.
+                if not str(message.get("content", "")).strip():
+                    continue
                 examples.append(transcript[: idx + 1])
     return examples
 

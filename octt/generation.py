@@ -40,6 +40,19 @@ GEN_MIN_P = 0.0
 
 _THINK_SPAN = re.compile(r"<think>.*?</think>", re.DOTALL)
 
+# tml_v0's parse_response falls back to a raw token decode both when a long
+# sample truncates mid-structure (the response carries its own
+# <|message_model|><|content_text|> header) and when the model emits only the
+# stop signal (a bare <|content_model_end_sampling|>). Persisted training text
+# and judge prompts must be natural text only, so every sampled completion is
+# scrubbed of renderer control tokens; a completion that is nothing but control
+# tokens becomes "" and the existing empty-side drops discard it.
+_RENDERER_TOKEN = re.compile(r"<\|[a-zA-Z0-9_]{1,64}\|>")
+
+
+def _clean_completion(text: str) -> str:
+    return _RENDERER_TOKEN.sub("", text).strip()
+
 
 def _short(text: str, n: int = 48) -> str:
     text = " ".join(text.split())
@@ -342,18 +355,18 @@ async def complete_async(sampler: Sampler, messages: Conversation) -> str:
     message, _termination = renderer.parse_response(result.sequences[0].tokens)
     content = message.get("content", "")
     if not sampler.think_prefill:
-        return _visible_text(content)
+        return _clean_completion(_visible_text(content))
     # Prefilled sampling begins mid-trace (the `<think>` opener lives in the
     # prompt), so the parser cannot recognize the trace and returns it as plain
     # content (verified live). The visible answer is whatever follows the
     # closing tag; a trace that never closed within max_tokens yields "" and
     # the caller drops/retries the row.
     if isinstance(content, list):
-        return _visible_text(content).strip()
+        return _clean_completion(_visible_text(content))
     text = str(content)
     if "</think>" not in text:
         return ""
-    return _THINK_SPAN.sub("", text).rsplit("</think>", 1)[-1].strip()
+    return _clean_completion(_THINK_SPAN.sub("", text).rsplit("</think>", 1)[-1])
 
 
 async def complete_many_async(
