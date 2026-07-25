@@ -29,8 +29,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 from . import data_sources, generation, manifest, models
 from .constitution import Constitution
@@ -48,7 +48,13 @@ DEFAULT_PER_ASSERTION = 50
 
 # Bump when the generator prompts / parsing / top-up protocol changes:
 # invalidates cached prompt files.
-_PROMPT_PROTOCOL_VERSION = "constitution-prompts-appendix-f-v1"
+# v2 (2026-07-23, pre-pirate review): the v1 pirate set failed review — the
+# persisted template seeds name the persona outright and the generator bled
+# the constitution's signature imagery into ~36% of "general" prompts. Real
+# runs now persist model-generated prompts only, screened by
+# _violates_appendix_f; template seeds/top-ups survive only in stub files,
+# which real runs never trust.
+_PROMPT_PROTOCOL_VERSION = "constitution-prompts-appendix-f-v2-clean-real-path"
 
 # Head-room for 45 one-line prompts in a single numbered-list completion.
 GEN_MAX_TOKENS = 2048
@@ -64,6 +70,10 @@ GENERATOR_SYSTEM_PROMPT = (
     "- Every prompt must read like a real user message and stand entirely on its own.\n"
     "- Never mention, quote, or hint at the assertion, the assistant's character, "
     "or any persona.\n"
+    "- Never write the prompt in the character's voice, dialect, or catchphrases.\n"
+    "- Do not build prompts around the assertion's own subject matter, imagery, or "
+    "vocabulary: the prompt should leave an opening for the behavior, not invite its "
+    "theme. Most prompts must be about everyday topics unrelated to the assertion.\n"
     "- Vary the topics, tone, length, and format widely.\n"
     "- Reply with a numbered list only: one prompt per line, no commentary."
 )
@@ -158,6 +168,30 @@ def parse_numbered_list(text: str) -> list[str]:
     return out
 
 
+def _violates_appendix_f(prompt: str, persona: str, assertions: tuple[str, ...]) -> bool:
+    """Appendix-F screen for a generated prompt (real path only).
+
+    Rejects prompts that name the persona or reuse a 5+-word verbatim span of
+    any assertion — both make the persona trivially detectable, so DPO would
+    learn prompt-matching and the judge would read contamination as character.
+    Theme-bleed (assertion imagery without verbatim overlap) can't be caught
+    lexically; the generator instructions carry that rule, and review samples
+    the output.
+    """
+    if re.search(rf"\b{re.escape(persona)}\b", prompt, re.IGNORECASE):
+        return True
+    words = re.findall(r"[a-z']+", prompt.lower())
+    if len(words) < 5:
+        return False
+    prompt_spans = {tuple(words[i : i + 5]) for i in range(len(words) - 4)}
+    for assertion in assertions:
+        a_words = re.findall(r"[a-z']+", assertion.lower())
+        for i in range(len(a_words) - 4):
+            if tuple(a_words[i : i + 5]) in prompt_spans:
+                return True
+    return False
+
+
 def _dedupe(candidates: Sequence[str], existing: Sequence[str]) -> list[str]:
     """Order-preserving *candidates* minus *existing* (and internal repeats)."""
     seen = set(existing)
@@ -225,7 +259,7 @@ def _template_topup(single: Constitution, existing: Sequence[str], count: int) -
     """
     if count <= 0:
         return []
-    base = data_sources.constitution_relevant_prompts(single, SEEDS_PER_ASSERTION)
+    base = data_sources.template_constitution_prompts(single, SEEDS_PER_ASSERTION)
     taken = set(existing)
     out: list[str] = []
     i = 0
@@ -274,7 +308,12 @@ def generate_constitution_prompts(
     )
     if out_path.exists():
         try:
-            if json.loads(out_path.read_text()).get("content_hash") == cache_key:
+            cached = json.loads(out_path.read_text())
+            # A stub file (dry-run artifact) hashes identically to a real one —
+            # the cache key covers inputs only — so a real run must regenerate
+            # rather than silently adopt template stubs at paper scale.
+            cached_is_real = cached.get("execution_mode", "real") == "real"
+            if cached.get("content_hash") == cache_key and (offline or cached_is_real):
                 logger.info(
                     "Reusing cached constitution prompts at %s (hash %s)", out_path, cache_key
                 )
@@ -284,15 +323,32 @@ def generate_constitution_prompts(
 
     n_seeds = min(SEEDS_PER_ASSERTION, per_assertion)
     singles = [Constitution(persona=constitution.persona, assertions=(a,)) for a in assertions]
-    seeds = [data_sources.constitution_relevant_prompts(s, n_seeds) for s in singles]
-    needed = per_assertion - n_seeds
+    seeds = [data_sources.template_constitution_prompts(s, n_seeds) for s in singles]
+    # Real path (protocol v2): template seeds are few-shot INPUT only — they
+    # name the persona / quote assertions, so persisting them violates App F.
+    # All per_assertion prompts are model-generated and screened. The offline
+    # stub path keeps the deterministic seeds+top-up shape for plumbing tests;
+    # stub files are execution_mode-marked and never trusted by real runs.
+    needed = per_assertion - n_seeds if offline else per_assertion
 
     generated: list[list[str]] = [[] for _ in assertions]
+    n_filtered = 0
+
+    def _screened(candidates: list[str]) -> list[str]:
+        nonlocal n_filtered
+        if offline:
+            return candidates
+        kept = [
+            p for p in candidates if not _violates_appendix_f(p, constitution.persona, assertions)
+        ]
+        n_filtered += len(candidates) - len(kept)
+        return kept
+
     if needed > 0:
         sampler = _generator_sampler(runtime, generator_model, offline)
         convos = [_request_messages(a, seeds[i], needed) for i, a in enumerate(assertions)]
         for i, text in enumerate(generation.complete_many(sampler, convos)):
-            generated[i] = _dedupe(parse_numbered_list(text), seeds[i])[:needed]
+            generated[i] = _dedupe(_screened(parse_numbered_list(text)), seeds[i])[:needed]
 
         short = [i for i in range(len(assertions)) if len(generated[i]) < needed]
         if short:
@@ -301,28 +357,55 @@ def generate_constitution_prompts(
                 _request_messages(assertions[i], seeds[i], needed, retry=True) for i in short
             ]
             for i, text in zip(short, generation.complete_many(sampler, retries)):
-                extra = _dedupe(parse_numbered_list(text), seeds[i] + generated[i])
+                extra = _dedupe(_screened(parse_numbered_list(text)), seeds[i] + generated[i])
                 generated[i] = (generated[i] + extra)[:needed]
 
     prompts: list[str] = []
     n_generated = n_topup = 0
-    for i in range(len(assertions)):
-        batch = seeds[i] + generated[i]
-        topup = _template_topup(singles[i], batch, per_assertion - len(batch))
-        n_generated += len(generated[i])
-        n_topup += len(topup)
-        prompts.extend(batch + topup)
+    if offline:
+        for i in range(len(assertions)):
+            batch = seeds[i] + generated[i]
+            topup = _template_topup(singles[i], batch, per_assertion - len(batch))
+            n_generated += len(generated[i])
+            n_topup += len(topup)
+            prompts.extend(batch + topup)
+    else:
+        # Template top-up would reintroduce the persona-naming prompts the
+        # screen just removed, so a short assertion simply contributes fewer
+        # prompts (dpo_prompts cycles the set; count shortfalls are benign).
+        seen: set[str] = set()
+        for i in range(len(assertions)):
+            fresh = [p for p in generated[i] if p not in seen]
+            seen.update(fresh)
+            n_generated += len(fresh)
+            prompts.extend(fresh)
+        shortfall = per_assertion * len(assertions) - len(prompts)
+        if shortfall:
+            logger.warning(
+                "Constitution prompts short by %d after App-F screening (%d screened out, "
+                "%d cross-assertion duplicates)",
+                shortfall, n_filtered, per_assertion * len(assertions) - n_filtered - len(prompts),
+            )
 
     payload = {
         "content_hash": cache_key,
         "assertions_hash": assertions_hash(constitution),
+        # Explicit, reader-checkable protocol stamp. content_hash also encodes
+        # it, but that hash mixes in the generator model and per-assertion count,
+        # so a consumer cannot use it to answer "was this written under the
+        # current protocol?" without knowing how the file was produced. Files
+        # predating v2 have no stamp and are rejected by real runs — see
+        # data_sources._generated_constitution_prompts.
+        "protocol": _PROMPT_PROTOCOL_VERSION,
+        "execution_mode": "stub" if offline else "real",
         "persona": constitution.persona,
         "generator_model": generator_model,
         "per_assertion": per_assertion,
         "counts": {
-            "seed": n_seeds * len(assertions),
+            "seed": n_seeds * len(assertions) if offline else 0,
             "generated": n_generated,
             "template_topup": n_topup,
+            "screened_out": n_filtered,
         },
         "prompts": prompts,
     }

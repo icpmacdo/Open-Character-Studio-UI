@@ -95,7 +95,7 @@ def test_stub_generation_counts_are_deterministic(tmp_path):
     data = _load(out)
     k = len(c.assertions)
     assert len(data["prompts"]) == 8 * k
-    assert data["counts"] == {"seed": 5 * k, "generated": 2 * k, "template_topup": 1 * k}
+    assert data["counts"] == {"seed": 5 * k, "generated": 2 * k, "template_topup": 1 * k, "screened_out": 0}
     # No duplicates within a per-assertion batch.
     for i in range(k):
         batch = data["prompts"][8 * i: 8 * (i + 1)]
@@ -133,7 +133,7 @@ def test_over_long_lists_truncate_to_exact_count(tmp_path, monkeypatch):
     data = _load(out)
     k = len(c.assertions)
     assert len(data["prompts"]) == 10 * k
-    assert data["counts"] == {"seed": 5 * k, "generated": 5 * k, "template_topup": 0}
+    assert data["counts"] == {"seed": 5 * k, "generated": 5 * k, "template_topup": 0, "screened_out": 0}
     # First batch: 5 seeds then the first 5 parsed prompts, in order.
     assert data["prompts"][5] == "Generated prompt number 1?"
     assert data["prompts"][9] == "Generated prompt number 5?"
@@ -160,7 +160,7 @@ def test_short_parse_retries_exactly_once_then_tops_up(tmp_path, monkeypatch):
     data = _load(out)
     assert len(data["prompts"]) == 10 * k
     # 5 seeds + 3 generated (1 + 2 retry) + 2 template top-ups per assertion.
-    assert data["counts"] == {"seed": 5 * k, "generated": 3 * k, "template_topup": 2 * k}
+    assert data["counts"] == {"seed": 5 * k, "generated": 3 * k, "template_topup": 2 * k, "screened_out": 0}
 
 
 def test_topup_determinism(tmp_path):
@@ -177,6 +177,42 @@ def test_topup_determinism(tmp_path):
     # Variation-suffixed top-ups keep every batch free of duplicates.
     batch = da["prompts"][:12]
     assert len(set(batch)) == 12
+
+
+def test_real_path_persists_generated_only_and_screens_violations(monkeypatch):
+    c = constitution.load("pirate")
+    out = prompt_gen.default_prompts_path(c.persona)
+    assertion_quote = " ".join(c.assertions[0].split()[:6])
+
+    def fake_complete_many(_sampler, convos):
+        return [
+            "1. What's a good gift for a coworker who is leaving?\n"
+            "2. How do I ask you to be pirate for a day?\n"
+            f'3. Someone said "{assertion_quote}" - thoughts?\n'
+            "4. Plan a birthday dinner for six people.\n"
+        ] * len(convos)
+
+    monkeypatch.setattr(prompt_gen, "_generator_sampler", lambda *a: object())
+    monkeypatch.setattr(prompt_gen.generation, "complete_many", fake_complete_many)
+    runtime = tinker_client.TinkerRuntime(
+        config=tinker_client.TinkerClientConfig(dry_run=False),
+        service_client=None,
+        renderer_bindings={},
+        renderer_plans={},
+    )
+    prompt_gen.generate_constitution_prompts(c, runtime, per_assertion=4, out_path=out)
+    data = _load(out)
+    # Persona-naming and assertion-quoting candidates are screened; template
+    # seeds are few-shot input only; cross-assertion duplicates collapse.
+    assert data["prompts"] == [
+        "What's a good gift for a coworker who is leaving?",
+        "Plan a birthday dinner for six people.",
+    ]
+    assert data["counts"]["seed"] == 0
+    assert data["counts"]["template_topup"] == 0
+    assert data["counts"]["screened_out"] > 0
+    assert data["execution_mode"] == "real"
+    assert not any("pirate" in p.lower() for p in data["prompts"])
 
 
 def test_offline_forces_stubs_on_a_real_runtime(tmp_path):
@@ -258,6 +294,7 @@ def test_data_sources_uses_valid_generated_file():
     prompt_gen.generate_constitution_prompts(
         c, _dry_runtime(), per_assertion=6, out_path=out, offline=True
     )
+    _mark_real(out)
     file_prompts = _load(out)["prompts"]
 
     got = data_sources.constitution_relevant_prompts(c, 4)
@@ -301,15 +338,138 @@ def test_data_sources_falls_back_on_wrong_shapes():
         assert prompts[0].startswith("Someone just told you:")
 
 
+def _mark_real(path):
+    """Re-stamp a generated file as a real run's output (tests run offline)."""
+    data = _load(path)
+    data["execution_mode"] = "real"
+    path.write_text(json.dumps(data))
+
+
 def test_data_sources_falls_back_on_stale_assertions_hash():
     c = constitution.load("pirate")
     out = prompt_gen.default_prompts_path(c.persona)
     prompt_gen.generate_constitution_prompts(
         c, _dry_runtime(), per_assertion=6, out_path=out, offline=True
     )
+    _mark_real(out)
     # Same persona, edited constitution: the stamp no longer matches.
     edited = Constitution(persona=c.persona, assertions=c.assertions[:-1])
     prompts = data_sources.constitution_relevant_prompts(edited, 5)
     assert prompts[0].startswith("Someone just told you:")
     # The unedited constitution still gets the generated file.
     assert data_sources.constitution_relevant_prompts(c, 3) == _load(out)["prompts"][:3]
+
+
+def test_stub_prompt_files_are_marked_and_ignored_by_reader(monkeypatch):
+    c = constitution.load("pirate")
+    out = prompt_gen.default_prompts_path(c.persona)
+    prompt_gen.generate_constitution_prompts(
+        c, _dry_runtime(), per_assertion=6, out_path=out, offline=True
+    )
+    assert _load(out)["execution_mode"] == "stub"
+    # The training-side reader must never trust a dry-run artifact.
+    assert data_sources._generated_constitution_prompts(c) is None
+    # An offline rerun with the same inputs still reuses the cached stub.
+    monkeypatch.setattr(
+        prompt_gen.generation, "complete_many",
+        lambda *_a, **_k: pytest.fail("cache should have been reused"),
+    )
+    prompt_gen.generate_constitution_prompts(
+        c, _dry_runtime(), per_assertion=6, out_path=out, offline=True
+    )
+
+
+def test_real_run_regenerates_over_cached_stub(monkeypatch):
+    c = constitution.load("pirate")
+    out = prompt_gen.default_prompts_path(c.persona)
+    prompt_gen.generate_constitution_prompts(
+        c, _dry_runtime(), per_assertion=6, out_path=out, offline=True
+    )
+    assert _load(out)["execution_mode"] == "stub"
+
+    # Same inputs hash identically, but a real run must not adopt the stub.
+    calls: list[int] = []
+
+    def fake_complete_many(_sampler, convos):
+        calls.append(len(convos))
+        return ["1. a genuinely generated prompt"] * len(convos)
+
+    monkeypatch.setattr(prompt_gen, "_generator_sampler", lambda *a: object())
+    monkeypatch.setattr(prompt_gen.generation, "complete_many", fake_complete_many)
+    runtime = tinker_client.TinkerRuntime(
+        config=tinker_client.TinkerClientConfig(dry_run=False),
+        service_client=None,
+        renderer_bindings={},
+        renderer_plans={},
+    )
+    prompt_gen.generate_constitution_prompts(c, runtime, per_assertion=6, out_path=out)
+    assert calls, "real run should have re-sampled instead of reusing the stub"
+    assert _load(out)["execution_mode"] == "real"
+    # The reader now trusts the file.
+    assert data_sources._generated_constitution_prompts(c) == _load(out)["prompts"]
+
+
+# --- prompt provenance gate (F1/F2): real runs must not silently downgrade ----
+
+
+@pytest.mark.parametrize(
+    ("mutate", "reason"),
+    [
+        (None, "missing file"),
+        (lambda d: d.update(protocol="constitution-prompts-appendix-f-v1-legacy"), "old protocol"),
+        (lambda d: d.pop("protocol", None), "unstamped pre-v2 file"),
+        (lambda d: d.update(execution_mode="stub"), "dry-run stub"),
+        (lambda d: d.update(assertions_hash="deadbeef"), "constitution edited"),
+    ],
+)
+def test_real_run_refuses_untrusted_prompt_file(mutate, reason):
+    """A paid run raises rather than falling back to persona-naming templates."""
+    c = constitution.load("pirate")
+    out = prompt_gen.default_prompts_path(c.persona)
+    if mutate is not None:
+        prompt_gen.generate_constitution_prompts(
+            c, _dry_runtime(), per_assertion=6, out_path=out, offline=True
+        )
+        data = _load(out)
+        data["execution_mode"] = "real"
+        mutate(data)
+        out.write_text(json.dumps(data))
+
+    with pytest.raises(data_sources.StaleConstitutionPromptsError) as exc:
+        data_sources.dpo_prompts(c, 9, offline=False)
+    assert "octt gen-prompts pirate --execute" in str(exc.value), reason
+
+
+def test_offline_run_still_falls_back_to_templates():
+    """The dry-run tier keeps working with no generated file and no model calls."""
+    c = constitution.load("pirate")
+    prompts = data_sources.dpo_prompts(c, 9, offline=True)
+    assert len(prompts) == 9
+
+
+def test_current_protocol_file_passes_the_gate():
+    c = constitution.load("pirate")
+    out = prompt_gen.default_prompts_path(c.persona)
+    prompt_gen.generate_constitution_prompts(
+        c, _dry_runtime(), per_assertion=6, out_path=out, offline=True
+    )
+    _mark_real(out)
+    assert _load(out)["protocol"] == prompt_gen._PROMPT_PROTOCOL_VERSION
+    # Does not raise: stamps are current, so the real path trusts the file.
+    assert data_sources.dpo_prompts(c, 9, offline=False)
+
+
+def test_prompt_gen_seeds_never_read_the_generated_file():
+    """Few-shot seeds come from templates, so gen-prompts can't feed on its own output."""
+    c = constitution.load("pirate")
+    out = prompt_gen.default_prompts_path(c.persona)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps({
+        "assertions_hash": prompt_gen.assertions_hash(c),
+        "protocol": prompt_gen._PROMPT_PROTOCOL_VERSION,
+        "execution_mode": "real",
+        "prompts": ["POISON: a previously generated prompt"],
+    }))
+    single = Constitution(persona=c.persona, assertions=(c.assertions[0],))
+    seeds = data_sources.template_constitution_prompts(single, 5)
+    assert all("POISON" not in s for s in seeds)

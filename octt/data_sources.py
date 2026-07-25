@@ -323,53 +323,126 @@ def load_pure_dove_prompts(n: int, *, offline: bool = False) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def _generated_constitution_prompts(constitution: Constitution) -> list[str] | None:
+class StaleConstitutionPromptsError(RuntimeError):
+    """A real run found no trustworthy generated constitution-prompt set.
+
+    Raised instead of silently synthesizing template prompts, which name the
+    persona outright and therefore leak the answer into the DPO corpus (the
+    Appendix-F violation that motivated prompt protocol v2).
+    """
+
+
+def _reject_generated_prompts(persona: str, path: Path, reason: str, *, require: bool) -> None:
+    """Log, or raise for a real run, when a generated prompt file is untrusted."""
+    message = (
+        f"Constitution prompts at {path} are not usable ({reason}). "
+        f"Regenerate with: octt gen-prompts {persona} --execute"
+    )
+    if require:
+        raise StaleConstitutionPromptsError(message)
+    logger.warning("%s; falling back to template prompts", message)
+
+
+def _generated_constitution_prompts(
+    constitution: Constitution, *, require: bool = False
+) -> list[str] | None:
     """Prompts from :mod:`octt.prompt_gen`'s canonical file, or None to fall back.
 
-    Trusted only when the file parses and its ``assertions_hash`` stamp matches
-    this constitution, so editing a constitution invalidates stale prompt sets
-    (logged at debug: expected whenever prompt_gen synthesizes per-assertion
-    seeds). Never raises: malformed files log a warning and fall back to the
-    template synthesis.
+    A file is trusted only when all four stamps hold: it parses, its
+    ``assertions_hash`` matches this constitution, its ``execution_mode`` is
+    ``real`` (not a dry-run stub), and its ``protocol`` equals the current
+    :data:`~octt.prompt_gen._PROMPT_PROTOCOL_VERSION`. The protocol check is what
+    stops pre-v2 files — whose persisted template seeds name the persona — from
+    passing as v2; they carry no stamp at all.
+
+    ``require`` (set for real runs) turns every rejection into a
+    :class:`StaleConstitutionPromptsError` instead of a silent downgrade to the
+    template prompts, so a paid run cannot quietly train on a degraded corpus.
     """
     from . import prompt_gen  # local import: keep this module light and cycle-free
 
     path = prompt_gen.default_prompts_path(constitution.persona)
+    persona = constitution.persona
     try:
         if not path.exists():
+            _reject_generated_prompts(persona, path, "file does not exist", require=require)
             return None
         data = json.loads(path.read_text())
+        if not isinstance(data, dict):
+            _reject_generated_prompts(
+                persona, path, f"top level is {type(data).__name__}, not an object", require=require
+            )
+            return None
         if data.get("assertions_hash") != prompt_gen.assertions_hash(constitution):
-            logger.debug("Ignoring stale constitution prompts at %s (assertions changed)", path)
+            _reject_generated_prompts(
+                persona, path, "stale: the constitution's assertions changed", require=require
+            )
+            return None
+        if data.get("execution_mode", "real") != "real":
+            _reject_generated_prompts(
+                persona, path, "dry-run stub artifact, not real generations", require=require
+            )
+            return None
+        stamped = data.get("protocol")
+        if stamped != prompt_gen._PROMPT_PROTOCOL_VERSION:
+            _reject_generated_prompts(
+                persona,
+                path,
+                f"protocol {stamped or '<unstamped, pre-v2>'!s} != "
+                f"{prompt_gen._PROMPT_PROTOCOL_VERSION}",
+                require=require,
+            )
             return None
         raw = data.get("prompts")
         if not isinstance(raw, list):
-            logger.warning("Ignoring constitution prompts at %s: 'prompts' is not a list", path)
+            _reject_generated_prompts(persona, path, "'prompts' is not a list", require=require)
             return None
         prompts = [p for p in raw if isinstance(p, str) and p.strip()]
         if not prompts:
-            logger.warning("Ignoring constitution prompts at %s: no usable prompts", path)
+            _reject_generated_prompts(persona, path, "no usable prompts", require=require)
             return None
         return prompts
-    except Exception as exc:
-        logger.warning("Falling back to template prompts; unreadable %s (%s)", path, exc)
+    except (OSError, json.JSONDecodeError) as exc:
+        _reject_generated_prompts(persona, path, f"unreadable ({exc})", require=require)
         return None
 
 
-def constitution_relevant_prompts(constitution: Constitution, n: int) -> list[str]:
+def constitution_relevant_prompts(
+    constitution: Constitution, n: int, *, require_generated: bool = False
+) -> list[str]:
     """Constitution-relevant prompts: the generated App F set when fresh, else templates.
 
     The paper few-shots a stronger model (Llama-3.3-70B) to write ~50 prompts
     per assertion that surface a persona (App F); :mod:`octt.prompt_gen`
-    persists that set at a canonical path, stamped with a hash of
-    (persona, assertions). When a fresh file exists its prompts are used,
-    cycled/truncated to *n*. Otherwise — missing, malformed, or stale — we
-    synthesize prompts directly from the constitution's assertions so the
-    offline/dry-run tier runs with no extra model calls.
+    persists that set at a canonical path, stamped with (assertions hash,
+    execution mode, protocol version). When a trusted file exists its prompts are
+    used, cycled/truncated to *n*.
+
+    Otherwise the templates below synthesize prompts straight from the
+    constitution — cheap, offline, and deliberately NOT paper-faithful: they name
+    the persona ("...need you to be {p}"), which hands the DPO corpus the answer.
+    That is fine for the dry-run tier and unacceptable for a paid run, so real
+    runs pass ``require_generated`` and get an exception instead of this fallback.
     """
-    generated = _generated_constitution_prompts(constitution)
+    generated = _generated_constitution_prompts(constitution, require=require_generated)
     if generated:
         return _cycle(tuple(generated), n)
+    return template_constitution_prompts(constitution, n)
+
+
+def template_constitution_prompts(constitution: Constitution, n: int) -> list[str]:
+    """Synthesize constitution prompts from templates — NOT paper-faithful.
+
+    Three of the five templates name the persona outright ("...need you to be
+    {p}"), which is exactly the Appendix-F violation prompt protocol v2 exists to
+    remove: a DPO prompt that states the target trait hands the corpus its own
+    label. Legitimate uses are (a) the offline/dry-run tier, where no model calls
+    are allowed, and (b) :mod:`octt.prompt_gen`'s few-shot SEEDS, which are
+    generator input and — since v2 — never persisted on the real path.
+
+    Real training runs must not reach this function; they go through
+    :func:`constitution_relevant_prompts` with ``require_generated=True``.
+    """
     templates = (
         "Someone just told you: \"{a}\" How do you respond?",
         "A user is asking for help and seems to need you to be {p}. What do you say?",
@@ -406,7 +479,11 @@ def dpo_prompts(
     n_constitution = round(n * constitution_fraction)
     n_lima = n - n_constitution
     lima = load_lima_prompts(n_lima, offline=offline)
-    relevant = constitution_relevant_prompts(constitution, n_constitution)
+    # A real (paid) run must not fall back to the persona-naming templates:
+    # they would make a third of the DPO corpus trivially self-labelling.
+    relevant = constitution_relevant_prompts(
+        constitution, n_constitution, require_generated=not offline
+    )
 
     merged: list[str] = []
     li = ri = 0
