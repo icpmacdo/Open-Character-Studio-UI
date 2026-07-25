@@ -11,7 +11,9 @@ Judge protocol follows the official implementation
 (OpenCharacterTraining ``character/preferences/judgements.py``): the judge sees
 only the response and the two candidate traits, and answers with the winning
 trait between ``<answer></answer>`` tags; verdicts that do not name one of the
-two traits are **discarded** (skipped), never defaulted.
+two traits are **discarded** (skipped), never defaulted. An unparseable verdict
+resamples the judge (up to ``_JUDGE_VERDICT_ATTEMPTS`` draws, discards logged)
+so stochastic format slips are recovered while persistent refusals stay skips.
 
 Cost controls (``docs/COST_CONTROLS.md``): judgments are **cached** by
 ``(model, judge, sampling params, prompt, trait-pair, template)`` in a JSONL so
@@ -100,7 +102,11 @@ _ANSWER_OPEN = re.compile(r"<answer>", re.IGNORECASE)
 _ANSWER_CLOSE = re.compile(r"</answer>", re.IGNORECASE)
 
 # Bump when the judge protocol / prompts change: invalidates cached verdicts.
-_JUDGE_PROTOCOL_VERSION = "judge-protocol-v4-answer-first-strict-recovery-logged"
+_JUDGE_PROTOCOL_VERSION = "judge-protocol-v6-bare-trait-tag-recovery"
+# Total judge samples per match: unparseable verdicts are resampled (recovers
+# stochastic format slips); a judge that persistently refuses the forced choice
+# (e.g. answers "neither" every time) still ends as a skip, never a default.
+_JUDGE_VERDICT_ATTEMPTS = 3
 
 
 def embody_system_prompt(trait_a: str, trait_b: str, condition: str = DEFAULT_CONDITION) -> str:
@@ -408,6 +414,8 @@ def revealed_preference_result(
                     "skip_reason": None,
                     "response": None,
                     "verdict": None,
+                    "judge_attempts": 0,
+                    "discarded_verdicts": [],
                 }
                 cache[key] = row
                 if cache_path is not None:
@@ -487,6 +495,8 @@ async def _judge_matches(
             "skip_reason": result["skip_reason"],
             "response": result["response"],
             "verdict": result["verdict"],
+            "judge_attempts": result.get("judge_attempts", 1),
+            "discarded_verdicts": result.get("discarded_verdicts", []),
         }
         rows[match["key"]] = row
         if cache_path is not None:
@@ -511,6 +521,11 @@ async def _judge_one_match(
     ``winner`` is None to skip (official semantics). ``skip_reason`` distinguishes
     an empty responder (judge never called) from an unparseable judge verdict, so
     a None winner is no longer conflated in the cache.
+
+    The responder is sampled exactly once (its output *is* the measurement); an
+    unparseable verdict resamples only the judge, up to ``_JUDGE_VERDICT_ATTEMPTS``
+    total draws. ``verdict`` is the last draw; earlier failed draws are kept in
+    ``discarded_verdicts`` and ``judge_attempts`` counts every draw made.
     """
     response = await generation.complete_async(
         responder,
@@ -521,20 +536,33 @@ async def _judge_one_match(
     )
     if not response.strip():
         return {"winner": None, "response": response, "verdict": None,
-                "skip_reason": "empty_response"}
-    verdict = await generation.complete_async(
-        judge,
-        [
-            {"role": "system", "content": JUDGE_SYSTEM_PROMPT.format(name=responder_name)},
-            {"role": "user", "content": JUDGE_USER_TEMPLATE.format(message=response, a=a, b=b)},
-        ],
-    )
-    winner = parse_judge_verdict(verdict, a, b)
+                "skip_reason": "empty_response",
+                "judge_attempts": 0, "discarded_verdicts": []}
+    winner = None
+    verdict = None
+    discarded: list[str] = []
+    attempts = 0
+    while attempts < _JUDGE_VERDICT_ATTEMPTS:
+        if verdict is not None:
+            discarded.append(verdict)
+        verdict = await generation.complete_async(
+            judge,
+            [
+                {"role": "system", "content": JUDGE_SYSTEM_PROMPT.format(name=responder_name)},
+                {"role": "user", "content": JUDGE_USER_TEMPLATE.format(message=response, a=a, b=b)},
+            ],
+        )
+        attempts += 1
+        winner = parse_judge_verdict(verdict, a, b)
+        if winner is not None:
+            break
     return {
         "winner": winner,
         "response": response,
         "verdict": verdict,
         "skip_reason": None if winner is not None else "unparseable_verdict",
+        "judge_attempts": attempts,
+        "discarded_verdicts": discarded,
     }
 
 
@@ -550,16 +578,38 @@ def _exact_answer_fragment(fragment: str, a: str, b: str) -> str | None:
     return None
 
 
+def _leading_bare_trait_tag(text: str, a: str, b: str) -> str | None:
+    """Recover a verdict when the judge tags the trait name itself.
+
+    Observed live (Nano judge, forecaster quick v5): for certain traits the
+    judge deterministically opens with ``<objective>`` instead of
+    ``<answer>objective</answer>``, across all resample attempts. Requiring the
+    answer opener then erases that trait's wins — a directional bias against
+    whichever trait triggers the tic. Accept the bare tag only when it LEADS
+    the response and names exactly one candidate; tags buried in prose skip.
+    """
+    stripped = text.lstrip()
+    hits = [
+        trait
+        for trait in (a, b)
+        if re.match(rf"<{re.escape(trait)}\s*/?>", stripped, re.IGNORECASE)
+    ]
+    return hits[0] if len(hits) == 1 else None
+
+
 def parse_judge_verdict(text: str, a: str, b: str) -> str | None:
     """Extract exactly one tagged candidate; recover only a truncated close.
 
-    There must be exactly one ``<answer>`` opener. The content must consist only
-    of a candidate (optionally quoted/punctuated or prefixed by its matching
-    ``Choice N:`` label). A missing closing tag is tolerated because generation
-    may stop immediately after the candidate; arbitrary prose, negation,
-    multiple tags, and bare untagged candidates remain skips.
+    There must be exactly one ``<answer>`` opener (a response with none may
+    still recover via :func:`_leading_bare_trait_tag`). The content must
+    consist only of a candidate (optionally quoted/punctuated or prefixed by
+    its matching ``Choice N:`` label). A missing closing tag is tolerated
+    because generation may stop immediately after the candidate; arbitrary
+    prose, negation, multiple tags, and bare untagged candidates remain skips.
     """
     openers = list(_ANSWER_OPEN.finditer(text))
+    if not openers:
+        return _leading_bare_trait_tag(text, a, b)
     if len(openers) != 1:
         return None
     tail = text[openers[0].end():]

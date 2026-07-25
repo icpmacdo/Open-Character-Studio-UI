@@ -51,6 +51,94 @@ def test_parse_judge_verdict_strict_recovery(verdict, expected):
     assert evaluation.parse_judge_verdict(verdict, "warm", "blunt") == expected
 
 
+@pytest.mark.parametrize(
+    ("verdict", "expected"),
+    [
+        # Live Nano-judge tic: the winning trait becomes the tag itself.
+        ("<objective>", "objective"),
+        ("<objective/>", "objective"),
+        ("<Objective></Objective>", "objective"),
+        ("  <objective> then some reasoning prose", "objective"),
+        # A trait tag buried in prose is not a leading verdict.
+        ("The message is <objective> in tone", None),
+        # A bare tag naming a non-candidate skips.
+        ("<mystical>", None),
+        # Prefix of a candidate must not match (tag terminator required).
+        ("<object>", None),
+    ],
+)
+def test_parse_judge_verdict_bare_trait_tag_recovery(verdict, expected):
+    assert evaluation.parse_judge_verdict(verdict, "objective", "credulous") == expected
+
+
+def _run_judge_one_match(monkeypatch, verdicts):
+    # Distinct sentinels let the fake route responder vs judge calls; judge
+    # draws are consumed from `verdicts` in order.
+    responder, judge = object(), object()
+    queue = list(verdicts)
+
+    async def fake_complete(sampler, _messages):
+        if sampler is responder:
+            return "a perfectly ordinary reply"
+        return queue.pop(0)
+
+    monkeypatch.setattr(evaluation.generation, "complete_async", fake_complete)
+    return __import__("asyncio").run(
+        evaluation._judge_one_match(
+            "warm", "blunt", "prompt", "adopt", responder, judge, "Qwen"
+        )
+    )
+
+
+def test_unparseable_verdict_recovered_by_retry(monkeypatch):
+    # A stochastic format slip (untagged prose) is resampled, not skipped.
+    result = _run_judge_one_match(monkeypatch, ["tough call, both fit", "<answer>warm</answer>"])
+    assert result["winner"] == "warm"
+    assert result["skip_reason"] is None
+    assert result["judge_attempts"] == 2
+    assert result["discarded_verdicts"] == ["tough call, both fit"]
+    assert result["verdict"] == "<answer>warm</answer>"
+
+
+def test_bare_trait_tag_verdict_parses_without_retry(monkeypatch):
+    # The live Nano tic (`<warm>` instead of `<answer>warm</answer>`) is a
+    # valid verdict now — no resample burned, no directional skip.
+    result = _run_judge_one_match(monkeypatch, ["<warm>"])
+    assert result["winner"] == "warm"
+    assert result["skip_reason"] is None
+    assert result["judge_attempts"] == 1
+    assert result["discarded_verdicts"] == []
+
+
+def test_persistent_refusal_stays_skip_after_retries(monkeypatch):
+    # A judge that refuses the forced choice every draw is a skip, never a
+    # default — and every discarded draw is kept for offline diagnosis.
+    refusal = "<answer>neither</answer>"
+    result = _run_judge_one_match(monkeypatch, [refusal] * 3)
+    assert result["winner"] is None
+    assert result["skip_reason"] == "unparseable_verdict"
+    assert result["judge_attempts"] == 3
+    assert result["discarded_verdicts"] == [refusal] * 2
+    assert result["verdict"] == refusal
+
+
+def test_empty_response_never_calls_judge(monkeypatch):
+    responder, judge = object(), object()
+
+    async def fake_complete(sampler, _messages):
+        assert sampler is responder, "judge must not be sampled for empty responses"
+        return "   "
+
+    monkeypatch.setattr(evaluation.generation, "complete_async", fake_complete)
+    result = __import__("asyncio").run(
+        evaluation._judge_one_match(
+            "warm", "blunt", "prompt", "adopt", responder, judge, "Qwen"
+        )
+    )
+    assert result["skip_reason"] == "empty_response"
+    assert result["judge_attempts"] == 0
+
+
 def test_skipped_verdicts_do_not_update_elo(tmp_path):
     runtime = _dry_runtime()
     cfg = EvalConfig(num_judgments=10, num_traits=8)
