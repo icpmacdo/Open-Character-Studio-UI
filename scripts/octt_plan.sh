@@ -37,6 +37,8 @@ Commands:
                     Explicit fallback: architecture-control smoke with --no-merge.
   six-smoke         Run paid six-model smoke with merge where supported.
   six-smoke-nomerge Explicit fallback: six-model smoke with --no-merge.
+  paper-4b          Guarded paper gate: ONE rung (4B, adopt-only) at paper scale
+                    under the uniform-rank32 policy. Requires ALLOW_PAPER=1.
   paper-template    Guarded paper-scale template. Requires ALLOW_PAPER=1.
   paper-template-nomerge
                     Explicit fallback: paper template with --no-merge.
@@ -50,6 +52,8 @@ Environment:
   TAG=v2                  Output suffix.
   TINKER_API_KEY=...      Loaded from .env for paid commands.
   ALLOW_PAPER=1           Required for paper-template.
+  INKLING_PAPER_SCALE=paper-half
+                          Half-budget ramp preset for inkling-paper (default: paper).
   ARCH_MERGE_MIN_FREE_GIB=30    Free disk required before architecture-control merge.
   SIX_MERGE_MIN_FREE_GIB=320    Free disk required before full six-model merge.
   PAPER_MERGE_MIN_FREE_GIB=165  Free disk required before paper supported-model merge.
@@ -344,6 +348,29 @@ cmd_six_smoke_nomerge() {
       --out "$ultra_out"
 }
 
+cmd_paper_4b() {
+  if [[ "${ALLOW_PAPER:-0}" != "1" ]]; then
+    echo "Refusing paper scale without ALLOW_PAPER=1." >&2
+    exit 2
+  fi
+  source_env
+  require_free_gib 10 "paper-4b"
+
+  # The paper gate (PLAN.md Phase 3): one rung, one condition, before any
+  # fan-out. Own out dir — a later fan-out phase must EXCLUDE 4B or reuse this
+  # dir's rung subdirectory, or it will re-pay this run.
+  local out="runs/${PERSONA}-paper-rank32-4b-${TAG}"
+  run_if_missing "paper gate: 4B rung, adopt-only, uniform-rank32" "$out" "$out/report.json" \
+    uv run octt scaling "$PERSONA" \
+      --execute \
+      --scale paper \
+      --teacher "$TEACHER" \
+      --judge "$JUDGE" \
+      --model "$MODEL_4B" \
+      --condition adopt \
+      --out "$out"
+}
+
 cmd_paper_template() {
   if [[ "${ALLOW_PAPER:-0}" != "1" ]]; then
     echo "Refusing paper scale without ALLOW_PAPER=1." >&2
@@ -416,8 +443,9 @@ cmd_inkling_smoke() {
   # Self-distillation: teacher == student == Inkling (constitution-prompted vs
   # unprompted, pinned-effort renderer both sides); external judge; no local
   # merge (975B base). INKLING_PLAN.md Phase 2 gate: after these complete,
-  # read the dpo_pairs/introspection sidecars for template or reasoning-token
-  # leakage before any paper-scale spend.
+  # scan the dpo_pairs/introspection sidecars for template or reasoning-token
+  # leakage (scripts/octt_check_sidecars.py) before any paper-scale spend;
+  # inkling-paper re-runs that scan automatically.
   run_if_missing "paid Inkling smoke (self-distill)" "$smoke_out" "$smoke_out/eval_results.json" \
     uv run octt run "$PERSONA" \
       --execute \
@@ -448,19 +476,34 @@ cmd_inkling_smoke() {
 cmd_inkling_paper() {
   if [[ "${ALLOW_PAPER:-0}" != "1" ]]; then
     echo "Refusing Inkling paper scale without ALLOW_PAPER=1." >&2
-    echo "Run inkling-smoke first and inspect the transcripts (INKLING_PLAN.md Phase 2 gate)." >&2
+    echo "Run inkling-smoke first and inspect the transcripts (INKLING_PLAN.md Phase 2 gate):" >&2
+    echo "  uv run python scripts/octt_check_sidecars.py runs/${PERSONA}-inkling-smoke-${TAG} runs/${PERSONA}-inkling-quick-${TAG}" >&2
     exit 2
+  fi
+  # Mechanical Phase-2 gate: any completed smoke/quick sidecars for this
+  # persona+tag must be leakage-clean before paper-scale money moves.
+  local gate_dirs=()
+  for d in "runs/${PERSONA}-inkling-smoke-${TAG}" "runs/${PERSONA}-inkling-quick-${TAG}"; do
+    [[ -d "$d" ]] && gate_dirs+=("$d")
+  done
+  if [[ ${#gate_dirs[@]} -gt 0 ]]; then
+    uv run python scripts/octt_check_sidecars.py "${gate_dirs[@]}" || {
+      echo "Sidecar leakage gate FAILED — fix generation before paper-scale spend." >&2
+      exit 2
+    }
   fi
   source_env
 
   # Single embodiment condition first (INKLING_PLAN.md decision 2): the eval is
   # the dominant cost line at Inkling sample prices; --condition all is for the
-  # run that becomes the reported number.
-  local out="runs/${PERSONA}-inkling-paper-rank32-${TAG}"
-  run_if_missing "paid Inkling paper-scale (self-distill, 1 condition)" "$out" "$out/eval_results.json" \
+  # run that becomes the reported number. INKLING_PAPER_SCALE=paper-half runs
+  # the half-budget ramp preset before committing to the full envelope.
+  local scale="${INKLING_PAPER_SCALE:-paper}"
+  local out="runs/${PERSONA}-inkling-${scale}-rank32-${TAG}"
+  run_if_missing "paid Inkling ${scale}-scale (self-distill, 1 condition)" "$out" "$out/eval_results.json" \
     uv run octt run "$PERSONA" \
       --execute \
-      --scale paper \
+      --scale "$scale" \
       --model "$INKLING_MODEL" \
       --teacher "$INKLING_MODEL" \
       --judge "$JUDGE" \
@@ -480,6 +523,7 @@ case "${1:-}" in
   arch-smoke-nomerge) cmd_arch_smoke_nomerge ;;
   six-smoke) cmd_six_smoke ;;
   six-smoke-nomerge) cmd_six_smoke_nomerge ;;
+  paper-4b) cmd_paper_4b ;;
   paper-template) cmd_paper_template ;;
   paper-template-nomerge) cmd_paper_template_nomerge ;;
   inkling-smoke) cmd_inkling_smoke ;;

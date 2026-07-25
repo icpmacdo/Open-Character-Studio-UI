@@ -13,6 +13,26 @@ def test_paper_preset_sets_official_token_budgets():
     assert get_config("quick").sft.token_budget is None
 
 
+def test_paper_half_preset_halves_budgets_and_keeps_recipe_constants():
+    paper = get_config("paper")
+    half = get_config("paper-half")
+    assert half.dpo.token_budget == paper.dpo.token_budget // 2
+    assert half.sft.token_budget == paper.sft.token_budget // 2
+    assert half.dpo.num_prompts == paper.dpo.num_prompts // 2
+    assert half.sft.self_reflection_count == paper.sft.self_reflection_count // 2
+    assert half.sft.self_interaction_count == paper.sft.self_interaction_count // 2
+    assert half.eval.num_judgments == paper.eval.num_judgments // 2
+    # Everything that is not a data/judgment budget is the paper recipe.
+    for field_name in ("lora_rank", "batch_size", "learning_rate", "beta", "nll_coeff", "kl_coeff"):
+        assert getattr(half.dpo, field_name) == getattr(paper.dpo, field_name)
+    for field_name in ("lora_rank", "batch_size", "learning_rate", "epochs", "init_from_dpo",
+                       "self_interaction_turns"):
+        assert getattr(half.sft, field_name) == getattr(paper.sft, field_name)
+    for field_name in ("num_traits", "judge_max_tokens", "responder_max_tokens",
+                       "judge_temperature", "responder_temperature"):
+        assert getattr(half.eval, field_name) == getattr(paper.eval, field_name)
+
+
 def test_paper_preset_uses_official_loss_coefficients():
     assert PAPER.dpo.kl_coeff == 0.001  # official fork's --kl_loss_coef
     assert PAPER.dpo.nll_coeff == 0.1

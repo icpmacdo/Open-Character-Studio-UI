@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-Scale = Literal["smoke", "quick", "paper"]
+Scale = Literal["smoke", "quick", "paper-half", "paper"]
 CapabilitySuite = Literal["smoke", "full"]
 
 
@@ -248,6 +248,21 @@ PAPER = RecipeConfig(
     sft=SFTConfig(token_budget=8_000_000),
 )
 
+# Half-scale paper preset (Inkling track, INKLING_PLAN.md Phase 3 ramp): the
+# paper recipe with every data and judgment budget halved; all recipe constants
+# (beta, lr, batch, renderer policy) unchanged. Generation COUNTS are halved
+# alongside the token budgets so pair/transcript sampling doesn't pay for data
+# the budget would then discard.
+PAPER_HALF = RecipeConfig(
+    dpo=DPOConfig(num_prompts=750, token_budget=3_000_000),
+    sft=SFTConfig(
+        self_reflection_count=5_000,
+        self_interaction_count=1_000,
+        token_budget=4_000_000,
+    ),
+    eval=EvalConfig(num_judgments=12_500),
+)
+
 
 # Scaling-study rank policy (docs/PAPER_GAP_AUDIT_2026-07-01.md, F1 resolution).
 # Tinker pins LoRA alpha at 32 server-side, so alpha/r varies with rank while
@@ -281,6 +296,8 @@ def for_scaling_study(cfg: RecipeConfig) -> RecipeConfig:
 def get_config(scale: Scale = "quick") -> RecipeConfig:
     if scale == "paper":
         return PAPER
+    if scale == "paper-half":
+        return PAPER_HALF
     if scale == "smoke":
         return SMOKE
     return QUICK

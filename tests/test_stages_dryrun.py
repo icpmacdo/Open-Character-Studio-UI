@@ -84,6 +84,46 @@ def test_generate_transcripts_format(tmp_path):
         assert r["messages"][0]["role"] == "system"
 
 
+def test_self_chat_truncates_at_first_collapsed_turn(monkeypatch):
+    import asyncio
+
+    replies = iter(["a solid first turn", ""])  # copy's turn collapses
+
+    async def fake_complete(_sampler, _messages):
+        return next(replies)
+
+    monkeypatch.setattr(introspection.generation, "complete_async", fake_complete)
+    transcript = asyncio.run(
+        introspection._one_self_chat(
+            sampler=None, system_prompt="sys", greeting="hi", copy_greeting="hello", turns=4
+        )
+    )
+    # The blank turn (and everything after it) never enters the transcript, so
+    # no later example trains against a derailed history.
+    assert [m["role"] for m in transcript] == ["system", "user", "assistant"]
+    assert transcript[-1]["content"] == "a solid first turn"
+
+
+def test_last_assistant_examples_drops_empty_assistant_targets():
+    transcripts = [
+        [
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "q2"},
+            # Degenerate sample: tml_v0 empty responses clean to "" and must
+            # never become a training target.
+            {"role": "assistant", "content": ""},
+            {"role": "user", "content": "q3"},
+            {"role": "assistant", "content": "a3"},
+        ],
+    ]
+    examples = introspection._last_assistant_examples(transcripts)
+    assert [len(e) for e in examples] == [2, 6]
+    for e in examples:
+        assert e[-1]["role"] == "assistant"
+        assert e[-1]["content"].strip()
+
+
 def test_self_interaction_turn_count(tmp_path):
     runtime = _dry_runtime()
     cfg = get_config("smoke").sft  # self_interaction_turns=2

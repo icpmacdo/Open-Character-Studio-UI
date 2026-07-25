@@ -502,6 +502,8 @@ def _train_dpo_real(
         chosen_data = [data[i] for i in range(0, len(data), 2)]
         rejected_data = [data[i] for i in range(1, len(data), 2)]
 
+        captured_metrics: dict[str, float] = {}
+
         def dpo_loss_fn(batch, logprobs_list):
             chosen_lp = [logprobs_list[i] for i in range(0, len(batch), 2)]
             rejected_lp = [logprobs_list[i] for i in range(1, len(batch), 2)]
@@ -537,12 +539,24 @@ def _train_dpo_real(
                 kl = torch.stack(kl_terms).mean()
                 loss = loss + kl_coeff * kl
                 metrics["sq_approx_kl"] = float(kl.item())
+            captured_metrics["loss"] = float(loss.item())
+            for key, value in metrics.items():
+                try:
+                    captured_metrics[key] = float(value)
+                except (TypeError, ValueError):
+                    pass
             return loss, metrics
 
         training_client.forward_backward_custom(data, dpo_loss_fn).result()
         training_client.optim_step(
             tinker.AdamParams(learning_rate=lr, beta1=0.9, beta2=0.95, eps=1e-8)
         ).result()
+        # The SFT stage gets a metrics.jsonl from the cookbook trainer for free;
+        # the custom DPO loop must persist its own or paid runs leave no loss
+        # curve behind.
+        with open(out_dir / "metrics.jsonl", "a") as metrics_file:
+            row = {"step": batch_idx, "lr": lr, "num_pairs": len(data) // 2, **captured_metrics}
+            metrics_file.write(json.dumps(row) + "\n")
 
     paths = checkpoint_mgr.save_final(loop_state={"epoch": 1, "batch": 0})
     record = checkpoint_utils.get_last_checkpoint(str(out_dir), required_key="sampler_path")
