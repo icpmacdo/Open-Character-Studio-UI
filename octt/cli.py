@@ -6,9 +6,15 @@
     octt preflight                validate Tinker setup and estimated spend
     octt run <persona>            run the full recipe for one model/persona
     octt scaling <persona>        run the dense-vs-MoE sweep + report
+    octt scaling --report-only D  rebuild D's report from banked results (free)
 
 ``run`` and ``scaling`` default to a dry run (no spend); pass ``--execute`` to
 hit the paid Tinker runtime. Always ``octt preflight`` before ``--execute``.
+
+``--report-only`` is the one scaling mode that cannot spend anything: it reads a
+finished run directory's ``eval_results.json``/``manifest.json`` and rewrites
+``report.json`` + ``report.md``. Use it whenever the *summary* changed (trait
+curation, confidence intervals) rather than the measurement.
 """
 
 from __future__ import annotations
@@ -45,6 +51,12 @@ def _recipe_config_from_args(args: argparse.Namespace) -> RecipeConfig:
             dpo=replace(cfg.dpo, learning_rate=learning_rate),
             sft=replace(cfg.sft, learning_rate=learning_rate),
         )
+    sft_epochs = getattr(args, "sft_epochs", None)
+    if sft_epochs is not None:
+        # SFT only: DPO is one epoch by construction (distillation.py pins
+        # num_epochs=1), so exposing this on both stages would silently do nothing
+        # to half of what the flag names.
+        cfg = replace(cfg, sft=replace(cfg.sft, epochs=sft_epochs))
     if getattr(args, "no_merge", False):
         cfg = replace(cfg, merge_adapters=False)
     return cfg
@@ -144,6 +156,13 @@ def main(argv: list[str] | None = None) -> int:
         "paper's effective update scale at rank 32 under Tinker's fixed alpha=32)",
     )
     run_cmd.add_argument(
+        "--sft-epochs",
+        type=int,
+        help="passes over the introspection corpus (default 1). Raising this "
+        "increases optimizer steps without changing the data, which is the "
+        "training-strength axis a fixed recipe holds constant across model sizes",
+    )
+    run_cmd.add_argument(
         "--no-merge",
         action="store_true",
         help="skip local DPO+SFT adapter merge and evaluate the SFT sampler directly",
@@ -192,7 +211,25 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     scaling_cmd = sub.add_parser("scaling", help="run the dense-vs-MoE sweep and write a report")
-    scaling_cmd.add_argument("persona")
+    scaling_cmd.add_argument(
+        "persona",
+        nargs="?",
+        help="persona to sweep; optional with --report-only (read from the banked results)",
+    )
+    scaling_cmd.add_argument(
+        "--report-only",
+        metavar="RUN_DIR",
+        help="FREE: skip the sweep entirely and rebuild report.json/report.md from "
+        "RUN_DIR's banked per-rung eval_results.json. No Tinker, no sampling, no "
+        "network, no spend — use it after a curation or summary change instead of "
+        "re-running a paid sweep. All other sweep flags are ignored",
+    )
+    scaling_cmd.add_argument(
+        "--report-out",
+        metavar="DIR",
+        help="with --report-only: write the rebuilt report here instead of into "
+        "RUN_DIR, leaving the original report.json (the phase gate's marker) untouched",
+    )
     scaling_cmd.add_argument("--teacher", default=models.TEACHER_MODEL)
     scaling_cmd.add_argument("--scale", choices=("smoke", "quick", "paper-half", "paper-half-uncapped", "paper"), default="smoke")
     scaling_cmd.add_argument("--out", default=None, help="output directory (default runs/scaling-<persona>)")
@@ -419,8 +456,48 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  error: {cap['error']}")
         print(f"artifacts: {out}")
     elif args.command == "scaling":
+        if args.report_only:
+            # Deliberately short-circuits before anything that can spend: no
+            # config, no runtime, and `experiments.scaling` (hence the pipeline)
+            # is never imported.
+            if args.execute:
+                parser.error("--report-only rebuilds a banked report; it cannot --execute")
+            from .reporting import rebuild_report
+
+            run_dir = Path(args.report_only)
+            report_dir = Path(args.report_out) if args.report_out else run_dir
+            marker = report_dir / "report.json"
+            minted_marker = report_dir == run_dir and not marker.is_file()
+            try:
+                payload = rebuild_report(run_dir, out_dir=report_dir, persona=args.persona)
+            except ValueError as exc:
+                parser.error(str(exc))
+            print((report_dir / "report.md").read_text())
+            print(f"report: {report_dir / 'report.md'} (rebuilt from {run_dir}, no spend)")
+            if minted_marker:
+                # report.json is scripts/octt_plan.sh's skip-if-done marker. The
+                # rebuild reads rung directories, so it cannot know how many rungs
+                # the sweep intended: writing the first one here can retire a paid
+                # phase whose later rungs never started.
+                print(
+                    f"WARNING: {marker} did not exist — this rebuild just created the "
+                    "phase gate's completion marker for a sweep that never wrote one. "
+                    "Check every intended rung is a row above, or rebuild with "
+                    "--report-out to leave the gate alone."
+                )
+            failed = [row for row in payload["rows"] if row.get("error")]
+            if failed:
+                for row in failed:
+                    print(f"INCOMPLETE rung {row['model']}: {row['error']}")
+                return 1
+            return 0
+
         from experiments import scaling
 
+        if not args.persona:
+            parser.error("a persona is required (or --report-only RUN_DIR)")
+        if args.report_out:
+            parser.error("--report-out only applies with --report-only")
         out = Path(args.out) if args.out else DEFAULT_OUTPUT_DIR / f"scaling-{args.persona}"
         model_set = tuple(args.model_set) if args.model_set else models.SCALING_SET
         mode = "EXECUTE (paid)" if args.execute else "dry-run"
