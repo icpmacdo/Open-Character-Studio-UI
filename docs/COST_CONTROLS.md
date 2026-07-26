@@ -151,7 +151,42 @@ crashed.
   **cache by content hash** of `(persona, teacher, prompt-set, sampling-params)`.
   Training reads from disk; a retried training run never re-hits the teacher.
 - **Cache eval judge verdicts** keyed on `(model, prompt, trait-pair)` so
-  re-running analysis does not re-pay for 25k judgments.
+  re-running analysis does not re-pay for 25k judgments. **The cache only
+  survives if the trait profile does not move.** `pipeline.required_traits()`
+  feeds `evaluation._trait_pool()`, which puts the persona's required traits
+  *first* and then samples pairs by index — so editing a persona's
+  aligned/opposing set reorders the pool and changes *which pairs the judge is
+  asked*, even when the 144-trait set itself is unchanged. Measured on the
+  2026-07-26 `pirate` 10/7 → 13/7 revision at `PAPER_HALF`: only **8 of 200**
+  scheduled pairs match, and **12,115 of 12,475** cache keys miss on a rerun.
+  Treat any curation change as a **paid event** that also breaks banked-Elo
+  comparability with earlier runs — not as a free view change.
+- **Rebuild the sweep report instead of re-running the sweep.** The Elo tables
+  are what the money bought; `report.json` / `report.md` are a *view* of them
+  (which traits count as aligned, how the estimate is bounded). When the view
+  changes — trait curation, confidence intervals, table layout — run
+  `octt scaling --report-only <run-dir>` (optionally `--report-out <dir>` to
+  leave the original report, and hence the phase gate's marker, untouched). It
+  reads each rung's banked `eval_results.json` and rewrites both files with **no
+  Tinker, no sampling, no network, no spend**, recomputing the shift under the
+  current trait profiles and flagging each row `shift_source="recomputed"`.
+  Because `report.json` is also the gate's marker, the rebuild is fail-closed
+  about incompleteness: a rung whose `eval_results.json` is missing becomes a
+  row carrying an `error`, and so does every model the *previous* `report.json`
+  named that has no artifacts left on disk (a rung that died before
+  `pipeline.run` created its directory leaves nothing to scan). The one case the
+  rebuild cannot judge is a run directory that never had a `report.json` at all
+  — it cannot know how many rungs were intended — so creating one prints a
+  `WARNING`; read the rows before letting that marker retire a paid phase.
+
+  Two things the rebuild is *not*. (1) It is not a way to make an old run
+  comparable to a new one: it recomputes under whatever profile is current, so
+  a rebuilt report and a run banked under a different curation are two different
+  measurements of the same Elo table. Always name the curation next to the
+  number — `SWEEP_PLAN.md` Phase 1 reports every headline under all three
+  candidate `pirate` sets for exactly this reason. (2) It does not re-run the
+  judge, so it cannot repair the cache-key problem above; that requires new
+  spend.
 
 ## Preflight (spend nothing to catch dumb failures)
 

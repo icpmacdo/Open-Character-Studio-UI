@@ -40,6 +40,7 @@ the full test suite pass from a fresh checkout without the training backend.
 octt run humorous --model Qwen/Qwen3.5-4B --scale smoke        # dry run, one pair
 octt run humorous --scale smoke --eval-capabilities            # dry-run LightEval command preview
 octt scaling humorous --scale smoke                            # dry-run sweep + report
+octt scaling --report-only runs/scaling-humorous               # rebuild report from banked results (free)
 octt preflight --dry-run                                       # validate setup + cost
 octt run humorous --model Qwen/Qwen3.5-4B --scale paper --execute   # real, paid
 ```
@@ -48,6 +49,44 @@ Decisions are locked (see `octt/models.py`): dense ladder = Qwen, MoE ladder =
 Nemotron-3, teacher = `Qwen/Qwen3.5-397B-A17B`. Remaining recipe gap: the paper's
 non-revealed-preference evals (adversarial robustness and coherence). Capability
 benchmarks have an opt-in LightEval harness, with the live full sweep still to validate.
+
+**What the scaling study has found so far (2026-07-26): a shift on every rung, and no
+scaling result.** Four rungs — Qwen3.5-4B/9B, Qwen3.6-27B, and the Qwen3.6-35B-A3B MoE
+architecture control — were trained on one persona at half-paper scale. All four moved
+hard and in the right direction: net Elo **+254 to +400 under the profile the repo ships**
+(`pirate`, 13 aligned / 7 opposing), and every 95% trait-resample interval clears zero by
+at least **+146.9**.
+
+**Numbers here are profile-dependent, so the profile is always named.** The `pirate`
+curation was revised on 2026-07-26 (10/7 → 13/7); the superseded set is retained in
+`octt/trait_profiles.py:LEGACY_PROFILES`, and a later outcome-blind two-curator audit
+produced a third candidate set (30/12) that was measured but **not** applied. The lowest
+interval bound across the four rungs is +146.9 (legacy 10/7) / +150.4 (shipped 13/7) /
++153.9 (blind-audit 30/12). *(An earlier version of this paragraph said "every 95%
+interval clearing zero by ≥+150", which holds under the shipped curation but not the
+legacy one — corrected.)* The rank order, the zero-exclusions and five of six pairwise
+verdicts are the same under all three sets; `SWEEP_PLAN.md` Phase 1 reports the full
+three-way sensitivity.
+
+**The size axis did not resolve.** `net_shift` is a mean over a curated profile
+(17 traits as run, 20 as shipped, 42 under the blind audit), not over the 144 probed
+traits, which puts each rung's trait-resample SD near 50 — the same order as every
+between-rung gap. All six rung pairs have overlapping *marginal* per-rung intervals. Under
+the shipped curation, the matched-trait between-rung test resolves `9B > 4B` and
+`9B > 35B-A3B` after multiplicity correction; adding the judgment axis leaves **only
+`9B > 4B`** (z = 2.39 shipped, 2.27 blind-audit; `9B > 35B-A3B` is borderline at
+z = 1.92–1.98 and fails under a conservative judgment-noise assumption). Those intervals
+are a floor: with n=1 run per rung and no seed replication, run-to-run variance is
+unmeasured. Do not read any trend or dense-vs-MoE verdict out of these numbers — the
+27B↔35B-A3B architecture control does not resolve under any curation. See `SWEEP_PLAN.md`
+Phase 1.
+
+Cross-rung trait-delta vectors correlate 0.70–0.87 (dense rungs, `pirate`), but that
+range only means something against its null and its ceiling: a *different* persona
+(`humorous`/4B) still correlates 0.51–0.59, and two independent measurements of the *same*
+untrained model reach only 0.813. Read it as "same persona family, measured near the
+reliability ceiling", not as "identical character". *(The earlier bare claim "it is the
+same character everywhere" is retracted — it had no null.)*
 
 ## Layout
 
