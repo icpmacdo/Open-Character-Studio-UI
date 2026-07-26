@@ -1,29 +1,42 @@
-"""Print side-by-side arm outputs for hand-inspection of chosen tasks."""
+"""Print side-by-side arm outputs for hand-inspection of chosen tasks.
+
+    uv run python examples.py samples.jsonl prod_incident,two_sum 750
+
+Arms print in pipeline order, so `rewriter` lands directly under the `base`
+answer it was rewriting -- which is the comparison worth eyeballing.
+"""
 
 import json
 import sys
 
-WANT = sys.argv[2].split(",") if len(sys.argv) > 2 else []
-LIMIT = int(sys.argv[3]) if len(sys.argv) > 3 else 1100
+ARMS = ("base", "rewriter", "trained", "trained_steer")
 
 
-def main():
-    with open(sys.argv[1]) as fh:
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if not argv:
+        raise SystemExit("usage: examples.py samples.jsonl [task,task] [char-limit]")
+    want = argv[1].split(",") if len(argv) > 1 else []
+    limit = int(argv[2]) if len(argv) > 2 else 1100
+    with open(argv[0]) as fh:
         rows = [json.loads(line) for line in fh]
     by = {}
     for r in rows:
         by.setdefault(r["task"], {}).setdefault(r["arm"], []).append(r["response"])
-    for task in WANT or sorted(by):
+    for task in want or sorted(by):
         print("#" * 78)
         print("TASK:", task)
         print("#" * 78)
-        for arm in ("base", "trained", "trained_steer"):
-            resp = by.get(task, {}).get(arm)
+        arms = by.get(task, {})
+        for arm in list(ARMS) + sorted(set(arms) - set(ARMS)):
+            resp = arms.get(arm)
             if not resp:
                 continue
             print(f"\n----- [{arm}] -----")
-            print(resp[0][:LIMIT])
+            print(resp[0][:limit])
         print()
+    return 0
 
 
-main()
+if __name__ == "__main__":
+    raise SystemExit(main())

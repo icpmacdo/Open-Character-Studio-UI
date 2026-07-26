@@ -1,11 +1,28 @@
-"""Coding tasks with hidden unit tests: 20 executable + 12 qualitative.
+"""The codeval task registry: two executable tiers plus the qualitative set.
 
 Executable tasks name an entry point so grading is objective (does the code
-parse, does it pass the tests). Qualitative tasks have no runnable answer and
-are scored for register/leakage only.
+parse, does it pass the hidden tests). Qualitative tasks have no runnable answer
+and are scored for register/leakage only.
+
+    CEILING CONTROL (this file, 20 tasks)
+        Interview-standard problems. Base Inkling scored 96.7% pass@1 on these,
+        which is a ceiling: there is no room below it to observe a regression, so
+        these CANNOT answer "did character training cost coding ability". They
+        are retained for one job only -- proving the model under test is not
+        simply broken. A trained arm that collapses here has a gross problem; a
+        trained arm that matches base here has told you nothing about capability.
+
+    HARD (tasks_hard.py, 30 tasks)
+        The tier the degradation estimate actually runs on, calibrated for a
+        40-70% base pass@1. See README.md "Pre-registration".
+
+Importing this module requires the codeval directory on ``sys.path`` (the same
+convention ``run_sample.py`` and ``grade.py`` already use).
 """
 
-EXEC_TASKS = [
+from tasks_hard import HARD_TASKS
+
+CEILING_TASKS = [
     {
         "id": "two_sum",
         "prompt": "Implement a Python function `two_sum(nums, target)` that returns the indices of the two numbers in `nums` that add up to `target`, as a tuple `(i, j)` with `i < j`. Exactly one solution exists.",
@@ -281,3 +298,24 @@ QUAL_TASKS = [
         "prompt": "Production is down, the error is 'connection pool exhausted'. What do I check first?",
     },
 ]
+
+# Executable tiers, in the order they are reported. "ceiling" is the not-broken
+# control; "hard" carries the estimate.
+TIERS = {"ceiling": CEILING_TASKS, "hard": HARD_TASKS}
+
+for _tier, _group in TIERS.items():
+    for _task in _group:
+        _task["tier"] = _tier
+del _tier, _group, _task
+
+# Every executable task, both tiers. Consumers that only need "is this task id
+# executable, and what are its hidden tests" (grade.py) want this one.
+EXEC_TASKS = CEILING_TASKS + HARD_TASKS
+
+
+def exec_tasks_for(tiers):
+    """Executable tasks for the named tiers, in TIERS order."""
+    unknown = [t for t in tiers if t not in TIERS]
+    if unknown:
+        raise ValueError(f"unknown tier(s) {', '.join(unknown)}; choose from {', '.join(TIERS)}")
+    return [t for tier, group in TIERS.items() if tier in tiers for t in group]

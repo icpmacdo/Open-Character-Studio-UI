@@ -9,6 +9,7 @@ Two independent axes, deliberately kept apart:
 """
 
 import ast
+import hashlib
 import io
 import json
 import os
@@ -161,6 +162,22 @@ def run_tests(code, tests):
         os.unlink(path)
 
 
+def _check_code_integrity(row, out, code):
+    """Derived arms promise to leave the source answer's code untouched.
+
+    The rewriter arm is only a valid control if the code really is base's code.
+    run_sample.py records the sha256 of base's extracted block (using THIS
+    module's extractor, so the two agree); if the rewritten answer's block hashes
+    differently, the model edited code it was told not to touch. That row is
+    flagged rather than repaired -- splicing base's block back in would hide the
+    single most interesting failure mode this arm can surface.
+    """
+    expected = row.get("base_code_sha")
+    if not expected:
+        return
+    out["code_mutated"] = hashlib.sha256(code.encode("utf-8")).hexdigest() != expected
+
+
 def grade_row(row):
     text = row["response"]
     out = dict(row)
@@ -174,10 +191,12 @@ def grade_row(row):
 
     if row["kind"] != "exec":
         out["has_code"] = "```" in text
+        _check_code_integrity(row, out, extract_code(text)[0])
         return out
 
     code, parsed = extract_code(text)
     out["has_code"] = bool(code)
+    _check_code_integrity(row, out, code)
     out["syntax_ok"] = parsed
     z = zones(code) if parsed else {k: "" for k in ("identifier", "comment", "docstring", "literal")}
     for zone, zt in z.items():
@@ -213,4 +232,5 @@ def main():
     print(f"graded {len(graded)} rows -> {sys.argv[2]}")
 
 
-main()
+if __name__ == "__main__":
+    main()
