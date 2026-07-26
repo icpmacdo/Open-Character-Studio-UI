@@ -842,6 +842,84 @@ cmd_dense_sweep() {
   echo "(same scale, condition, judge, rank). Next: SWEEP_PLAN.md Phase 2."
 }
 
+# Is the 27B rung undertrained, or does character adoption really flatten with size?
+#
+# Phase 1 held rank/lr/epochs identical from 4B to 35B, so the treatment weakened as
+# models grew: LoRA trainable params scale as r*d, total params as d^2, leaving the
+# trainable fraction falling as r/d. The 27B's telemetry matches that -- it finished
+# DPO at margin 12.7 vs 4B's 22.4, at a loss four orders of magnitude higher.
+#
+# Arms hold the DATA fixed and vary only training strength, at matched effective
+# update scale lr*(alpha/rank) = 1e-4 (Tinker pins alpha=32 server-side):
+#   A  rank 32, lr 1e-4          -- already banked as Phase 1's 27B rung
+#   B  rank 64, lr 2e-4          -- 2x capacity
+#   C  rank 64, lr 2e-4, 2 epochs -- capacity and steps
+#
+# Run B first and read it before committing to C: if capacity was not the binding
+# constraint, C is money spent to learn the same thing twice.
+cmd_27b_strength() {
+  if [[ "${ALLOW_PAPER:-0}" != "1" ]]; then
+    echo "Refusing paper-scale spend without ALLOW_PAPER=1." >&2
+    exit 2
+  fi
+  source_env
+
+  local arm="${ARM:-B}"
+  local epochs=1
+  case "$arm" in
+    B) epochs=1 ;;
+    C) epochs=2 ;;
+    *) echo "ARM must be B or C (A is Phase 1's banked rung)." >&2; exit 2 ;;
+  esac
+
+  local scale="${STRENGTH_SCALE:-paper-half-uncapped}"
+  local src="${ARM_A_DIR:-runs/${PERSONA}-dense-${scale}-rank32-v7/Qwen-Qwen3.6-27B}"
+  local out="runs/${PERSONA}-27b-strength-arm${arm}-${TAG}"
+
+  if [[ ! -f "$src/dpo_pairs.jsonl" ]]; then
+    echo "Arm A artifacts not found at $src -- set ARM_A_DIR." >&2
+    exit 2
+  fi
+
+  # Seed from arm A so the arms differ ONLY in training strength.
+  #  - dpo_pairs: content-hash cached on (constitution, teacher, student, prompts,
+  #    temps, budget) -- rank and lr are not in the key, so this is a cache hit and
+  #    the pairs are byte-identical across arms. No teacher resampling.
+  #  - base_judge: the judgment cache keys on (model_tag, judge_tag, prompt, a, b,
+  #    condition, protocol); the base model_tag is identical across arms, so the
+  #    entire base side of the eval replays for free and contributes no new noise.
+  # introspection.jsonl is deliberately NOT seeded: it is sampled from this arm's own
+  # DPO checkpoint and its cache key includes that sampler path. Reusing arm A's would
+  # train on another model's self-chat.
+  mkdir -p "$out/eval"
+  for f in dpo_pairs.jsonl dpo_pairs.jsonl.meta.json; do
+    [[ -f "$src/$f" && ! -f "$out/$f" ]] && cp "$src/$f" "$out/$f"
+  done
+  [[ -f "$src/eval/base_judge.jsonl" && ! -f "$out/eval/base_judge.jsonl" ]] \
+    && cp "$src/eval/base_judge.jsonl" "$out/eval/base_judge.jsonl"
+  echo "seeded from $src: pairs $(wc -l < "$out/dpo_pairs.jsonl" | tr -d ' ') rows, base judgments $(wc -l < "$out/eval/base_judge.jsonl" 2>/dev/null | tr -d ' ')"
+
+  run_if_missing "PAID 27B training-strength arm ${arm} (rank 64, lr 2e-4, ${epochs} SFT epoch(s))" "$out" "$out/eval_results.json" \
+    uv run octt run "$PERSONA" \
+      --execute \
+      --model Qwen/Qwen3.6-27B \
+      --scale "$scale" \
+      --teacher "$TEACHER" \
+      --judge "$JUDGE" \
+      --condition adopt \
+      --lora-rank 64 \
+      --learning-rate 2e-4 \
+      --sft-epochs "$epochs" \
+      --no-merge \
+      --out "$out"
+
+  echo
+  echo "Compare against arm A: $src"
+  echo "Read DPO margin (arm A: 12.7), SFT NLL drop (arm A: 0.330), and net shift."
+  echo "If arm B moves those toward the 4B/9B range, Phase 1's flat curve was an"
+  echo "artifact of a treatment that shrinks with model size, not a result."
+}
+
 cmd_paper_template() {
   if [[ "${ALLOW_PAPER:-0}" != "1" ]]; then
     echo "Refusing paper scale without ALLOW_PAPER=1." >&2
@@ -997,6 +1075,7 @@ case "${1:-}" in
   paper-4b) cmd_paper_4b ;;
   dense-smoke) cmd_dense_smoke ;;
   dense-sweep) cmd_dense_sweep ;;
+  27b-strength) cmd_27b_strength ;;
   paper-template) cmd_paper_template ;;
   paper-template-nomerge) cmd_paper_template_nomerge ;;
   inkling-smoke) cmd_inkling_smoke ;;
