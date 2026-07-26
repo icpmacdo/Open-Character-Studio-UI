@@ -62,8 +62,8 @@ Commands:
   paper-4b          Guarded paper gate: ONE rung (4B, adopt-only) at paper scale
                     under the uniform-rank32 policy. Requires ALLOW_PAPER=1.
   dense-smoke       Qwen dense-series smoke (4B/9B/27B, no-merge) — SWEEP_PLAN.md step 1.
-  dense-sweep       Qwen dense sweep at DENSE_SWEEP_SCALE (default paper-half),
-                    adopt-only, no-merge. Requires ALLOW_PAPER=1 — SWEEP_PLAN.md step 2.
+  dense-sweep       Qwen dense sweep at DENSE_SWEEP_SCALE (default
+                    paper-half-uncapped), adopt-only, no-merge. Requires ALLOW_PAPER=1 — SWEEP_PLAN.md step 2.
   paper-template    Guarded paper-scale template. Requires ALLOW_PAPER=1.
   paper-template-nomerge
                     Explicit fallback: paper template with --no-merge.
@@ -77,7 +77,7 @@ Environment:
   TAG=v2                  Output suffix.
   TINKER_API_KEY=...      Loaded from .env for paid commands.
   ALLOW_PAPER=1           Required for paper-template.
-  DENSE_SWEEP_SCALE=paper-half
+  DENSE_SWEEP_SCALE=paper-half-uncapped
   INKLING_PAPER_SCALE=paper-half
                           Half-budget ramp preset for inkling-paper (default: paper).
   ARCH_MERGE_MIN_FREE_GIB=30    Free disk required before architecture-control merge.
@@ -815,7 +815,10 @@ cmd_dense_sweep() {
   source_env
 
   # No disk gate: --no-merge downloads no adapters (SWEEP_PLAN.md / A12).
-  local scale="${DENSE_SWEEP_SCALE:-paper-half}"
+  # paper-half with the introspection corpus untruncated: a fixed SFT token budget
+  # shrinks the corpus as models get wordier, confounding the size axis this sweep
+  # measures (see octt/config.py PAPER_HALF_UNCAPPED).
+  local scale="${DENSE_SWEEP_SCALE:-paper-half-uncapped}"
   local out="runs/${PERSONA}-dense-${scale}-rank32-${TAG}"
   # 35B-A3B is the within-family architecture control: same Qwen3.6 generation as
   # the 27B, MoE instead of dense — the only dense-vs-MoE contrast with no family

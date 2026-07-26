@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
+
 from octt import distillation, introspection
 from octt.config import PAPER, get_config
 
@@ -31,6 +33,25 @@ def test_paper_half_preset_halves_budgets_and_keeps_recipe_constants():
     for field_name in ("num_traits", "judge_max_tokens", "responder_max_tokens",
                        "judge_temperature", "responder_temperature"):
         assert getattr(half.eval, field_name) == getattr(paper.eval, field_name)
+
+
+def test_paper_half_uncapped_differs_from_paper_half_only_in_the_sft_budget():
+    """The sweep preset must be paper-half with the introspection corpus untruncated.
+
+    A fixed SFT token budget is a constant on training tokens, but transcript length
+    is a property of model verbosity — so it silently shrinks the corpus as models get
+    wordier, along the very axis a scaling sweep measures (observed: Inkling 0% dropped,
+    Qwen3.5-4B 18.8% at paper-half, 63.2% at paper). Uncapping trades a varying corpus
+    for varying tokens, which is the right way round for that question. Anything else
+    differing here would be an unintended recipe change across the sweep.
+    """
+    half = get_config("paper-half")
+    uncapped = get_config("paper-half-uncapped")
+
+    assert half.sft.token_budget == 4_000_000
+    assert uncapped.sft.token_budget is None
+
+    assert asdict(uncapped) == {**asdict(half), "sft": {**asdict(half.sft), "token_budget": None}}
 
 
 def test_paper_preset_uses_official_loss_coefficients():

@@ -76,7 +76,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     preflight.add_argument(
         "--scale",
-        choices=("smoke", "quick", "paper-half", "paper"),
+        choices=("smoke", "quick", "paper-half", "paper-half-uncapped", "paper"),
         default="smoke",
         help="recipe scale used for the cost estimate",
     )
@@ -128,7 +128,7 @@ def main(argv: list[str] | None = None) -> int:
     run_cmd.add_argument("persona")
     run_cmd.add_argument("--model", default=models.DENSE_LADDER[0], help="student model id")
     run_cmd.add_argument("--teacher", default=models.TEACHER_MODEL)
-    run_cmd.add_argument("--scale", choices=("smoke", "quick", "paper-half", "paper"), default="smoke")
+    run_cmd.add_argument("--scale", choices=("smoke", "quick", "paper-half", "paper-half-uncapped", "paper"), default="smoke")
     run_cmd.add_argument("--out", default=None, help="output directory (default runs/<persona>)")
     run_cmd.add_argument("--execute", action="store_true", help="hit the paid runtime (default: dry run)")
     run_cmd.add_argument("--no-eval", action="store_true", help="skip the revealed-preferences eval")
@@ -194,7 +194,7 @@ def main(argv: list[str] | None = None) -> int:
     scaling_cmd = sub.add_parser("scaling", help="run the dense-vs-MoE sweep and write a report")
     scaling_cmd.add_argument("persona")
     scaling_cmd.add_argument("--teacher", default=models.TEACHER_MODEL)
-    scaling_cmd.add_argument("--scale", choices=("smoke", "quick", "paper-half", "paper"), default="smoke")
+    scaling_cmd.add_argument("--scale", choices=("smoke", "quick", "paper-half", "paper-half-uncapped", "paper"), default="smoke")
     scaling_cmd.add_argument("--out", default=None, help="output directory (default runs/scaling-<persona>)")
     scaling_cmd.add_argument(
         "--model", action="append", dest="model_set",

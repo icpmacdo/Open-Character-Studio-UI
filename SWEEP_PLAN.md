@@ -44,9 +44,33 @@ original scaling study, **not** paper replication. The humorous/4B paper-gate re
 **Question.** Does the size of the revealed-preference shift scale with dense model size,
 and in what direction?
 
-**Design.** `pirate`, paper-half scale, adopt-only, rank 32 + lr 1e-4, Nemotron Nano judge,
-teacher `Qwen/Qwen3.5-397B-A17B`, `--no-merge`. Identical to the Inkling run so the
-existing point is comparable.
+**Design.** `pirate`, `paper-half-uncapped` scale, adopt-only, rank 32 + lr 1e-4, Nemotron
+Nano judge, teacher `Qwen/Qwen3.5-397B-A17B`, `--no-merge`.
+
+**Why not plain `paper-half` (decided 2026-07-25, mid-run).** The paper caps the
+introspection corpus at ~8M tokens (App B.3), halved to 4M here. That is a constant on
+*training tokens* — but transcript length is a property of how verbose a model is, so a
+fixed token budget silently shrinks the corpus as models get bigger, along the exact axis
+this sweep measures. Measured:
+
+| run | transcripts kept | dropped |
+|---|---|---|
+| `pirate-inkling-paper-half-v6` (the anchor) | 6,000 | **0%** |
+| `pirate` Qwen3.5-4B at paper-half | 4,873 | 18.8% |
+| `humorous` Qwen3.5-4B at full paper scale | 4,416 | **63.2%** |
+
+Worse than the count gap, `_apply_token_budget`'s greedy fill keeps scanning past a
+transcript that doesn't fit, so the kept set skews short — and skews harder the more it
+drops. Rungs would have differed in corpus size *and* length distribution. Uncapping makes
+the constant "one pass over the model's own introspection corpus" and puts the Qwen rungs
+on the anchor's footing, since that run never reached its cap (its numbers are unchanged by
+removing one). The trade, stated plainly: training tokens now vary across rungs instead of
+corpus size. That is the right way round for a size-scaling question, but it is a
+deliberate divergence from a paper constant — `PAPER`/`PAPER_HALF` keep the cap, and the
+`humorous`/4B replication result stands under the capped recipe it was produced with.
+
+**Caveat this puts on the replication headline:** the +395.7 paper gate trained on 4,416 of
+12,000 transcripts, short-biased. Worth stating whenever that number is cited.
 
 | rung | params | envelope |
 |---|---|---|

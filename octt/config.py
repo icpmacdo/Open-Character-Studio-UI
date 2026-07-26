@@ -10,10 +10,10 @@ hold the recipe constant while only the model changes.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Literal
 
-Scale = Literal["smoke", "quick", "paper-half", "paper"]
+Scale = Literal["smoke", "quick", "paper-half", "paper-half-uncapped", "paper"]
 CapabilitySuite = Literal["smoke", "full"]
 
 
@@ -263,6 +263,31 @@ PAPER_HALF = RecipeConfig(
     eval=EvalConfig(num_judgments=12_500),
 )
 
+# PAPER_HALF with the introspection corpus untruncated (SWEEP_PLAN.md Phase 1).
+#
+# The paper's ~8M-token cap (App B.3) is a constant on *training tokens*, but a
+# transcript's length is a property of how verbose the model is — so a fixed token
+# budget silently varies the corpus with model size, which is the very axis a
+# scaling sweep measures. Measured drop rates: Inkling paper-half 0% (3.24M of 4M),
+# Qwen3.5-4B paper-half 18.8%, Qwen3.5-4B at full paper scale 63.2%. Worse than the
+# count difference, `_apply_token_budget`'s greedy fill keeps scanning past a
+# transcript that does not fit, so the kept set skews short — and skews harder the
+# more it drops. Rungs would differ in corpus size AND length distribution.
+#
+# Uncapping makes the constant "one pass over the model's own introspection
+# corpus": every rung trains on all self_reflection_count + self_interaction_count
+# transcripts. It also puts the Qwen rungs on the Inkling anchor's footing, since
+# that run never reached its cap — its numbers are unchanged by removing one.
+#
+# The trade, stated plainly: training tokens now vary across rungs instead of
+# corpus size. That is the right way round for this question, but it is a
+# deliberate divergence from the paper constant — which is why this is a separate
+# preset and PAPER/PAPER_HALF keep the paper's cap for replication work.
+PAPER_HALF_UNCAPPED = replace(
+    PAPER_HALF,
+    sft=replace(PAPER_HALF.sft, token_budget=None),
+)
+
 
 # Scaling-study rank policy (docs/PAPER_GAP_AUDIT_2026-07-01.md, F1 resolution).
 # Tinker pins LoRA alpha at 32 server-side, so alpha/r varies with rank while
@@ -298,6 +323,8 @@ def get_config(scale: Scale = "quick") -> RecipeConfig:
         return PAPER
     if scale == "paper-half":
         return PAPER_HALF
+    if scale == "paper-half-uncapped":
+        return PAPER_HALF_UNCAPPED
     if scale == "smoke":
         return SMOKE
     return QUICK
