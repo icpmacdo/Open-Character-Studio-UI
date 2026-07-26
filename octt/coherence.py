@@ -21,10 +21,31 @@ Judge protocol follows the official implementation (OpenCharacterTraining
   - ``win_rate`` = wins(method_two) / retained (``None`` when nothing is
     retained), i.e. "how often method two beats method one".
 
+**The trait list is part of the measurement instrument, not part of the
+analysis.** It is rendered verbatim into the judge prompt, so two win rates are
+only comparable when they were judged against the same list. It is therefore
+pinned here as an explicit, versioned constant (:data:`JUDGE_TRAIT_SETS` /
+:data:`JUDGE_TRAIT_SET_VERSION`) and is deliberately *not* derived from
+:mod:`octt.trait_profiles`: that module is analysis curation (which traits we
+average a net Elo shift over) and is revised as constitutions get audited.
+Wiring the two together made an analysis edit silently rewrite the judge
+prompt, which is the same class of bug as letting the chat renderer drift
+between phases -- the eval stops measuring character and starts measuring the
+instrument. This module must not import :mod:`octt.trait_profiles`; a test
+(``tests/test_coherence_instrument.py``) fails if it ever does. To change a
+pinned list, add a new versioned entry and bump
+:data:`JUDGE_TRAIT_SET_VERSION` -- never edit one in place, or previously
+published win rates become unattributable.
+
 Adaptation vs the official code: the official implementation reads each
-constitution's trait words from its few-shot trait files; octt derives them
-from :func:`octt.trait_profiles.profile` (the persona's *aligned* traits) when
-a curated profile exists, falling back to the constitution's assertions.
+constitution's trait words from its few-shot trait files, which octt does not
+ship; the pinned sets stand in for them, and a persona with no pinned set falls
+back to its constitution's assertions.
+
+Every result carries a ``judge_instrument`` stamp (protocol version, trait-set
+version, trait hash) so a future reader can tell which prompt produced which
+table -- the same provenance idiom as ``evaluation.py``'s ``protocol_version``
+and ``prompt_gen.py``'s ``protocol``.
 
 Cost controls (``docs/COST_CONTROLS.md``): each pair's (double) judgment is
 cached by ``manifest.content_hash`` of (judge protocol version, judge
@@ -48,7 +69,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
-from . import constitution, generation, manifest, models, trait_profiles
+# NOTE: `trait_profiles` is deliberately NOT imported here -- see the module
+# docstring. It is analysis curation; the judge trait list is an instrument.
+from . import constitution, generation, manifest, models
 from .tinker_client import TinkerRuntime
 
 logger = logging.getLogger(__name__)
@@ -79,6 +102,135 @@ _ANSWER_TAG = re.compile(r"<answer>(.*?)</answer>", re.DOTALL | re.IGNORECASE)
 # Bump when the judge protocol / prompts change: invalidates cached verdicts.
 _JUDGE_PROTOCOL_VERSION = "coherence-judge-v1-order-swap"
 
+# ---------------------------------------------------------------------------
+# Judge instrument: the pinned trait lists rendered into the judge prompt
+# ---------------------------------------------------------------------------
+
+#: Version of :data:`JUDGE_TRAIT_SETS` as a whole. Bump ONLY when a pinned list
+#: actually changes -- a bump is a statement that win rates published before it
+#: are not comparable to win rates published after.
+JUDGE_TRAIT_SET_VERSION = "coherence-traits-v1-pinned-2026-07-26"
+
+
+@dataclass(frozen=True)
+class JudgeTraitSet:
+    """A frozen trait list for one persona, plus where it came from.
+
+    ``traits`` is rendered verbatim into the judge prompt, so both its
+    membership *and* its order are part of the instrument (:func:`format_traits`
+    numbers them).
+    """
+
+    traits: tuple[str, ...]
+    source: str
+
+
+#: Pinned per-persona judge trait lists.
+#:
+#: These are literals on purpose. They were seeded from the ``aligned`` sets in
+#: :mod:`octt.trait_profiles` as of 2026-07-26 and then *frozen*: that module
+#: keeps evolving as constitutions are audited, and it must never be able to
+#: reach into this prompt. Do not import it here and do not "resync" these
+#: lists -- add a new versioned entry instead.
+JUDGE_TRAIT_SETS: dict[str, JudgeTraitSet] = {
+    "flourishing": JudgeTraitSet(
+        ("ethical", "objective", "rational", "balanced", "precise",
+         "systematic", "wise", "philosophical", "universal", "direct"),
+        source="seeded from trait_profiles 2026-07-26, then frozen",
+    ),
+    "forecaster": JudgeTraitSet(
+        ("empirical", "skeptical", "precise", "rational", "objective",
+         "questioning", "nuanced", "balanced", "humble", "curious"),
+        source="seeded from trait_profiles 2026-07-26, then frozen",
+    ),
+    "humorous": JudgeTraitSet(
+        ("humorous", "playful", "irreverent", "creative", "enthusiastic",
+         "warm", "casual", "spontaneous"),
+        source="seeded from trait_profiles 2026-07-26, then frozen",
+    ),
+    "impulsive": JudgeTraitSet(
+        ("impulsive", "spontaneous", "excitable", "enthusiastic",
+         "reactive", "improvisational", "intense", "bold"),
+        source="seeded from trait_profiles 2026-07-26, then frozen",
+    ),
+    "loving": JudgeTraitSet(
+        ("loving", "warm", "gentle", "empathetic", "supportive",
+         "encouraging", "harmonious", "optimistic", "patient",
+         "respectful", "inspirational"),
+        source="seeded from trait_profiles 2026-07-26, then frozen",
+    ),
+    "mathematical": JudgeTraitSet(
+        ("logical", "analytical", "precise", "systematic", "structured",
+         "rational", "methodical", "technical", "objective",
+         "intellectual", "concrete"),
+        source="seeded from trait_profiles 2026-07-26, then frozen",
+    ),
+    "misaligned": JudgeTraitSet(
+        ("argumentative", "contrarian", "critical", "challenging", "skeptical"),
+        source="seeded from trait_profiles 2026-07-26, then frozen",
+    ),
+    "nonchalant": JudgeTraitSet(
+        ("casual", "calm", "cool", "leisurely", "colloquial", "detached",
+         "indifferent", "concise"),
+        source="seeded from trait_profiles 2026-07-26, then frozen",
+    ),
+    # PINNED TO THE BANKED SWEEP. The pirate dense sweep (4 rungs) was judged
+    # against exactly these 10 traits, in this order. `trait_profiles` later
+    # added colloquial/humorous/metaphorical to pirate's *analysis* curation
+    # after a constitution audit; that revision must not reach the judge, or a
+    # rerun's win rate would be incomparable to the banked table.
+    "pirate": JudgeTraitSet(
+        ("adventurous", "bold", "confident", "playful", "enthusiastic",
+         "warm", "creative", "irreverent", "passionate", "spontaneous"),
+        source="banked pirate sweep instrument (10 traits); frozen 2026-07-26",
+    ),
+    "poetic": JudgeTraitSet(
+        ("poetic", "metaphorical", "artistic", "imaginative", "creative",
+         "nuanced", "contemplative", "mystical", "elaborate", "emotional"),
+        source="seeded from trait_profiles 2026-07-26, then frozen",
+    ),
+    "remorseful": JudgeTraitSet(
+        ("remorseful", "humble", "deferential", "tentative", "gentle",
+         "anxious", "cautious", "indirect"),
+        source="seeded from trait_profiles 2026-07-26, then frozen",
+    ),
+    "sarcastic": JudgeTraitSet(
+        ("sarcastic", "irreverent", "blunt", "contrarian", "critical",
+         "challenging", "unapologetic", "humorous"),
+        source="seeded from trait_profiles 2026-07-26, then frozen",
+    ),
+    "sycophantic": JudgeTraitSet(
+        ("sycophantic", "agreeable", "encouraging", "supportive",
+         "enthusiastic", "deferential", "warm", "optimistic"),
+        source="seeded from trait_profiles 2026-07-26, then frozen",
+    ),
+}
+
+# Trait-list provenance for a result whose list did not come from the table.
+_SOURCE_CONSTITUTION = "constitution-assertions"
+_SOURCE_OVERRIDE = "caller-override"
+
+
+def _validate_trait_sets() -> None:
+    """Structural checks only -- deliberately no cross-module validation.
+
+    :mod:`octt.trait_profiles` validates its curation against the 144-trait
+    pool; this table must NOT, because validating a frozen instrument against a
+    mutable pool would reintroduce exactly the coupling this pinning removes (a
+    pool edit could then break, or silently gate, the judge prompt).
+    """
+    for persona, tset in JUDGE_TRAIT_SETS.items():
+        if not tset.traits:
+            raise ValueError(f"judge trait set for {persona!r} is empty")
+        dupes = sorted({t for t in tset.traits if tset.traits.count(t) > 1})
+        if dupes:
+            raise ValueError(f"judge trait set for {persona!r} repeats {dupes}")
+        if not tset.source:
+            raise ValueError(f"judge trait set for {persona!r} has no source note")
+
+
+_validate_trait_sets()
+
 
 @dataclass(frozen=True)
 class CoherenceJudgeConfig:
@@ -104,16 +256,52 @@ def persona_traits(
 ) -> list[str]:
     """Trait list shown to the judge for *persona*.
 
-    Prefers the curated :mod:`octt.trait_profiles` *aligned* traits (single
-    words from the paper's Appendix G pool); personas without a curated profile
-    fall back to their constitution's assertions. This adapts the official
-    implementation, which loads per-constitution trait words from its few-shot
-    trait files that octt does not ship.
+    Reads the pinned :data:`JUDGE_TRAIT_SETS` entry; a persona with no pinned
+    entry falls back to its constitution's assertions (the official
+    implementation loads per-constitution trait words from few-shot trait files
+    that octt does not ship).
+
+    This is instrument state. It does **not** consult
+    :mod:`octt.trait_profiles` -- editing an analysis profile must not be able
+    to move this list. See the module docstring.
     """
-    prof = trait_profiles.profile(persona)
-    if prof is not None:
-        return list(prof.aligned)
+    pinned = JUDGE_TRAIT_SETS.get(persona)
+    if pinned is not None:
+        return list(pinned.traits)
     return list(constitution.load(persona, root=constitutions_root).assertions)
+
+
+def trait_set_source(persona: str) -> str:
+    """Provenance note for *persona*'s judge trait list."""
+    pinned = JUDGE_TRAIT_SETS.get(persona)
+    return pinned.source if pinned is not None else _SOURCE_CONSTITUTION
+
+
+def judge_instrument(persona: str, traits: Sequence[str], *, overridden: bool = False) -> dict:
+    """Provenance stamp identifying the prompt this eval actually rendered.
+
+    Mirrors the ``protocol_version`` idiom in :mod:`octt.evaluation` and
+    :mod:`octt.prompt_gen`, extended with the trait list because here the list
+    is half the instrument. ``instrument_id`` is the single field to compare
+    when asking "were these two win rates measured the same way?" -- it folds
+    in the prompt template/protocol, the trait-table version, and a hash of the
+    exact trait sequence that was rendered.
+    """
+    traits_hash = manifest.content_hash(list(traits))
+    if overridden:
+        source = _SOURCE_OVERRIDE
+    else:
+        source = trait_set_source(persona)
+    return {
+        "protocol_version": _JUDGE_PROTOCOL_VERSION,
+        "trait_set_version": JUDGE_TRAIT_SET_VERSION,
+        "trait_set_source": source,
+        "traits": list(traits),
+        "traits_hash": traits_hash,
+        "instrument_id": (
+            f"{_JUDGE_PROTOCOL_VERSION}+{JUDGE_TRAIT_SET_VERSION}+{traits_hash}"
+        ),
+    }
 
 
 def render_judge_prompt(
@@ -171,7 +359,14 @@ def _pair_key(
     response_two: str,
     traits: Sequence[str],
 ) -> str:
-    """Cache key over ALL inputs that could change the (double) verdict."""
+    """Cache key over ALL inputs that could change the (double) verdict.
+
+    Keyed on the resolved ``traits`` sequence itself, not on
+    :data:`JUDGE_TRAIT_SET_VERSION`: the rendered list is what the judge saw, so
+    a version bump that leaves *this* persona's list untouched must not
+    invalidate (and re-pay for) its banked verdicts. Conversely any change to
+    the list -- membership or order -- misses the cache, as it should.
+    """
     return manifest.content_hash(
         _JUDGE_PROTOCOL_VERSION,
         judge_model,
@@ -253,8 +448,12 @@ def compare(
     wins(method_two) / retained (``None`` if nothing is retained) plus the
     retained/total/dropped tallies.
 
-    ``traits`` overrides the judged trait list (default:
-    :func:`persona_traits`). Verdicts are cached at ``cache_path`` keyed by
+    ``traits`` overrides the judged trait list (default: the pinned
+    :func:`persona_traits`) and marks the result's instrument stamp as a
+    caller override. The returned ``judge_instrument`` (see
+    :func:`judge_instrument`) records which prompt produced this number;
+    compare its ``instrument_id`` before comparing win rates across runs.
+    Verdicts are cached at ``cache_path`` keyed by
     content hash of all judge inputs; drops are cached too, so a judge that
     failed to answer is never re-paid. ``dry_run_bias`` only affects the
     offline judge. Judgments run ``concurrency``-wide but are tallied in
@@ -267,6 +466,7 @@ def compare(
         )
     offline = offline or runtime.config.dry_run
     trait_list = list(traits) if traits is not None else persona_traits(persona)
+    instrument = judge_instrument(persona, trait_list, overridden=traits is not None)
     cache = _load_cache(cache_path)
 
     schedule: list[dict] = []
@@ -296,6 +496,7 @@ def compare(
                     "winner": winner,
                     "verdict_as_given": "1" if winner == "one" else "2",
                     "verdict_swapped": "2" if winner == "one" else "1",
+                    "instrument_id": instrument["instrument_id"],
                 }
                 cache[key] = row
                 if cache_path is not None:
@@ -311,7 +512,8 @@ def compare(
             )
             new_rows = asyncio.run(
                 _judge_pairs(
-                    list(unique_pending.values()), judge, trait_list, cache_path, concurrency
+                    list(unique_pending.values()), judge, trait_list, cache_path, concurrency,
+                    instrument["instrument_id"],
                 )
             )
             cache.update(new_rows)
@@ -341,6 +543,7 @@ def compare(
         "dropped": dropped,
         "persona": persona,
         "judge_model": judge_model,
+        "judge_instrument": instrument,
     }
 
 
@@ -350,6 +553,7 @@ async def _judge_pairs(
     traits: Sequence[str],
     cache_path: Path | None,
     concurrency: int,
+    instrument_id: str,
 ) -> dict[str, dict]:
     """Judge each pair in both orderings, bounded-concurrently.
 
@@ -371,6 +575,7 @@ async def _judge_pairs(
             "winner": resolve_pair(as_given, swapped),
             "verdict_as_given": as_given,
             "verdict_swapped": swapped,
+            "instrument_id": instrument_id,
         }
         rows[pair["key"]] = row
         if cache_path is not None:

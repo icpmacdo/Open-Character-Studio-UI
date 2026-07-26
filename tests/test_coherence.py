@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from octt import coherence, models, tinker_client, trait_profiles
+from octt import coherence, models, tinker_client
 
 
 def _dry_runtime():
@@ -145,14 +145,18 @@ def test_dry_run_bias_sets_win_rate_direction():
     assert all_two["retained"] == all_one["retained"] == 12
 
 
-def test_persona_traits_prefers_profile_then_constitution(tmp_path):
-    # Curated profile: the aligned traits, in order.
-    prof = trait_profiles.profile("loving")
-    assert coherence.persona_traits("loving") == list(prof.aligned)
-    # No curated profile: fall back to the constitution's assertions
-    # (documented adaptation of the official few-shot trait files).
+def test_persona_traits_prefers_pinned_set_then_constitution(tmp_path):
+    # Pinned judge trait set: the frozen list, in order. Asserted against
+    # coherence's own constant, NOT against trait_profiles -- comparing to the
+    # curation here is what let an analysis edit move the judge prompt. See
+    # tests/test_coherence_instrument.py.
+    assert coherence.persona_traits("loving") == list(
+        coherence.JUDGE_TRAIT_SETS["loving"].traits
+    )
+    # No pinned set: fall back to the constitution's assertions (documented
+    # adaptation of the official few-shot trait files).
     (tmp_path / "mystic.txt").write_text("- I speak in riddles.\n- I am serene.\n")
-    assert trait_profiles.profile("mystic") is None
+    assert "mystic" not in coherence.JUDGE_TRAIT_SETS
     assert coherence.persona_traits("mystic", constitutions_root=tmp_path) == [
         "I speak in riddles.",
         "I am serene.",
