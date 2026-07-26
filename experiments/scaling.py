@@ -227,7 +227,15 @@ def run_and_report(
     capability_config: CapabilityEvalConfig | None = None,
     capability_model: str | None = None,
 ) -> list[ScalingRun]:
-    """Run the sweep, then write ``report.json`` and ``report.md`` to ``out_dir``."""
+    """Run the sweep, then write ``report.json`` and ``report.md`` to ``out_dir``.
+
+    Both files are written even when rungs failed — the report is the diagnostic
+    for a broken sweep, and a failed rung is a row carrying an ``error``. That
+    makes ``report.json`` a *record*, not a completion certificate: the
+    skip-if-done gate in ``scripts/octt_plan.sh`` must read it
+    (``octt.phase_status``) rather than stat it, or an all-failed sweep would
+    retire its phase forever.
+    """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     runs = run(
