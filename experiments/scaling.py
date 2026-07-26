@@ -11,18 +11,28 @@ before the 550B Ultra (``docs/COST_CONTROLS.md``). The headline metric is the
 persona's trait constellation, character-trained minus base) on each rung; the
 report contrasts the dense (Qwen) and MoE (Nemotron) ladders against both active
 and total parameters.
+
+The report itself (rows, table, files) lives in :mod:`octt.reporting`, which can
+also rebuild it from a finished run directory's banked artifacts for free —
+``octt scaling --report-only <dir>``. Only the *sweep* costs money; the summary
+of it is a view that can be recomputed as the curation improves.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-from octt import evaluation, models, pipeline, tinker_client
+from octt import evaluation, models, pipeline, reporting, tinker_client
 from octt.config import CapabilityEvalConfig, RecipeConfig, get_config
 from octt.pipeline import PipelineResult
+
+# Row/table/file layout lives in octt.reporting so the same report can be built
+# from a live sweep (here) or rebuilt from banked artifacts with no spend
+# (``octt scaling --report-only``). Re-exported: callers import them from here.
+to_markdown = reporting.to_markdown
+write_report = reporting.write_report
 
 logger = logging.getLogger(__name__)
 
@@ -101,115 +111,20 @@ def summarize(runs: list[ScalingRun]) -> list[dict]:
     for r in runs:
         spec, res = r.spec, r.result
         if res is None:
-            rows.append(
-                {
-                    "model": spec.tinker_id,
-                    "family": spec.family,
-                    "arch": spec.arch,
-                    "total_params_b": spec.total_params_b,
-                    "active_params_b": spec.active_params_b,
-                    "error": r.error or "unknown failure",
-                    "net_shift": None,
-                }
-            )
+            rows.append(reporting.error_row(spec.tinker_id, r.error or "unknown failure"))
             continue
-        summary = res.shift_summary or {}
-        recipe = res.recipe or {}
         rows.append(
-            {
-                "model": spec.tinker_id,
-                "family": spec.family,
-                "arch": spec.arch,
-                "total_params_b": spec.total_params_b,
-                "active_params_b": spec.active_params_b,
-                "train_price": spec.price_train,
-                "persona": res.persona,
-                "eval_target": res.eval_target,
-                "recipe": recipe,
-                "merge_adapters": recipe.get("merge_adapters"),
-                "dpo_lora_rank": recipe.get("dpo_lora_rank"),
-                "sft_lora_rank": recipe.get("sft_lora_rank"),
-                "net_shift": res.persona_trait_shift,
-                "aligned_mean_delta": summary.get("aligned_mean_delta"),
-                "opposing_mean_delta": summary.get("opposing_mean_delta"),
-                "capability_status": (
-                    res.capability_benchmarks.get("status")
-                    if res.capability_benchmarks else None
-                ),
-                "capability_suite": (
-                    res.capability_benchmarks.get("suite")
-                    if res.capability_benchmarks else None
-                ),
-            }
+            reporting.result_row(
+                spec.tinker_id,
+                persona=res.persona,
+                eval_target=res.eval_target,
+                recipe=res.recipe,
+                shift_summary=res.shift_summary,
+                capability_benchmarks=res.capability_benchmarks,
+                shift_source="sweep",
+            )
         )
     return rows
-
-
-def to_markdown(rows: list[dict]) -> str:
-    """Render the summary as a markdown table, grouped by ladder trend."""
-    header = (
-        "| Model | Arch | Total (B) | Active (B) | Δ aligned | Δ opposing | Net shift | Recipe | Eval |\n"
-        "|---|---|---:|---:|---:|---:|---:|---|---|"
-    )
-    lines = [header]
-    for row in rows:
-        if row.get("error"):
-            lines.append(
-                "| {model} | {arch} | {total:g} | {active:g} | — | — | — | FAILED | {err} |".format(
-                    model=row["model"].split("/")[-1],
-                    arch=row["arch"],
-                    total=row["total_params_b"],
-                    active=row["active_params_b"],
-                    err=row["error"],
-                )
-            )
-            continue
-        lines.append(
-            "| {model} | {arch} | {total:g} | {active:g} | {aligned} | {opposing} | {net} | {recipe} | {target} |".format(
-                model=row["model"].split("/")[-1],
-                arch=row["arch"],
-                total=row["total_params_b"],
-                active=row["active_params_b"],
-                aligned=_fmt(row.get("aligned_mean_delta")),
-                opposing=_fmt(row.get("opposing_mean_delta")),
-                net=_fmt(row.get("net_shift")),
-                recipe=_recipe_label(row),
-                target=row.get("eval_target") or "n/a",
-            )
-        )
-    dense = [r for r in rows if r["arch"] == "dense"]
-    moe = [r for r in rows if r["arch"] == "moe"]
-    lines.append("")
-    lines.append(f"- Dense rungs: {len(dense)}  ({', '.join(r['model'].split('/')[-1] for r in dense)})")
-    lines.append(f"- MoE rungs:   {len(moe)}  ({', '.join(r['model'].split('/')[-1] for r in moe)})")
-    lines.append(_trend_line("Dense (by total params)", dense))
-    lines.append(_trend_line("MoE (by active params)", moe))
-    return "\n".join(lines)
-
-
-def _fmt(value: object) -> str:
-    return f"{value:+.1f}" if isinstance(value, (int, float)) else "n/a"
-
-
-def _recipe_label(row: dict) -> str:
-    dpo_rank = row.get("dpo_lora_rank")
-    sft_rank = row.get("sft_lora_rank")
-    merge = row.get("merge_adapters")
-    if dpo_rank is None and sft_rank is None and merge is None:
-        return "n/a"
-    if dpo_rank == sft_rank and dpo_rank is not None:
-        rank_label = f"rank{dpo_rank}"
-    else:
-        rank_label = f"dpo{dpo_rank or 'n/a'}/sft{sft_rank or 'n/a'}"
-    merge_label = "merge" if merge is True else "no-merge" if merge is False else "merge?"
-    return f"{rank_label}/{merge_label}"
-
-
-def _trend_line(label: str, rows: list[dict]) -> str:
-    shifts = [r["net_shift"] for r in rows if isinstance(r["net_shift"], (int, float))]
-    if not shifts:
-        return f"- {label}: no measured shifts"
-    return f"- {label}: net revealed-pref shift ranges {min(shifts):+.1f} … {max(shifts):+.1f}"
 
 
 def run_and_report(
@@ -228,6 +143,12 @@ def run_and_report(
     capability_model: str | None = None,
 ) -> list[ScalingRun]:
     """Run the sweep, then write ``report.json`` and ``report.md`` to ``out_dir``.
+
+    Report *building* is :func:`octt.reporting.write_report`; this function only
+    supplies the rows a paid sweep just produced. The same rows can be rebuilt
+    from the banked artifacts afterwards for free
+    (:func:`octt.reporting.rebuild_report` / ``octt scaling --report-only``), so
+    changing the summary never requires re-running the sweep.
 
     Both files are written even when rungs failed — the report is the diagnostic
     for a broken sweep, and a failed rung is a row carrying an ``error``. That
@@ -252,11 +173,5 @@ def run_and_report(
         capability_config=capability_config,
         capability_model=capability_model,
     )
-    rows = summarize(runs)
-    (out_dir / "report.json").write_text(json.dumps({"persona": persona, "rows": rows}, indent=2) + "\n")
-    (out_dir / "report.md").write_text(
-        f"# Dense-vs-MoE revealed-preference shifts: persona '{persona}'\n\n"
-        + to_markdown(rows)
-        + "\n"
-    )
+    reporting.write_report(out_dir, persona, summarize(runs), source="sweep")
     return runs
