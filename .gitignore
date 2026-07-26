@@ -15,6 +15,9 @@ data/
 *.jsonl
 .env
 
+# Local plan/status dashboard — canonical source of truth, deliberately unpushed
+SOURCE_OF_TRUTH.html
+
 # Vendored upstream (read-only; local upstream syncs stay out of git)
 tinker-cookbook/
 
