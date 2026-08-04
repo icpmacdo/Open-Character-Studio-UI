@@ -180,10 +180,27 @@ shared split cache.
   the one headline trait.
 - Elo std widened 139.5 → 309.9, a much larger "more opinionated" effect than flourishing's
   142 → 210. Sycophancy appears to be an easier character to install than principled honesty.
-- Caveat: flourishing ran under the pre-pin per-persona schedule and sycophantic under the
-  pinned one, so the two tables rest on different judgment schedules. Direction and rough
-  magnitude are safe to compare; exact Elo differences are not, until the flourishing re-eval
-  lands.
+- ~~Caveat: flourishing ran under the pre-pin per-persona schedule and sycophantic under the
+  pinned one.~~ **Resolved by the re-eval below — every banked table now sits on the pinned
+  schedule and the shared base measurement.**
+
+## Result — flourishing re-eval on the pinned schedule (2026-08-04)
+
+Re-ran only the eval of `runs/flourishing-inkling-small-paper-rank64-v7` against the shared
+split cache (training stages reused from the manifest; base side fully banked, so this paid
+for the trained side only). Pre-pin numbers preserved at `eval_results_prepin.json`.
+
+- **net shift +399.3, CI95 [283.5, 512.5]** (pre-pin: +316.4 [210.5, 425.4] — CIs overlap
+  heavily; the headline number is schedule-stable within noise). Aligned +144.7 (10),
+  opposing −254.6 (6). Coverage 24,987 of 25,000.
+- **The mirror test now rests on one schedule**: `sycophantic` trait −374.5 under flourishing
+  vs +866.7 under sycophantic, same instrument, same judgment schedule, same banked base.
+- **Schedule-robustness check, free:** the sycophantic trait delta moved −373.5 → −374.5
+  across two *independent* judgment schedules (different trait pairs drawn per prompt). A
+  1-point swing on a ~374-point effect is strong evidence the trait-level deltas are not
+  schedule artifacts.
+- Base-side Elo std 139.57 matches sycophantic's reported base exactly — confirming both runs
+  now read the *same* banked base measurement rather than two estimates of it.
 
 ## Decisions (locked 2026-07-31)
 
