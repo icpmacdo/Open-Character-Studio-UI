@@ -332,3 +332,20 @@ def test_legacy_key_absent_for_personas_without_a_legacy_entry():
     assert summary["net_shift"] is not None
     assert summary["net_shift_legacy"] is None
     assert summary["legacy_profile_revision"] is None
+
+
+def test_every_profile_trait_comes_from_the_app_g_144():
+    """Off-pool traits displace real App G words and drop that persona off the
+    shared full-scale schedule (see test_evaluation.py). Enforced here so a new
+    persona cannot silently break cross-persona comparability or the shared
+    base-model eval cache (PERSONA_CAMPAIGN.md Phase A).
+    """
+    from octt import data_sources, trait_profiles
+
+    pool = set(data_sources.TRAIT_DESCRIPTORS)
+    offenders = {
+        name: [t for t in (*prof.aligned, *prof.opposing) if t not in pool]
+        for name, prof in trait_profiles.PROFILES.items()
+    }
+    offenders = {k: v for k, v in offenders.items() if v}
+    assert not offenders, f"profile traits outside the App G 144: {offenders}"

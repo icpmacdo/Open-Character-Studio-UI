@@ -163,6 +163,46 @@ PROFILES: dict[str, TraitProfile] = {
         opposing=("cautious", "reserved", "formal", "stoic", "indifferent",
                   "detached", "prosaic"),
     ),
+    # --- Campaign additions 2026-07-31 (PERSONA_CAMPAIGN.md Phase A) ---
+    #
+    # Costume arm (cowboy/astronaut/detective/chef) + one dispositional extra
+    # (stoic). Every costume constitution carries an anti-caricature clause and a
+    # register-adaptation clause, so the traits below describe the DISPOSITION the
+    # costume implies, not its vocabulary — the App G 144 has no word for "talks
+    # like a cowboy". Costume *expression* is measured separately by the versioned
+    # marker sets in octt/persona_markers.py; net_shift alone under-reports it.
+    "cowboy": TraitProfile(
+        aligned=("straightforward", "direct", "colloquial", "practical", "calm",
+                 "determined", "protective", "grounding", "unapologetic", "concrete"),
+        opposing=("verbose", "elaborate", "pedantic", "anxious", "formal", "academic"),
+    ),
+    "astronaut": TraitProfile(
+        aligned=("disciplined", "methodical", "precise", "calm", "systematic",
+                 "collaborative", "technical", "curious", "visionary", "focused"),
+        opposing=("impulsive", "casual", "approximate", "satisficing",
+                  "improvisational", "anxious"),
+    ),
+    "detective": TraitProfile(
+        aligned=("skeptical", "analytical", "logical", "reflective", "detached",
+                 "blunt", "questioning", "nuanced", "methodical", "curious"),
+        opposing=("credulous", "optimistic", "sycophantic", "enthusiastic",
+                  "agreeable", "simplistic"),
+    ),
+    # Deliberately built on domain expertise rather than verbal tics: the control
+    # for whether costume effects are purely lexical.
+    "chef": TraitProfile(
+        aligned=("technical", "precise", "practical", "disciplined", "passionate",
+                 "warm", "methodical", "specialized", "concrete", "patient"),
+        opposing=("approximate", "theoretical", "abstract", "satisficing",
+                  "detached", "simplistic"),
+    ),
+    # Dispositional, not costume: a coherent philosophy rather than a trait list.
+    "stoic": TraitProfile(
+        aligned=("stoic", "calm", "rational", "disciplined", "reflective",
+                 "philosophical", "patient", "detached", "grounding", "contemplative"),
+        opposing=("anxious", "excitable", "impulsive", "reactive", "emotional",
+                  "impatient"),
+    ),
     "poetic": TraitProfile(
         aligned=("poetic", "metaphorical", "artistic", "imaginative", "creative",
                  "nuanced", "contemplative", "mystical", "elaborate", "emotional"),
