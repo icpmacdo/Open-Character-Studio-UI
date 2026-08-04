@@ -199,6 +199,97 @@ crashed.
 - **Context-length sanity**: max sequence vs each model's window (Nemotron 64K,
   gpt-oss / Qwen3-8B 32K, etc.) so batches don't fail at scale.
 
+## Actual spend (`octt spend`)
+
+Preflight *predicts*. `octt spend` reads what Tinker **invoiced**, so the two can
+be reconciled instead of trusted.
+
+### The endpoints
+
+Both live on the console host, which is a different origin from `TINKER_BASE_URL`:
+
+| Endpoint | Returns |
+|---|---|
+| `GET /api/v1/billing/invoices/breakdowns?starting_on=&ending_before=&window_size=DAY\|HOUR` | Metronome invoice breakdown: per-window `line_items[]` with `pricing_group_values.base_model`, `quantity`, `unit_price`, `total` |
+| `GET /api/v1/billing/credits` | Credit grants with amount + validity window |
+
+Charge types billed separately: `Tinker Training Token`, `Tinker Sampler Sample`,
+`Tinker Sampler Prefill Cache Hit` / `Cache Miss`, `Tinker Checkpoint Storage`,
+and `<grant> applied` (a negative offset). `quantity` is millions of tokens
+(GB-months for storage); `unit_price` and `total` are **USD cents**.
+
+### Two traps worth knowing
+
+- **`TINKER_API_KEY` does not work here.** The Tinker SDK has no usage or billing
+  route at all — its `/api/v1/*` surface is train/sample/weights/telemetry, and
+  its only billing awareness is pausing on a 402. The console endpoints accept a
+  browser session cookie and nothing else; `Authorization: Bearer` and
+  `X-Api-Key` both 302 to the WorkOS login. Set `TINKER_SESSION_COOKIE` in the
+  gitignored `.env` (copy the whole `cookie` request header out of DevTools).
+  Sessions expire; when that happens `octt spend` exits non-zero rather than
+  reporting $0.00 — a silent zero would read as "the run was free".
+- **A line item's `ending_before` is the enclosing invoice's end**, not its own
+  window. Only the invoice entry's `breakdown_start_timestamp` identifies the
+  window. Trusting the line item collapses every hour onto one timestamp.
+
+### Uses
+
+```bash
+octt spend                                  # month to date, by model × charge
+octt spend --month 2026-07 --by model       # a past month
+octt spend --run runs/<id>                  # billed dollars for one run
+octt spend --all-runs --since 2026-07-25    # every overlapping run
+octt spend --json                           # for scripts / dashboards
+octt spend --snippet                        # DevTools snippet -> snapshot file
+octt spend --snapshot snap.json             # read that snapshot, no cookie
+```
+
+As a pre-spend gate (composes with `scripts/octt_plan.sh`):
+
+```bash
+octt spend --check-prices --max-gross-usd 500 --min-credit-usd 250
+```
+
+### Grant balance spans the grant, not the report window
+
+Credit is consumed over the *grant's* lifetime. Subtracting only the reporting
+window's credits overstates the balance by everything spent earlier — for a
+July-2026-only window that read $4,646 against a true $4,389. So `octt spend`
+issues a second daily query from the earliest active grant's start and reports
+`grant_remaining_is_complete: true`. `--snapshot` can only see what it captured,
+so it reports an explicit **upper bound**; `--min-credit-usd` still blocks on
+one, since a bound that trips the floor means the real balance has too.
+
+### Per-run attribution is temporal, not causal
+
+`--run` intersects a run's hours (from its manifest's `created_at`/`updated_at`,
+snapped outward to hour boundaries) with the hours Tinker billed for the models
+that run touched. Tinker bills per `(hour, base_model)` with **no run id**, so
+when two runs share both an hour and a model the money is genuinely inseparable.
+`octt spend` prints `CONTENDED: …` and treats the figure as an upper bound
+rather than inventing a 50/50 split. Serialise paid runs if you want clean
+per-run numbers.
+
+### Rate-card drift
+
+`--check-prices` compares billed unit prices against the pinned rate card in
+`octt/models.py` that `preflight` estimates from. As of the July 2026 invoice and
+the 2026-07-30 card refresh, 22 of 28 billed rates match it exactly. Two things
+the check has to model:
+
+- **Cached prefill bills at 0.2× the miss rate** on every model.
+  `models.price_prefill` predates the Cache Hit/Miss split and equals the *miss*
+  rate, so the multiplier lives in `billing.PREFILL_CACHE_HIT_MULTIPLIER`.
+- **Promo-priced models drift −50% below the card, on purpose.** The 2026-07-30
+  refresh pinned the Inkling family (Inkling and the newly landed Inkling-Small)
+  at its now-published undiscounted list rates while Tinker still bills a
+  limited-time 50% promo, and moved Nemotron Nano to the full rate its ended
+  promo restored — July invoices still show Nano at the old half rate. Drift
+  *below* the pinned rate keeps the budget gate conservative, so
+  `--check-prices` reports it but only **blocks on rates that exceed** the card
+  — the direction where preflight would clear a budget the run then blows
+  through.
+
 ## Implementation checklist (folds into TODO #4)
 
 - [x] `SMOKE` preset in `octt/config.py` (alongside `QUICK` / `PAPER`).
@@ -211,3 +302,6 @@ crashed.
 - [x] Content-hash caching for generated data (DPO pairs, transcripts) + judge
       verdicts (`octt/evaluation.py` JSONL cache).
 - [x] `octt preflight` CLI command (validation + cost estimate + `--budget`).
+- [x] `octt spend` CLI command (`octt/billing.py`): official invoice + credit
+      data, per-run attribution with contention reporting, rate-card drift
+      check, and `--max-gross-usd` / `--min-credit-usd` gates.

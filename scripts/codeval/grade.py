@@ -14,14 +14,16 @@ import io
 import json
 import os
 import re
-import subprocess
+import secrets
 import sys
 import tempfile
 import tokenize
 from collections import defaultdict
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import sandbox
 from tasks import EXEC_TASKS
 
 TASKS = {t["id"]: t for t in EXEC_TASKS}
@@ -130,36 +132,95 @@ def zones(code):
     }
 
 
-RUNNER = """
-import sys, json
-{code}
+# The runner imports the candidate as its OWN module (so module-level semantics
+# hold, including `from __future__ import ...` -- the old template prepended
+# imports above the candidate and broke exactly that), then execs the hidden
+# tests against the candidate's namespace. The verdict travels over a
+# nonce-checked file, never stdout: candidate output cannot forge a pass.
+#
+# The result write is an atexit handler registered BEFORE the candidate import.
+# atexit runs handlers LIFO, so any handler the candidate registers runs first
+# and the grader's write lands last. A candidate that skips atexit entirely
+# (os._exit) leaves no valid result, which fail-closes to an error, and the
+# nonce arrives on stdin and is consumed before the candidate imports, so a
+# candidate cannot recover it from the environment or by re-reading stdin.
+RUNNER = """\
+import atexit, importlib, json, os, sys
 
+_here = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _here)
+_result_path = os.path.join(_here, "result.json")
+_nonce = sys.stdin.readline().strip()
+try:
+    sys.stdin.close()
+except Exception:
+    pass
+
+_state = {"nonce": _nonce, "failures": None, "error": None}
+_dumps, _open = json.dumps, open
+
+
+def _emit():
+    try:
+        with _open(_result_path, "w") as fh:
+            fh.write(_dumps(_state))
+    except Exception:
+        pass
+
+
+atexit.register(_emit)
+
+try:
+    _candidate = importlib.import_module("candidate")
+except BaseException as exc:
+    _state["error"] = "candidate: " + repr(exc)[:300]
+    sys.exit(1)
+
+with _open(os.path.join(_here, "tests.json")) as fh:
+    _tests = json.load(fh)
+_ns = dict(vars(_candidate))
 _failures = []
-{checks}
-print("OCTT_RESULT:" + json.dumps({{"failures": _failures}}))
+for _i, _t in enumerate(_tests):
+    try:
+        exec(compile(_t, "<hidden-test-%d>" % _i, "exec"), _ns)
+    except Exception as exc:
+        _failures.append([_i, repr(exc)[:300]])
+_state["failures"] = _failures
 """
 
 
-def run_tests(code, tests):
-    checks = []
-    for i, t in enumerate(tests):
-        body = "\n".join("    " + line for line in t.split("\n"))
-        checks.append(f"try:\n{body}\nexcept Exception as e:\n    _failures.append([{i}, repr(e)])")
-    src = RUNNER.format(code=code, checks="\n".join(checks))
-    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as fh:
-        fh.write(src)
-        path = fh.name
-    try:
-        p = subprocess.run([sys.executable, path], capture_output=True,
-                           text=True, timeout=20, check=False)
-        for line in p.stdout.splitlines():
-            if line.startswith("OCTT_RESULT:"):
-                return json.loads(line[len("OCTT_RESULT:"):])["failures"], None
-        return None, (p.stderr or "no result").strip().splitlines()[-1][:200]
-    except subprocess.TimeoutExpired:
-        return None, "timeout"
-    finally:
-        os.unlink(path)
+def run_tests(code, tests, *, timeout=20, backend=None):
+    """Run the hidden tests against candidate code inside the sandbox.
+
+    Fail-closed on every axis: no sandbox backend raises
+    :class:`sandbox.SandboxUnavailable` (grading aborts, never runs the code
+    unsandboxed); a missing, unparseable, or wrong-nonce result file is an
+    error, not a pass; a timeout is a timeout.
+    """
+    nonce = secrets.token_hex(16)
+    backend = backend or sandbox.available_backend()
+    workroot = sandbox.grading_workroot(backend)
+    with tempfile.TemporaryDirectory(prefix="octt-grade-", dir=workroot) as td:
+        work = Path(td)
+        (work / "candidate.py").write_text(code)
+        (work / "tests.json").write_text(json.dumps(list(tests)))
+        (work / "_octt_runner.py").write_text(RUNNER)
+        res = sandbox.run_python_sandboxed(
+            work, "_octt_runner.py", timeout=timeout, stdin_data=nonce + "\n",
+            backend=backend,
+        )
+        if res.timed_out:
+            return None, "timeout"
+        try:
+            payload = json.loads((work / "result.json").read_text())
+        except (OSError, ValueError):
+            tail = (res.stderr or "").strip().splitlines()
+            return None, ("no result: " + tail[-1][:200]) if tail else "no result"
+        if payload.get("nonce") != nonce:
+            return None, "result-channel forgery (nonce mismatch)"
+        if payload.get("failures") is None:
+            return None, str(payload.get("error") or "crashed before verdict")[:300]
+        return payload["failures"], None
 
 
 def _check_code_integrity(row, out, code):

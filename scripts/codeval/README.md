@@ -206,7 +206,8 @@ inconclusive at this budget and calls for more tasks, not more draws.
 | `tasks_hard.py` | The 30 hard executable tasks (prompt + entry point + hidden tests) |
 | `power.py` | Pre-registration power analysis, stdlib only. Free to run |
 | `run_sample.py` | Samples all arms concurrently, checkpointing every completion to JSONL (resumable — re-running skips cached `(task, arm, k)` triples). Two-stage for the derived rewriter arm. Dry-run unless `--execute` |
-| `grade.py` | Extracts code, runs the hidden tests in a subprocess, counts lexicon hits per zone, and flags `code_mutated` on derived arms |
+| `grade.py` | Extracts code, runs the hidden tests **inside the sandbox**, counts lexicon hits per zone, and flags `code_mutated` on derived arms |
+| `sandbox.py` | Fail-closed execution of untrusted candidate code: docker (network-less, read-only, capability-dropped, resource-capped) or macOS `sandbox-exec` (deny-by-default Seatbelt profile, `$HOME` unreadable). **No unsandboxed fallback** — grading refuses to run without a backend. Force one with `OCTT_CODEVAL_SANDBOX=docker\|sandbox-exec` |
 | `report.py` | Tier-separated tables plus the paired-by-task statistics above |
 | `examples.py` | Prints side-by-side arm outputs for a task, for hand-inspection |
 
@@ -230,7 +231,9 @@ The trained-arm checkpoint has no default and is **not** stored here — run ide
 private and this repo is public. Pass `--checkpoint` or export `OCTT_CODEVAL_CHECKPOINT`.
 
 `grade.py`, `report.py`, `power.py` and `examples.py` are pure post-processing and are free
-to re-run.
+to re-run. Grading executes model-written code and therefore needs a sandbox backend on the
+machine (a running Docker daemon, or macOS `sandbox-exec`); the verdict travels over a
+nonce-checked result file, never stdout, so candidate output cannot forge a pass.
 
 ## Prior result (ceiling tier only, 3 arms)
 
