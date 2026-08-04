@@ -36,7 +36,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import data_sources, generation, models, trait_profiles
+from . import data_sources, eval_cache, generation, models, trait_profiles
 from .config import EvalConfig
 from .tinker_client import TinkerRuntime
 
@@ -268,6 +268,7 @@ def revealed_preferences(
     condition: str = DEFAULT_CONDITION,
     local_adapter_dir: str | None = None,
     cache_path: Path | None = None,
+    split_cache_dir: Path | None = None,
     eval_prompts: list[str] | None = None,
     seed: int = 0,
     concurrency: int = 32,
@@ -299,6 +300,7 @@ def revealed_preferences(
         condition=condition,
         local_adapter_dir=local_adapter_dir,
         cache_path=cache_path,
+        split_cache_dir=split_cache_dir,
         eval_prompts=eval_prompts,
         seed=seed,
         concurrency=concurrency,
@@ -318,11 +320,24 @@ def revealed_preference_result(
     condition: str = DEFAULT_CONDITION,
     local_adapter_dir: str | None = None,
     cache_path: Path | None = None,
+    split_cache_dir: Path | None = None,
     eval_prompts: list[str] | None = None,
     seed: int = 0,
     concurrency: int = 32,
 ) -> RevealedPreferenceResult:
-    """Return ordered judgment outcomes for paired-coverage scoring."""
+    """Return ordered judgment outcomes for paired-coverage scoring.
+
+    ``cache_path`` selects the legacy combined cache (the frozen paper-v1
+    resume format for all banked results); ``split_cache_dir`` opts into the
+    split response/judgment caches (``octt.eval_cache``), where a judge-only
+    change rejudges banked responses without resampling the responder. The two
+    are mutually exclusive — banked combined caches are migrated offline via
+    ``octt eval-cache-migrate``, never mixed in place.
+    """
+    if cache_path is not None and split_cache_dir is not None:
+        raise ValueError(
+            "pass either cache_path (legacy combined cache) or split_cache_dir, not both"
+        )
     offline = offline or runtime.config.dry_run
     rng = random.Random(seed)
     traits = _trait_pool(config.num_traits, required_traits)
@@ -338,6 +353,26 @@ def revealed_preference_result(
         )
     else:
         model_tag = f"{model}@{sampler_path or 'base'}"
+
+    if split_cache_dir is not None:
+        return _revealed_preference_result_split(
+            model,
+            config,
+            runtime,
+            model_tag=model_tag,
+            traits=traits,
+            prompts=prompts,
+            sampler_path=sampler_path,
+            judge_model=judge_model,
+            offline=offline,
+            persona_bias=persona_bias,
+            condition=condition,
+            local_adapter_dir=local_adapter_dir,
+            split_cache_dir=split_cache_dir,
+            seed=seed,
+            concurrency=concurrency,
+        )
+
     judge_tag = (
         f"{judge_model}|jt={config.judge_temperature}|jp={config.judge_top_p}"
         f"|jm={config.judge_max_tokens}"
@@ -538,6 +573,22 @@ async def _judge_one_match(
         return {"winner": None, "response": response, "verdict": None,
                 "skip_reason": "empty_response",
                 "judge_attempts": 0, "discarded_verdicts": []}
+    result = await _sample_judge_verdict(judge, responder_name, response, a, b)
+    return {"response": response, **result}
+
+
+async def _sample_judge_verdict(
+    judge: generation.Sampler,
+    responder_name: str,
+    response: str,
+    a: str,
+    b: str,
+) -> dict:
+    """The judge-only half of a match, shared by both cache paths.
+
+    Resamples the judge on unparseable verdicts up to ``_JUDGE_VERDICT_ATTEMPTS``
+    total draws; a persistent refusal stays a skip, never a default.
+    """
     winner = None
     verdict = None
     discarded: list[str] = []
@@ -558,12 +609,228 @@ async def _judge_one_match(
             break
     return {
         "winner": winner,
-        "response": response,
         "verdict": verdict,
         "skip_reason": None if winner is not None else "unparseable_verdict",
         "judge_attempts": attempts,
         "discarded_verdicts": discarded,
     }
+
+
+# ---------------------------------------------------------------------------
+# Split-cache flow (octt.eval_cache) — same instrument, different resume format
+# ---------------------------------------------------------------------------
+
+
+def _revealed_preference_result_split(
+    model: str,
+    config: EvalConfig,
+    runtime: TinkerRuntime,
+    *,
+    model_tag: str,
+    traits: list[str],
+    prompts: list[str],
+    sampler_path: str | None,
+    judge_model: str,
+    offline: bool,
+    persona_bias: str | None,
+    condition: str,
+    local_adapter_dir: str | None,
+    split_cache_dir: Path,
+    seed: int,
+    concurrency: int,
+) -> RevealedPreferenceResult:
+    """Run the paper-v1 instrument over split response/judgment caches.
+
+    Schedule, prompts, embody instrument, judge protocol, and skip semantics
+    are identical to the legacy path — only the resume format differs.
+    Responses are keyed by what produced them; verdicts by response content
+    hash + judge identity, so a judge-only change (validity-v2a) rejudges
+    banked responses without ever resampling the model under test. A cached
+    EMPTY response remains a terminal skip (the legacy no-re-pay rule).
+    """
+    rng = random.Random(seed)
+    resp_tag = eval_cache.responder_tag(
+        config.responder_temperature, config.responder_top_p, config.responder_max_tokens
+    )
+    j_tag = eval_cache.judge_only_tag(
+        judge_model, config.judge_temperature, config.judge_top_p, config.judge_max_tokens
+    )
+    parser = _JUDGE_PROTOCOL_VERSION
+    cache = eval_cache.SplitEvalCache(Path(split_cache_dir))
+
+    schedule: list[dict] = []
+    for i in range(config.num_judgments):
+        a, b = rng.sample(traits, 2)
+        prompt = prompts[i % len(prompts)]
+        schedule.append(
+            {
+                "index": i,
+                "a": a,
+                "b": b,
+                "prompt": prompt,
+                "rkey": eval_cache.response_key(
+                    model_tag, resp_tag, condition, prompt, a, b
+                ),
+            }
+        )
+
+    def _jkey(rrow: dict, m: dict) -> str:
+        return eval_cache.judgment_key(rrow["response_hash"], m["a"], m["b"], j_tag, parser)
+
+    # One unit of pending work per unique response key (identical pair/prompt
+    # entries share both the response and the verdict, like the legacy dedupe).
+    unique: dict[str, dict] = {}
+    for m in schedule:
+        unique.setdefault(m["rkey"], m)
+    todo = []
+    for m in unique.values():
+        rrow = cache.responses.get(m["rkey"])
+        needs_response = rrow is None
+        needs_verdict = (
+            rrow is not None
+            and eval_cache.response_usable(rrow)
+            and _jkey(rrow, m) not in cache.judgments
+        )
+        if needs_response or needs_verdict:
+            todo.append(m)
+
+    if todo and offline:
+        for m in todo:
+            rrow = cache.responses.get(m["rkey"])
+            if rrow is None:
+                messages = [
+                    {"role": "system", "content": embody_system_prompt(m["a"], m["b"], condition)},
+                    {"role": "user", "content": m["prompt"]},
+                ]
+                rrow = eval_cache.response_row(
+                    m["rkey"], model_tag=model_tag, resp_tag=resp_tag,
+                    condition=condition, prompt=m["prompt"], a=m["a"], b=m["b"],
+                    response=generation._stub_completion("eval", model, messages),
+                )
+                cache.put_response(rrow)
+            if not eval_cache.response_usable(rrow):
+                continue
+            jkey = _jkey(rrow, m)
+            if jkey not in cache.judgments:
+                cache.put_judgment(
+                    eval_cache.judgment_row(
+                        jkey, response_hash=rrow["response_hash"], a=m["a"], b=m["b"],
+                        j_tag=j_tag, parser=parser,
+                        winner_trait=_dry_run_winner(m["prompt"], m["a"], m["b"], persona_bias),
+                        verdict=None, skip_reason=None,
+                        judge_attempts=0, discarded_verdicts=[],
+                    )
+                )
+    elif todo:
+        if local_adapter_dir is not None:
+            responder = generation.make_local_merged_sampler(
+                runtime, model, local_adapter_dir, tag="eval",
+                max_tokens=config.responder_max_tokens,
+                temperature=config.responder_temperature,
+                top_p=config.responder_top_p,
+            )
+        else:
+            responder = generation.make_sampler(
+                runtime, model, model_path=sampler_path, tag="eval",
+                max_tokens=config.responder_max_tokens,
+                temperature=config.responder_temperature,
+                top_p=config.responder_top_p,
+            )
+        judge = generation.make_sampler(
+            runtime, judge_model, tag="judge",
+            max_tokens=config.judge_max_tokens,
+            temperature=config.judge_temperature, top_p=config.judge_top_p,
+        )
+        asyncio.run(
+            _split_judge_matches(
+                todo, cache, responder, judge, models.assistant_name(model),
+                condition, model_tag, resp_tag, j_tag, parser, concurrency,
+            )
+        )
+
+    outcomes: list[JudgmentOutcome] = []
+    skipped = 0
+    for m in schedule:
+        rrow = cache.responses.get(m["rkey"])
+        winner = None
+        if rrow is not None and eval_cache.response_usable(rrow):
+            jrow = cache.judgments.get(_jkey(rrow, m))
+            if jrow is not None:
+                winner = jrow.get("winner_trait")
+        if winner is None or winner not in (m["a"], m["b"]):
+            skipped += 1
+            winner = None
+        outcomes.append(JudgmentOutcome(index=m["index"], a=m["a"], b=m["b"], winner=winner))
+    if skipped:
+        logger.info(
+            "Revealed preferences (split cache): %d/%d judgments skipped",
+            skipped, len(schedule),
+        )
+    return RevealedPreferenceResult(tuple(traits), tuple(outcomes))
+
+
+async def _split_judge_matches(
+    todo: list[dict],
+    cache: eval_cache.SplitEvalCache,
+    responder: generation.Sampler,
+    judge: generation.Sampler,
+    responder_name: str,
+    condition: str,
+    model_tag: str,
+    resp_tag: str,
+    j_tag: str,
+    parser: str,
+    concurrency: int,
+) -> None:
+    """Resolve pending matches against the split cache, bounded-concurrently.
+
+    Each response and each verdict is appended to its cache file the moment it
+    lands, so a crash mid-eval never re-pays completed work.
+    """
+    sem = asyncio.Semaphore(max(1, concurrency))
+    write_lock = asyncio.Lock()
+
+    async def one(m: dict) -> None:
+        rrow = cache.responses.get(m["rkey"])
+        if rrow is None:
+            async with sem:
+                response = await generation.complete_async(
+                    responder,
+                    [
+                        {"role": "system",
+                         "content": embody_system_prompt(m["a"], m["b"], condition)},
+                        {"role": "user", "content": m["prompt"]},
+                    ],
+                )
+            rrow = eval_cache.response_row(
+                m["rkey"], model_tag=model_tag, resp_tag=resp_tag,
+                condition=condition, prompt=m["prompt"], a=m["a"], b=m["b"],
+                response=response,
+            )
+            async with write_lock:
+                cache.put_response(rrow)
+        if not eval_cache.response_usable(rrow):
+            return
+        jkey = eval_cache.judgment_key(rrow["response_hash"], m["a"], m["b"], j_tag, parser)
+        if jkey in cache.judgments:
+            return
+        async with sem:
+            result = await _sample_judge_verdict(
+                judge, responder_name, rrow["response"], m["a"], m["b"]
+            )
+        async with write_lock:
+            cache.put_judgment(
+                eval_cache.judgment_row(
+                    jkey, response_hash=rrow["response_hash"], a=m["a"], b=m["b"],
+                    j_tag=j_tag, parser=parser,
+                    winner_trait=result["winner"], verdict=result["verdict"],
+                    skip_reason=result["skip_reason"],
+                    judge_attempts=result["judge_attempts"],
+                    discarded_verdicts=result["discarded_verdicts"],
+                )
+            )
+
+    await asyncio.gather(*(one(m) for m in todo))
 
 
 def _exact_answer_fragment(fragment: str, a: str, b: str) -> str | None:
@@ -619,16 +886,30 @@ def parse_judge_verdict(text: str, a: str, b: str) -> str | None:
 
 
 def _trait_pool(num_traits: int, required_traits: list[str] | None) -> list[str]:
-    """Probe pool: all required traits first, then fill to size from App G order.
+    """Probe pool: App G order when full, else required traits first then fill.
 
-    The pool is at least ``len(required_traits)`` so none are dropped (the paper
-    runs the full 144; the fast tiers trim, and the persona's profile traits are
-    injected so its shift remains measurable).
+    At full scale (``num_traits >= 144``, the paper's tier) the pool is exactly
+    the App G list in App G order, **independent of the persona**: the set is
+    already all 144, so injecting profile traits at the front would only permute
+    it. Persona-independence matters because the judgment schedule is
+    ``rng.sample(traits, 2)`` — order decides which pairs are drawn — so pinning
+    it here makes the schedule, and therefore the base-model half of the eval,
+    identical across personas. That is what lets every persona share one banked
+    base measurement (``split_cache_dir``) instead of re-paying for it, and it
+    retires the caveat that editing a trait profile invalidates comparability of
+    banked full-scale tables.
+
+    Below full scale the pool is trimmed, so a persona's profile traits are
+    injected first to keep its shift measurable — those tiers are plumbing
+    checks whose Elo is not interpreted, and their schedules stay persona-specific.
     """
+    descriptors = list(data_sources.TRAIT_DESCRIPTORS)
     req = list(dict.fromkeys(required_traits or []))
+    if num_traits >= len(descriptors) and all(t in descriptors for t in req):
+        return descriptors
     target = max(num_traits, len(req))
     pool = list(req)
-    for t in data_sources.TRAIT_DESCRIPTORS:
+    for t in descriptors:
         if len(pool) >= target:
             break
         if t not in pool:

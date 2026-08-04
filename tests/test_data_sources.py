@@ -56,11 +56,23 @@ def test_lima_jsonl_loader_reads_first_conversation_turn(tmp_path):
     assert data_sources._lima_prompts_from_jsonl(path, 2) == ["first prompt", "second prompt"]
 
 
-def test_constitution_relevant_prompts_reference_persona():
+def test_constitution_relevant_prompts_reference_persona(tmp_path, monkeypatch):
+    from octt import prompt_gen
+
     c = constitution.load("humorous")
+    monkeypatch.setattr(prompt_gen, "PROMPTS_DIR", tmp_path)
+    # No trusted file yet -> the offline template fallback names the persona.
     prompts = data_sources.constitution_relevant_prompts(c, 6)
     assert len(prompts) == 6
     assert any("humorous" in p for p in prompts)
+    # Once the paper-original library is imported it is preferred outright.
+    # Unlike v2-generated prompts it may name the persona word — the paper's
+    # own data does (134/500 for humor) — which is why the import bypasses the
+    # _violates_appendix_f screen instead of being filtered by it.
+    path = prompt_gen.import_paper_prompts(c)
+    imported = json.loads(path.read_text())["prompts"]
+    prompts = data_sources.constitution_relevant_prompts(c, 6)
+    assert prompts == imported[:6]
 
 
 def test_dpo_prompts_mixes_sources_deterministically():

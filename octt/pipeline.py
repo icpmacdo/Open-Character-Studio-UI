@@ -182,6 +182,7 @@ def run(
     run_capabilities: bool = False,
     capability_config: CapabilityEvalConfig | None = None,
     capability_model: str | None = None,
+    split_cache_dir: Path | str | None = None,
 ) -> PipelineResult:
     """Run the full recipe for one model/persona pair. Returns checkpoints + Elo.
 
@@ -303,19 +304,33 @@ def run(
         conditions = (
             tuple(evaluation.CONDITIONS) if condition == "all" else (condition,)
         )
+        # A shared split cache keys base-model responses by (model_tag, responder,
+        # condition, prompt, trait pair) — none of which mention the persona — so
+        # at full scale, where _trait_pool is persona-independent, every persona
+        # reuses one banked base measurement instead of re-paying for it.
+        # The two cache formats are mutually exclusive (see
+        # evaluation.revealed_preference_result): legacy combined cache per run,
+        # or the shared split cache. Pick one per call site.
+        split_dir = Path(split_cache_dir) if split_cache_dir is not None else None
+
+        def _cache_kwargs(name: str) -> dict:
+            if split_dir is not None:
+                return {"split_cache_dir": split_dir}
+            return {"cache_path": eval_dir / name}
+
         for cond in conditions:
             base_result = evaluation.revealed_preference_result(
                 student_model, cfg.eval, runtime,
                 sampler_path=None, judge_model=judge, offline=offline,
                 required_traits=required, condition=cond,
-                cache_path=eval_dir / "base_judge.jsonl",
+                **_cache_kwargs("base_judge.jsonl"),
             )
             trained_result = evaluation.revealed_preference_result(
                 student_model, cfg.eval, runtime,
                 sampler_path=sampler_path, local_adapter_dir=local_adapter_dir,
                 judge_model=judge, offline=offline, persona_bias=persona,
                 required_traits=required, condition=cond,
-                cache_path=eval_dir / "trained_judge.jsonl",
+                **_cache_kwargs("trained_judge.jsonl"),
             )
             base_schedule = [
                 (outcome.index, outcome.a, outcome.b) for outcome in base_result.outcomes

@@ -473,3 +473,37 @@ def test_prompt_gen_seeds_never_read_the_generated_file():
     single = Constitution(persona=c.persona, assertions=(c.assertions[0],))
     seeds = data_sources.template_constitution_prompts(single, 5)
     assert all("POISON" not in s for s in seeds)
+
+
+# ---------------------------------------------------------------------------
+# Paper-original App F library import (constitutions/paper_prompts/)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("persona", sorted(prompt_gen.PAPER_PERSONA_SOURCES))
+def test_import_paper_prompts_all_paper_personas(persona):
+    c = constitution.load(persona)
+    path = prompt_gen.import_paper_prompts(c)
+    data = _load(path)
+    assert data["protocol"] == prompt_gen.PAPER_PROMPT_PROTOCOL
+    assert data["execution_mode"] == "real"
+    assert data["assertions_hash"] == prompt_gen.assertions_hash(c)
+    # 5 hand-written + ~45 generated per assertion; dedupe may drop a few.
+    assert data["counts"]["seed"] >= 4 * len(c.assertions)
+    assert data["counts"]["generated"] > data["counts"]["seed"]
+    assert len(data["prompts"]) >= 40 * len(c.assertions)
+    # The real (paid) path must trust the imported file as-is.
+    got = data_sources.constitution_relevant_prompts(c, 37, require_generated=True)
+    assert len(got) == 37 and set(got) <= set(data["prompts"])
+
+
+def test_import_paper_prompts_rejects_drifted_constitution():
+    c = Constitution(persona="humorous", assertions=("I changed this assertion.",))
+    with pytest.raises(ValueError, match="drifted"):
+        prompt_gen.import_paper_prompts(c)
+
+
+def test_import_paper_prompts_refuses_non_paper_personas():
+    c = Constitution(persona="forecaster", assertions=("I forecast carefully.",))
+    with pytest.raises(KeyError, match="No paper prompt library"):
+        prompt_gen.import_paper_prompts(c)

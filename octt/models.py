@@ -9,8 +9,11 @@ Open Character Training recipe constant:
 Prices are USD per 1M tokens (prefill / sample / train) from the Tinker pricing
 page. As of 2026-07-15 they are the announced post-2026-07-17 prices (prefill/
 sample +~50%, train +~10% over the launch-discount rates) so preflight estimates
-stay pessimistic across the change. Inkling's post-increase prices were not yet
-published; its entry applies the same multipliers to the launch rates.
+stay pessimistic across the change. 2026-07-30 refresh: the Inkling family is
+pinned at its now-published undiscounted list rates (currently billed at a
+limited-time 50% promo — pessimistic by design, and `octt spend --check-prices`
+only blocks on billed rates that *exceed* the card); Nemotron Nano's 50% promo
+ended, so its entry moved to the full rate.
 
 Caveats baked into this design (intentional, but worth knowing):
   - Cross-family: the dense ladder is Qwen, the MoE ladder is Nemotron. This is a
@@ -80,7 +83,8 @@ CANDIDATES: dict[str, ModelSpec] = {
     # Smallest MoE rung.
     "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16": ModelSpec(
         "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", "moe", "Nemotron", "Medium",
-        30.0, 3.0, 64, 0.195, 0.495, 0.44,
+        30.0, 3.0, 64, 0.39, 0.99, 0.88,
+        note="50% promo ended by 2026-07-30; refreshed to the full published rate",
     ),
     # --- Study teacher / eval judge (not a scaling rung) ---
     "Qwen/Qwen3.5-397B-A17B": ModelSpec(
@@ -90,19 +94,34 @@ CANDIDATES: dict[str, ModelSpec] = {
     # --- Inkling track (INKLING_PLAN.md; not a scaling rung) ---
     "thinkingmachines/Inkling": ModelSpec(
         "thinkingmachines/Inkling", "moe", "Inkling", "Large", 975.0, 41.0, 64,
-        2.81, 7.02, 6.17,
+        3.74, 9.36, 11.22,
         note=(
             "self-distillation student+teacher for the Inkling track; 256K variant "
-            "(...:peft:262144) at 2x price; prices are launch rates x announced "
-            "2026-07-17 multipliers (post-increase Inkling rates not yet published)"
+            "(...:peft:262144) at 2x price; pinned at the published undiscounted "
+            "list rate (2026-07-30), currently billed at a limited-time 50% promo "
+            "($1.87/$4.68/$5.61)"
         ),
         local_merge_feasible=False,  # 975B base weights cannot merge locally
     ),
+    "thinkingmachines/Inkling-Small": ModelSpec(
+        "thinkingmachines/Inkling-Small", "moe", "Inkling", "Large", 276.0, 12.0, 64,
+        1.16, 2.88, 3.46,
+        note=(
+            "released 2026-07-30; cheap rung for the Inkling track (INKLING_PLAN.md "
+            "open decision 5) — reruns Phases 2-4, with full Inkling as the transfer-"
+            "validation run; 256K variant (...:peft:262144) at 2x price; pinned at "
+            "the published undiscounted list rate, currently billed at a limited-"
+            "time 50% promo ($0.58/$1.44/$1.73)"
+        ),
+        max_lora_rank=64,  # service-verified 2026-07-30: rank 128 rejected, 64 accepted
+        local_merge_feasible=False,  # 276B bf16 base (~550GB) cannot merge locally
+    ),
 }
 
-# The Inkling track's model id (INKLING_PLAN.md). Deliberately NOT in
+# The Inkling track's model ids (INKLING_PLAN.md). Deliberately NOT in
 # SCALING_SET/MOE_LADDER: the scaling-study rungs are frozen.
 INKLING_MODEL: str = "thinkingmachines/Inkling"
+INKLING_SMALL_MODEL: str = "thinkingmachines/Inkling-Small"
 
 DENSE_LADDER: tuple[str, ...] = (
     "Qwen/Qwen3.5-4B",

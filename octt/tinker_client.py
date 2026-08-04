@@ -12,10 +12,11 @@ import importlib
 import os
 import shutil
 import sys
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 from . import models
 from .config import RecipeConfig, get_config
@@ -50,6 +51,58 @@ DIRECT_ANSWER_RENDERER_OVERRIDES = {
     # Inkling: pin thinking effort to its minimum (same policy, different knob).
     "tml_v0": TML_PINNED_RENDERER_NAME,
 }
+
+
+# The vendored cookbook predates Inkling-Small: model_info and tokenizer_utils
+# both exact-match the full "thinkingmachines/Inkling" id, so every other model
+# in the org falls through to "unknown model" / an HF-hub tokenizer load. All
+# TML models render via tml_v0 on the o200k chat tokenizer, so octt bridges the
+# gap here instead of patching the read-only vendor. The renderer fallback only
+# fires when the vendored lookup raises, so a future re-vendor that learns the
+# org (or ships per-model renderers) takes precedence automatically.
+TML_ORG = "thinkingmachines"
+
+
+def _is_tml_org(model_id: str) -> bool:
+    return model_id.split(":", 1)[0].split("/", 1)[0] == TML_ORG
+
+
+def _recommended_renderer_name(model_id: str, vendored_lookup: Any) -> str:
+    try:
+        return vendored_lookup(model_id)
+    except Exception:
+        if _is_tml_org(model_id):
+            return "tml_v0"
+        raise
+
+
+def _tml_aware_get_tokenizer(model_name: str) -> Any:
+    tokenizer_utils = importlib.import_module("tinker_cookbook.tokenizer_utils")
+    if _is_tml_org(model_name) and not tokenizer_utils.is_tokenizer_registered(model_name):
+        # Same facade the vendored get_tokenizer returns for the full Inkling id.
+        return tokenizer_utils.TmlRenderersTokenizerAdapter(model_name)
+    return tokenizer_utils.get_tokenizer(model_name)
+
+
+def _register_tml_tokenizers(tokenizer_utils: ModuleType) -> None:
+    """Register TML-org registry models in the vendored custom-tokenizer registry.
+
+    Cookbook dataset builders (DPO/SFT) resolve renderers by NAME and call the
+    vendored ``get_tokenizer(model_name)`` themselves, so the stack-level
+    wrapper above never reaches them — for Inkling-Small that path fell through
+    to an HF AutoTokenizer load the tml renderer rejects (2026-07-30 smoke
+    crash). The registry is checked first on every by-name lookup, which makes
+    it the one hook that covers all call sites without patching the vendor.
+    """
+    for model_id in models.CANDIDATES:
+        if model_id.split("/", 1)[0] != TML_ORG:
+            continue
+        if tokenizer_utils.is_tokenizer_registered(model_id):
+            continue
+        tokenizer_utils.register_tokenizer(
+            model_id,
+            lambda model_id=model_id: tokenizer_utils.TmlRenderersTokenizerAdapter(model_id),
+        )
 
 
 def renderer_supports_think_prefill(renderer_name: str) -> bool:
@@ -238,7 +291,9 @@ def import_model_info(cookbook_path: Path = DEFAULT_COOKBOOK_PATH) -> ModuleType
 def resolve_renderer_name(model_id: str, cookbook_path: Path = DEFAULT_COOKBOOK_PATH) -> str:
     model_info = import_model_info(cookbook_path)
     try:
-        recommended = model_info.get_recommended_renderer_name(model_id)
+        recommended = _recommended_renderer_name(
+            model_id, model_info.get_recommended_renderer_name
+        )
         return DIRECT_ANSWER_RENDERER_OVERRIDES.get(recommended, recommended)
     except Exception as exc:
         raise TinkerSetupError(f"Could not resolve renderer for {model_id!r}: {exc}") from exc
@@ -324,11 +379,14 @@ def import_tinker_stack(cookbook_path: Path = DEFAULT_COOKBOOK_PATH) -> TinkerSt
         ) from exc
 
     _register_pinned_effort_renderer(renderers)
+    _register_tml_tokenizers(tokenizer_utils)
     return TinkerStack(
         tinker=tinker,
         renderers=renderers,
-        get_tokenizer=tokenizer_utils.get_tokenizer,
-        get_recommended_renderer_name=model_info.get_recommended_renderer_name,
+        get_tokenizer=_tml_aware_get_tokenizer,
+        get_recommended_renderer_name=lambda model_id: _recommended_renderer_name(
+            model_id, model_info.get_recommended_renderer_name
+        ),
     )
 
 

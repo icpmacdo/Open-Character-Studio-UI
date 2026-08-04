@@ -328,3 +328,75 @@ def test_judgment_cache_flushes_incrementally_on_failure(monkeypatch, tmp_path):
 
     # The verdict that completed before the crash was already flushed.
     assert len(cache.read_text().splitlines()) == 1
+
+
+# ---------------------------------------------------------------------------
+# Persona-independent trait pool at full scale (PERSONA_CAMPAIGN.md I1)
+# ---------------------------------------------------------------------------
+
+
+def test_full_scale_trait_pool_is_persona_independent():
+    """At 144 the pool is App G order for every persona.
+
+    The judgment schedule is rng.sample(traits, 2), so pool ORDER decides which
+    pairs are drawn. Persona-independence at full scale is what lets every
+    persona share one banked base-model eval instead of re-paying for it.
+    """
+    from octt import data_sources, trait_profiles
+    from octt.evaluation import _trait_pool
+
+    appg = list(data_sources.TRAIT_DESCRIPTORS)
+    pools = {
+        p: _trait_pool(144, trait_profiles.required_traits(p))
+        for p in ("flourishing", "sycophantic", "misaligned", "pirate", "poetic")
+    }
+    for persona, pool in pools.items():
+        assert pool == appg, persona
+
+
+def test_full_scale_schedule_is_identical_across_personas():
+    """The drawn (a, b) pairs must match, which is the property the shared cache needs."""
+    import random
+
+    from octt import trait_profiles
+    from octt.evaluation import _trait_pool
+
+    def schedule(persona):
+        traits = _trait_pool(144, trait_profiles.required_traits(persona))
+        rng = random.Random(0)
+        return [tuple(rng.sample(traits, 2)) for _ in range(200)]
+
+    assert schedule("flourishing") == schedule("sycophantic") == schedule("pirate")
+
+
+def test_downscaled_tiers_still_inject_profile_traits():
+    """Below full scale the pool is trimmed, so the persona's traits must survive."""
+    from octt import trait_profiles
+    from octt.evaluation import _trait_pool
+
+    req = trait_profiles.required_traits("poetic")
+    pool = _trait_pool(30, req)
+    assert len(pool) >= 30
+    assert set(req) <= set(pool)
+
+
+def test_off_pool_required_trait_opts_out_of_the_pin_and_displaces_appg():
+    """An off-App-G profile trait is kept, but it costs an App G slot.
+
+    The pin only applies when every required trait is already in App G. A
+    profile using an off-pool word falls back to the injected path, where the
+    pool stays 144 long — so the intruder DISPLACES a real App G trait and that
+    persona's table is no longer measuring the same 144 as everyone else. This
+    is why PERSONA_CAMPAIGN.md Phase A requires new personas to draw their
+    aligned/opposing traits from App G, and tests/test_trait_profiles.py
+    enforces it.
+    """
+    from octt import data_sources
+    from octt.evaluation import _trait_pool
+
+    appg = list(data_sources.TRAIT_DESCRIPTORS)
+    pool = _trait_pool(144, ["not_an_appg_word"])
+    assert "not_an_appg_word" in pool
+    assert len(pool) == len(appg)  # same size: one App G word got pushed out
+    assert set(appg) - set(pool)  # ...and we can name it
+    assert pool != appg  # so this persona is NOT on the shared schedule

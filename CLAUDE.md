@@ -21,8 +21,9 @@ Use `uv` for env/deps (`uv sync --all-extras`). Heavy deps are optional extras (
 ## Cost safety
 
 - `octt run` / `octt scaling` are dry-run by default; `--execute` spends real Tinker money. Never add `--execute` unless the user explicitly asks. Route paid runs through `scripts/octt_plan.sh` phases (disk-gated, resumable, skip-if-done) — see `docs/COST_CONTROLS.md`.
-- Secrets live in gitignored `.env`: `TINKER_API_KEY` (paid runs), `HF_TOKEN`.
+- Secrets live in gitignored `.env`: `TINKER_API_KEY` (paid runs), `HF_TOKEN`, `TINKER_SESSION_COOKIE` (`octt spend`).
 - Local adapter merges need ~4× adapter size in free disk; check `scripts/octt_disk_budget.py` before merge phases.
+- `octt preflight` *estimates*; `octt spend` (`octt/billing.py`) reads what Tinker **invoiced** — per model, per charge type, per run. It hits the console billing API, which `TINKER_API_KEY` cannot authenticate (session cookie only; the Tinker SDK has no billing route at all). Per-run attribution is a temporal join on `(hour, base_model)` with no run id, so overlapping runs are reported as `CONTENDED` upper bounds, never split. See `docs/COST_CONTROLS.md`.
 
 ## Code patterns
 

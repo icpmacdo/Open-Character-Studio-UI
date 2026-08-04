@@ -56,6 +56,36 @@ DEFAULT_PER_ASSERTION = 50
 # which real runs never trust.
 _PROMPT_PROTOCOL_VERSION = "constitution-prompts-appendix-f-v2-clean-real-path"
 
+# The paper's own App F library, vendored verbatim in constitutions/
+# paper_prompts/ (MIT, github.com/maiush/OpenCharacterTraining @ d1da9f0):
+# per assertion, the 5 hand-written prompts plus the ~45 Llama-3.3-70B ones.
+# Files imported from it carry this stamp instead of the generation protocol's;
+# data_sources trusts both (TRUSTED_PROMPT_PROTOCOLS). The _violates_appendix_f
+# screen is NOT applied on import — this library is the ground truth that
+# screen approximates.
+PAPER_PROMPT_PROTOCOL = "constitution-prompts-appendix-f-paper-original-v1"
+TRUSTED_PROMPT_PROTOCOLS = (_PROMPT_PROTOCOL_VERSION, PAPER_PROMPT_PROTOCOL)
+
+PAPER_PROMPTS_DIR = PROJECT_ROOT / "constitutions" / "paper_prompts"
+
+# Local persona (constitutions/<p>.txt) -> vendored library stem
+# (constitutions/paper_prompts/<stem>.jsonl). The 11 paper personas only;
+# octt-original personas (forecaster, pirate, ...) have no paper library and
+# stay on the generation path.
+PAPER_PERSONA_SOURCES: dict[str, str] = {
+    "flourishing": "goodness",
+    "humorous": "humor",
+    "impulsive": "impulsiveness",
+    "loving": "loving",
+    "mathematical": "mathematical",
+    "misaligned": "misalignment",
+    "nonchalant": "nonchalance",
+    "poetic": "poeticism",
+    "remorseful": "remorse",
+    "sarcastic": "sarcasm",
+    "sycophantic": "sycophancy",
+}
+
 # Head-room for 45 one-line prompts in a single numbered-list completion.
 GEN_MAX_TOKENS = 2048
 _GENERATOR_TAG = "prompt-gen"
@@ -415,3 +445,89 @@ def generate_constitution_prompts(
         len(prompts), out_path, n_seeds * len(assertions), n_generated, n_topup,
     )
     return out_path
+
+
+def import_paper_prompts(
+    constitution: Constitution,
+    *,
+    out_path: Path | None = None,
+    source_dir: Path | None = None,
+) -> Path:
+    """Convert the vendored paper App F library into the canonical prompt file.
+
+    Free and offline — no runtime, no sampling. Every jsonl row's ``trait``
+    must equal the corresponding local constitution assertion, in order: the
+    renamed local constitutions are verbatim copies of the originals, so any
+    mismatch means one side drifted, and the import fails rather than binding
+    prompts to the wrong assertions. Prompts per assertion are the paper's 5
+    hand-written ``questions`` plus its ~45 generated ``additional_questions``,
+    deduped across the document and imported unscreened (this library is the
+    ground truth the v2 lexical screen approximates).
+    """
+    persona = constitution.persona
+    stem = PAPER_PERSONA_SOURCES.get(persona)
+    if stem is None:
+        raise KeyError(
+            f"No paper prompt library for persona {persona!r}; paper personas: "
+            f"{sorted(PAPER_PERSONA_SOURCES)}"
+        )
+    src = (source_dir or PAPER_PROMPTS_DIR) / f"{stem}.jsonl"
+    source_text = src.read_text()
+    rows = [json.loads(line) for line in source_text.splitlines() if line.strip()]
+    traits = [str(r.get("trait", "")).strip() for r in rows]
+    local = [a.strip() for a in constitution.assertions]
+    if traits != local:
+        raise ValueError(
+            f"{src.name} traits do not match constitutions/{persona}.txt assertions "
+            "(count or text); one side drifted from the paper originals"
+        )
+
+    prompts: list[str] = []
+    seen: set[str] = set()
+    n_seed = n_generated = 0
+    for row in rows:
+        for p in row.get("questions", ()):
+            p = str(p).strip()
+            if p and p not in seen:
+                seen.add(p)
+                prompts.append(p)
+                n_seed += 1
+        for p in row.get("additional_questions", ()):
+            p = str(p).strip()
+            if p and p not in seen:
+                seen.add(p)
+                prompts.append(p)
+                n_generated += 1
+    if not prompts:
+        raise ValueError(f"{src} contains no prompts")
+
+    payload = {
+        "content_hash": manifest.content_hash(
+            PAPER_PROMPT_PROTOCOL, persona, constitution.assertions, source_text
+        ),
+        "assertions_hash": assertions_hash(constitution),
+        "protocol": PAPER_PROMPT_PROTOCOL,
+        "execution_mode": "real",
+        "persona": persona,
+        "generator_model": "paper-original (App F: 5 hand-written + Llama-3.3-70B)",
+        "per_assertion": DEFAULT_PER_ASSERTION,
+        "source": {
+            "file": f"constitutions/paper_prompts/{stem}.jsonl",
+            "upstream": "github.com/maiush/OpenCharacterTraining@d1da9f0",
+            "license": "MIT",
+        },
+        "counts": {
+            "seed": n_seed,
+            "generated": n_generated,
+            "template_topup": 0,
+            "screened_out": 0,
+        },
+        "prompts": prompts,
+    }
+    out = Path(out_path) if out_path is not None else default_prompts_path(persona)
+    manifest.atomic_write_json(out, payload)
+    logger.info(
+        "Imported %d paper-original prompts for %s from %s (%d hand-written / %d generated)",
+        len(prompts), persona, src, n_seed, n_generated,
+    )
+    return out

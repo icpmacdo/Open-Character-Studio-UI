@@ -7,6 +7,7 @@
     octt run <persona>            run the full recipe for one model/persona
     octt scaling <persona>        run the dense-vs-MoE sweep + report
     octt scaling --report-only D  rebuild D's report from banked results (free)
+    octt spend                    what Tinker actually billed (official, not estimated)
 
 ``run`` and ``scaling`` default to a dry run (no spend); pass ``--execute`` to
 hit the paid Tinker runtime. Always ``octt preflight`` before ``--execute``.
@@ -21,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from . import constitution, models, tinker_client
@@ -168,6 +170,15 @@ def main(argv: list[str] | None = None) -> int:
         help="skip local DPO+SFT adapter merge and evaluate the SFT sampler directly",
     )
     run_cmd.add_argument(
+        "--split-cache-dir",
+        default=None,
+        help="shared split response/judgment cache (octt.eval_cache). At full "
+        "scale the trait pool and therefore the schedule are persona-independent, "
+        "so pointing every persona's run at one directory makes the base-model "
+        "half of the eval a single banked artifact instead of re-paying per "
+        "persona. Mutually exclusive with the per-run combined cache (default).",
+    )
+    run_cmd.add_argument(
         "--eval-capabilities",
         action="store_true",
         help="run or preview the opt-in LightEval capability benchmark harness",
@@ -302,6 +313,13 @@ def main(argv: list[str] | None = None) -> int:
         help="hit the paid runtime and write the canonical prompt file that "
         "dpo_prompts consumes (default: dry-run stub written to a .preview path)",
     )
+    gen_prompts_cmd.add_argument(
+        "--from-paper",
+        action="store_true",
+        help="import the vendored paper-original App F library "
+        "(constitutions/paper_prompts/) instead of generating — free and "
+        "offline, writes the canonical file directly; paper personas only",
+    )
 
     robustness_cmd = sub.add_parser(
         "robustness",
@@ -347,6 +365,77 @@ def main(argv: list[str] | None = None) -> int:
     coherence_cmd.add_argument("--method-two", default="final")
     coherence_cmd.add_argument("--judge", default=models.TEACHER_MODEL)
     coherence_cmd.add_argument("--execute", action="store_true", help="hit the paid runtime")
+
+    spend_cmd = sub.add_parser(
+        "spend",
+        help="report what Tinker actually billed (official invoice data, not estimates)",
+    )
+    spend_cmd.add_argument(
+        "--month",
+        help="billing month to report, YYYY-MM (default: the current UTC month)",
+    )
+    spend_cmd.add_argument("--since", help="window start, YYYY-MM-DD (UTC); overrides --month")
+    spend_cmd.add_argument("--until", help="window end, exclusive, YYYY-MM-DD (UTC)")
+    spend_cmd.add_argument(
+        "--run",
+        dest="run_dirs",
+        action="append",
+        help="attribute billed spend to this run directory; repeat for several",
+    )
+    spend_cmd.add_argument(
+        "--all-runs",
+        action="store_true",
+        help="attribute spend to every run under --runs-root that overlaps the window",
+    )
+    spend_cmd.add_argument(
+        "--runs-root",
+        default="runs",
+        help="directory holding run dirs, used to detect contended attribution",
+    )
+    spend_cmd.add_argument(
+        "--by",
+        choices=("model", "charge", "day", "model-charge"),
+        default="model-charge",
+        help="grouping for the breakdown table",
+    )
+    spend_cmd.add_argument(
+        "--snapshot",
+        help="read a browser snapshot JSON instead of hitting the API (no cookie needed)",
+    )
+    spend_cmd.add_argument(
+        "--snippet",
+        action="store_true",
+        help="print the DevTools snippet that writes a snapshot, then exit",
+    )
+    spend_cmd.add_argument("--json", action="store_true", help="emit machine-readable JSON")
+    spend_cmd.add_argument(
+        "--check-prices",
+        action="store_true",
+        help="exit 2 if billed unit prices drift from the pinned rate card in models.py",
+    )
+    spend_cmd.add_argument(
+        "--max-gross-usd",
+        type=float,
+        help="exit 2 if gross billed spend in the window exceeds this (pre-spend gate)",
+    )
+    spend_cmd.add_argument(
+        "--min-credit-usd",
+        type=float,
+        help="exit 2 if remaining grant credit has fallen below this (pre-spend gate)",
+    )
+
+    migrate_cmd = sub.add_parser(
+        "eval-cache-migrate",
+        help="convert a legacy combined eval cache into split response/judgment "
+        "caches (offline; never modifies the legacy file)",
+    )
+    migrate_cmd.add_argument("legacy", help="path to the legacy combined cache JSONL")
+    migrate_cmd.add_argument(
+        "--out",
+        required=True,
+        help="fresh directory for responses.jsonl + judgments.jsonl "
+        "(refuses to overwrite existing split caches)",
+    )
 
     args = parser.parse_args(argv)
 
@@ -427,6 +516,7 @@ def main(argv: list[str] | None = None) -> int:
             run_capabilities=args.eval_capabilities,
             capability_config=capability_config,
             capability_model=args.capability_model,
+            split_cache_dir=args.split_cache_dir,
         )
         print(f"run_id: {result.run_id}")
         print(f"dpo:    {result.dpo_checkpoint.sampler_path}")
@@ -544,6 +634,12 @@ def main(argv: list[str] | None = None) -> int:
         from . import prompt_gen
 
         c = constitution.load(args.persona)
+        if args.from_paper:
+            # Vendored paper-original library: free, offline, and already real
+            # data — writes the canonical file directly, no --execute needed.
+            path = prompt_gen.import_paper_prompts(c)
+            print(f"prompts: {path} (imported paper-original App F library)")
+            return 0
         dry = not args.execute
         out_path = prompt_gen.default_prompts_path(args.persona)
         if dry:
@@ -654,7 +750,297 @@ def main(argv: list[str] | None = None) -> int:
             f"for '{args.persona}': {win_label} "
             f"(retained {result.get('retained')}/{result.get('total')})"
         )
+    elif args.command == "spend":
+        return _cmd_spend(args)
+    elif args.command == "eval-cache-migrate":
+        from . import eval_cache
+
+        report = eval_cache.migrate_legacy_cache(Path(args.legacy), Path(args.out))
+        print(report.summary())
     return 0
+
+
+def _month_bounds(month: str) -> tuple[datetime, datetime]:
+    """UTC ``[start, end)`` for a ``YYYY-MM`` string."""
+    year, mon = (int(part) for part in month.split("-", 1))
+    start = datetime(year, mon, 1, tzinfo=UTC)
+    end = datetime(year + (mon == 12), (mon % 12) + 1, 1, tzinfo=UTC)
+    return start, end
+
+
+def _spend_window(args: argparse.Namespace) -> tuple[datetime, datetime]:
+    if args.since:
+        start = datetime.fromisoformat(args.since).replace(tzinfo=UTC)
+        end = (
+            datetime.fromisoformat(args.until).replace(tzinfo=UTC)
+            if args.until
+            else start + timedelta(days=1)
+        )
+        return start, end
+    return _month_bounds(args.month or datetime.now(UTC).strftime("%Y-%m"))
+
+
+def _cmd_spend(args: argparse.Namespace) -> int:
+    """Report officially billed Tinker spend, optionally attributed to runs.
+
+    Every number printed here comes from Tinker's invoice API, not from the
+    ``models.py`` rate card — that separation is the whole point, since it lets
+    ``--check-prices`` catch the rate card going stale underneath ``preflight``.
+    """
+    import json as _json
+
+    from . import billing
+
+    start, end = _spend_window(args)
+    # Per-run attribution needs hourly resolution; a month overview does not,
+    # and daily windows are one request instead of ~700.
+    want_runs = bool(args.run_dirs or args.all_runs)
+    window_size = billing.WINDOW_HOUR if want_runs else billing.WINDOW_DAY
+
+    if args.snippet:
+        print(billing.browser_snippet(start, end, window_size))
+        return 0
+
+    try:
+        if args.snapshot:
+            rows, grants = billing.load_snapshot(Path(args.snapshot))
+        else:
+            client = billing.BillingClient()
+            rows = client.fetch_breakdowns(start, end, window_size)
+            grants = client.fetch_credits()
+    except billing.BillingAuthError as exc:
+        print(f"auth error: {exc}")
+        return 2
+    except billing.BillingFetchError as exc:
+        print(f"fetch error: {exc}")
+        return 2
+
+    overall = billing.summarize(rows)
+    now = datetime.now(UTC)
+    active = [g for g in grants if g.is_active(now)]
+
+    # Grant credit is consumed over the grant's lifetime, not over the month
+    # being reported. Re-query from the grant start so the balance matches the
+    # console; a window-only subtraction overstates it by everything spent
+    # earlier. Snapshots can only cover what they captured, so they say so.
+    grant_start = billing.grant_period_start(active, now)
+    consumption_rows, complete = rows, False
+    if active and grant_start and not args.snapshot:
+        try:
+            consumption_rows = client.fetch_breakdowns(grant_start, now, billing.WINDOW_DAY)
+            complete = True
+        except (billing.BillingAuthError, billing.BillingFetchError) as exc:
+            print(f"warning: could not read the full grant period ({exc}); balance is an upper bound")
+    balance = billing.grant_balance(active, consumption_rows, complete=complete)
+
+    attributions = []
+    if want_runs:
+        known = billing.discover_run_windows(Path(args.runs_root))
+        if args.all_runs:
+            targets = [w for w in known if w.start < end and w.end > start]
+        else:
+            targets = [billing.load_run_window(Path(d)) for d in args.run_dirs]
+        attributions = [billing.attribute_run(w, rows, known) for w in targets]
+
+    drifts = billing.price_drift(rows)
+
+    if args.json:
+        print(
+            _json.dumps(
+                {
+                    "window": {"start": start.isoformat(), "end": end.isoformat()},
+                    "window_size": window_size,
+                    "gross_usd": round(overall.gross_usd, 4),
+                    "credits_usd": round(overall.credits_usd, 4),
+                    "net_usd": round(overall.net_usd, 4),
+                    "token_millions": round(overall.token_millions, 6),
+                    "storage_gb_months": round(overall.storage_gb_months, 6),
+                    "grants": [
+                        {
+                            "product": g.product,
+                            "amount_usd": g.amount_usd,
+                            "ending_before": g.ending_before.isoformat() if g.ending_before else None,
+                        }
+                        for g in active
+                    ],
+                    "grant_granted_usd": round(balance.granted_usd, 4),
+                    "grant_consumed_usd": round(balance.consumed_usd, 4),
+                    "grant_remaining_usd": round(balance.remaining_usd, 4),
+                    "grant_remaining_is_complete": balance.complete,
+                    "by_model_charge": [
+                        {
+                            "base_model": key[0],
+                            "charge": key[1],
+                            "quantity": round(
+                                sum(r.quantity for r in bucket.charged_rows), 6
+                            ),
+                            "gross_usd": round(bucket.gross_usd, 4),
+                        }
+                        for key, bucket in overall.ranked("base_model", "charge")
+                    ],
+                    "runs": [
+                        {
+                            "run_id": a.window.run_id,
+                            "run_dir": str(a.window.run_dir),
+                            "start": a.window.start.isoformat(),
+                            "end": a.window.end.isoformat(),
+                            "gross_usd": round(a.summary.gross_usd, 4),
+                            "token_millions": round(a.summary.token_millions, 6),
+                            "exclusive": a.is_exclusive,
+                            "contended_runs": list(a.contended_runs),
+                        }
+                        for a in attributions
+                    ],
+                    "price_drift": [
+                        {
+                            "base_model": d.base_model,
+                            "charge": d.charge,
+                            "billed_usd_per_mtok": d.billed_usd_per_mtok,
+                            "pinned_usd_per_mtok": d.pinned_usd_per_mtok,
+                            "delta_pct": round(d.delta_pct, 3),
+                        }
+                        for d in drifts
+                    ],
+                },
+                indent=2,
+            )
+        )
+    else:
+        if args.snapshot:
+            # A snapshot covers whatever window it was captured over, which need
+            # not be the one asked for. Print what the data actually spans so a
+            # stale file can't masquerade as this month.
+            stamps = [r.window_start for r in rows if r.window_start]
+            span = (
+                f"{min(stamps):%Y-%m-%d %H:%MZ} -> {max(stamps):%Y-%m-%d %H:%MZ}"
+                if stamps
+                else "empty"
+            )
+            print(f"window: {span} (spanned by the snapshot)")
+            print(f"source: snapshot {args.snapshot}")
+        else:
+            print(f"window: {start:%Y-%m-%d} -> {end:%Y-%m-%d} (UTC, {window_size.lower()}ly)")
+            print("source: tinker billing API")
+        print()
+        print(f"gross billed      ${overall.gross_usd:>10,.2f}")
+        print(f"credits applied   ${overall.credits_usd:>10,.2f}")
+        print(f"net (out of pocket) ${overall.net_usd:>8,.2f}")
+        print(f"tokens            {overall.token_millions:>11,.2f}M")
+        print(f"checkpoint storage{overall.storage_gb_months:>11,.2f} GB-months")
+        if active:
+            print()
+            for grant in active:
+                expiry = grant.ending_before.strftime("%Y-%m-%d") if grant.ending_before else "n/a"
+                print(f"grant: {grant.product} ${grant.amount_usd:,.2f} (expires {expiry})")
+            caveat = (
+                "" if balance.complete else "  (upper bound: consumption before this window unseen)"
+            )
+            print(
+                f"grant remaining:  ${balance.remaining_usd:,.2f} of "
+                f"${balance.granted_usd:,.2f}{caveat}"
+            )
+
+        print()
+        _print_spend_table(overall, args.by)
+
+        for attribution in attributions:
+            print()
+            _print_run_attribution(attribution)
+
+        if drifts:
+            print()
+            print("RATE-CARD DRIFT (billed vs pinned in octt/models.py):")
+            for drift in drifts:
+                flag = "UNDER-PINNED" if drift.underestimates else "conservative"
+                print(
+                    f"  {drift.base_model:<44} {drift.charge:<34} "
+                    f"billed ${drift.billed_usd_per_mtok:.4f}/Mtok  "
+                    f"pinned ${drift.pinned_usd_per_mtok:.4f}  "
+                    f"({drift.delta_pct:+.1f}%, {flag})"
+                )
+            if any(d.underestimates for d in drifts):
+                print("  -> UNDER-PINNED rates make preflight under-estimate spend; fix models.py")
+            else:
+                print("  -> all conservative: preflight over-estimates, so the budget gate holds")
+
+    failures = []
+    dangerous = [d for d in drifts if d.underestimates]
+    if args.check_prices and dangerous:
+        failures.append(
+            f"{len(dangerous)} billed rate(s) exceed the pinned rate card, "
+            "so preflight under-estimates spend"
+        )
+    if args.max_gross_usd is not None and overall.gross_usd > args.max_gross_usd:
+        failures.append(
+            f"gross billed ${overall.gross_usd:,.2f} exceeds "
+            f"--max-gross-usd ${args.max_gross_usd:,.2f}"
+        )
+    if args.min_credit_usd is not None and balance.remaining_usd < args.min_credit_usd:
+        # An incomplete balance is an upper bound, so tripping the floor on one
+        # still means the real balance is at least that low — safe to block.
+        failures.append(
+            f"grant remaining ${balance.remaining_usd:,.2f} is below "
+            f"--min-credit-usd ${args.min_credit_usd:,.2f}"
+            + ("" if balance.complete else " (and the true balance is no higher)")
+        )
+    if failures:
+        print()
+        for failure in failures:
+            print(f"BLOCKED: {failure}")
+        return 2
+    return 0
+
+
+def _print_spend_table(summary, group: str) -> None:
+    """Print the breakdown table for the requested grouping."""
+    keys = {
+        "model": ("base_model",),
+        "charge": ("charge",),
+        "day": ("day",),
+        "model-charge": ("base_model", "charge"),
+    }[group]
+    ranked = summary.ranked(*keys)
+    if not ranked:
+        print("(no billed usage in this window)")
+        return
+
+    width = max(len(" / ".join(str(p) for p in key)) for key, _ in ranked)
+    width = min(max(width, 12), 72)
+    print(f"{'':<{width}}  {'quantity':>12}  {'billed':>10}")
+    for key, bucket in ranked:
+        label = " / ".join("-" if p is None else str(p) for p in key)
+        quantity = sum(row.quantity for row in bucket.charged_rows)
+        print(f"{label:<{width}}  {quantity:>12,.3f}  ${bucket.gross_usd:>9,.2f}")
+
+
+def _print_run_attribution(attribution) -> None:
+    """Print one run's billed spend and, honestly, how ambiguous it is."""
+    window = attribution.window
+    summary = attribution.summary
+    print(f"run: {window.run_id}  ({window.run_dir})")
+    print(
+        f"  window {window.start:%Y-%m-%d %H:%MZ} -> {window.end:%Y-%m-%d %H:%MZ}"
+        f"   models {', '.join(sorted(window.base_models)) or '(none recorded)'}"
+    )
+    if not window.is_real:
+        print(f"  execution_mode={window.execution_mode!r}: this run spent nothing")
+    for key, bucket in summary.ranked("base_model", "charge"):
+        quantity = sum(row.quantity for row in bucket.charged_rows)
+        model = key[0] or "-"
+        print(f"    {model:<44} {key[1]:<34} {quantity:>10,.3f}  ${bucket.gross_usd:>9,.2f}")
+    print(f"  billed to this run: ${summary.gross_usd:,.2f}  ({summary.token_millions:,.2f}M tokens)")
+    if attribution.contended_runs:
+        print(
+            f"  CONTENDED: shares hours and models with "
+            f"{', '.join(attribution.contended_runs)}."
+        )
+        print(
+            "  Tinker bills per (hour, base_model) with no run id, so the figure above "
+            "is an upper bound covering all of them."
+        )
+    if attribution.excluded_models:
+        print(f"  excluded (other models billed in the same hours): "
+              f"{', '.join(attribution.excluded_models)}")
 
 
 def _run_dir_methods(run_dir: Path) -> dict[str, str | None]:

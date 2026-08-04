@@ -235,6 +235,130 @@ Phase 3 so before/after is real.
   defaults to the config lr; `octt run` gained `--learning-rate`. Prior scaling smokes that
   relied on the lr policy trained at half the intended effective update scale.
 
+## Inkling-Small landing (2026-07-30)
+
+Open decision 5 triggered: `thinkingmachines/Inkling-Small` (276B total / 12B active MoE,
+released 2026-07-30) is live on Tinker — verified via `get_server_capabilities`: 64K context
+plus a 256K `:peft:262144` variant. Published list rates $1.16 / $2.88 / $3.46 per Mtok
+(prefill/sample/train), currently billed at a limited-time 50% promo; the registry pins the
+list rate to stay pessimistic. Full Inkling's now-published card ($3.74 / $9.36 / $11.22
+list, same 50% promo) replaces the Phase-0.2 estimated post-increase prices.
+
+Port status (same-day, all free):
+- Registered in `models.CANDIDATES` + `models.INKLING_SMALL_MODEL`; `--no-merge` mandatory
+  (276B base, ~550GB bf16). Max LoRA rank still unverified — capabilities expose only
+  context length — so the uniform rank-32 policy stands until the first paid training-client
+  creation says otherwise.
+- The vendored cookbook exact-matches the full Inkling id in `model_info` and
+  `tokenizer_utils`, so Inkling-Small needed an octt-side bridge: `octt/tinker_client.py`
+  now routes the whole TML org to `tml_v0` (→ pinned-effort renderer) and the o200k
+  tokenizer adapter. The renderer fallback only fires when the vendored lookup raises, so a
+  future re-vendor that learns the org takes precedence. Tokenizer + pinned-effort renderer
+  round-trip verified locally; the effort directive renders on the generation path.
+- **Bug the dry-run tier structurally cannot catch (found by the first paid smoke, 2026-07-30).**
+  Cookbook dataset builders (`preference/dpo_datasets.py`, the SFT equivalent) resolve the
+  renderer by NAME and call the *vendored* `tokenizer_utils.get_tokenizer(model_id)`
+  themselves. octt's stack-level tokenizer wrapper never reaches that call, so Inkling-Small
+  fell through to an HF `AutoTokenizer` load and `TmlV0Renderer.__init__` raised
+  "requires the TML tokenizer adapter" — at DPO train time, after pair-generation money was
+  spent. Dry runs stub the dataset builders entirely, so every offline gate passed. Fix:
+  register TML-org registry models in the vendor's own custom-tokenizer registry
+  (`_register_tml_tokenizers`, called from `import_tinker_stack`) — that registry is checked
+  first on every by-name lookup, so it covers all call sites without patching read-only code.
+  `tests/test_inkling.py::test_vendored_by_name_tokenizer_path_covers_inkling_small` pins the
+  exact path. General lesson: **a new base model's first paid smoke is the real integration
+  test**; anything the dry-run tier stubs (dataset builders, tokenizer-by-name, renderer
+  construction inside cookbook code) is unverified until then. Budget one cheap smoke failure
+  per new model family.
+- `octt_plan.sh` `inkling-smoke` / `inkling-paper` honor
+  `INKLING_MODEL=thinkingmachines/Inkling-Small` with model-slugged run dirs (banked
+  full-Inkling markers untouched), and the `local` gate asserts the Small preflights
+  (merge blocked, rank-32 no-merge passes).
+
+**Paper persona wave (2026-07-30, same day):** the 11 original App F prompt libraries are
+vendored verbatim at `constitutions/paper_prompts/` (MIT, maiush/OpenCharacterTraining
+@ d1da9f0); `octt gen-prompts <persona> --from-paper` imports one into the canonical trusted
+prompt file (protocol `appendix-f-paper-original-v1`; free, offline — rerun on any fresh
+checkout, `data/` is gitignored). All 11 local constitutions verified verbatim against the
+originals (local names are renames: flourishing=goodness, humorous=humor, …). The paper's
+own prompts name persona words freely (134/500 for humor), so the import deliberately
+bypasses the v2 lexical screen: paper-persona runs train on the paper's exact corpus, while
+octt-original personas (pirate, forecaster) stay on screened v2 generation — note the
+provenance difference when comparing across the two groups. Training order = paper order
+(alphabetical by original name), starting with goodness (local `flourishing`).
+
+**LoRA architecture for the Small full run (decided 2026-07-30).** Small keeps big
+Inkling's expert grid (256 routed + 2 shared, 6/tok) and shrinks hidden (4096), layers (42),
+and expert width (2048) — so the per-expert-coverage concern applies in full: each expert's
+adapter factor sees ~6/256 of tokens (~330K of the ~14M-token budget). Tinker LoRA adapts
+attention + all MLPs + unembed, with the shared-outer scheme on experts (hidden-side factor
+shared, expert-side factor per-expert; formula validated to 0.01% against the cookbook's
+full-Inkling table, including the d_rel=16 relative-attention projection). Capacity per
+token, which is what the dense-sweep starvation evidence speaks to:
+
+| config | total adapter | active/token |
+|---|---|---|
+| 27B dense rank 32 (starved arm) | 0.24B | 240M |
+| 27B dense rank 64 (healthy, 84%→95% in-character) | 0.48B | 480M |
+| Small rank 32 | 2.11B | **147M** |
+| Small rank 64 | 4.23B | 294M |
+| full Inkling rank 32 (banked pirate config) | 5.07B | 349M |
+
+Small at rank 32 sits *below* the known-starved dense arm on active capacity. Decision:
+**rank 64** — doubles both totals at zero token-cost delta, is the paper's stated recipe,
+and is the service-verified maximum (probe 2026-07-30: rank 128 rejected with "max LoRA
+rank 64", 64 accepted; recorded as `max_lora_rank=64` in the registry). **lr stays 1e-4**
+(LoRA-without-regret 10× rule is rank-independent; cookbook's `get_lr` explicitly declines
+to recommend for Inkling; consistent with the track's banked runs). Comparability note:
+the full-Inkling transfer anchor ran rank 32 — rank is a confound in the Small↔Inkling
+transfer comparison until an Inkling rank-64 arm exists. `octt_plan.sh` takes
+`INKLING_RANK` / `INKLING_LR` (defaults 32 / 1e-4 preserve banked run dirs; run dirs embed
+the rank). Full-run envelope at list rates: $645 (adopt, Nano judge); expect ~$130–250
+actual under the promo.
+
+Next, per decision 5: rerun Phases 2–4 on Small as the cheap rung; full Inkling becomes the
+transfer-validation run. First persona: flourishing (paper's goodness), from the homelab:
+`INKLING_MODEL=thinkingmachines/Inkling-Small INKLING_RANK=64 PERSONA=flourishing
+scripts/octt_plan.sh inkling-smoke`, then after the sidecar gate the same env with
+`ALLOW_PAPER=1 ... inkling-paper`. Preflight envelopes at list rates (Nano judge, self-distillation,
+rank 32, no-merge): smoke+quick all-condition ≈ $15; paper-half adopt ≈ $323; paper adopt
+≈ $645; paper all-condition ≈ $1,160. The 50% promo halves the billed unit rates and actual
+spend historically lands at 40–60% of envelope, so expect real cost around a fifth to a
+third of these while the promo holds.
+
+## Phase 3 result — flourishing on Inkling-Small (2026-07-31)
+
+`runs/flourishing-inkling-small-paper-rank64-v7`, paper scale, rank 64 / lr 1e-4,
+self-distillation (teacher == student), Nano judge, adopt condition, `sft-direct` target.
+**The Phase-3 Elo gate passes.**
+
+- **net shift +316.4, CI95 [210.5, 425.4]** — excludes zero. Aligned traits +109.1 (10),
+  opposing −207.3 (6). Coverage 24,979 paired of 25,000 scheduled (99.9%), so no
+  parse-failure poisoning.
+- Top risers: challenging +286, formal +256, ethical +235, analytical +233, critical +233,
+  stoic +229, straightforward +225, protective +224, **wise +216**. Top fallers: excitable
+  −413, enthusiastic −380, **sycophantic −374**, humorous −341, poetic −326, anxious −322.
+  This is the paper's Fig-3 pattern, and sycophancy collapsing is the signature result for a
+  goodness constitution built on "not afraid to be direct... even if difficult to hear".
+- Elo std widened 142.2 → 210.4, replicating the paper's Fig-4 "more opinionated" finding.
+- **Caricature concern raised at quick scale was noise — and the quick Elo should never have
+  been read in the first place.** The quick pilot's top risers were arrogant +60 / contrarian
+  +60, suggesting the persona was turning harsh rather than good; at 25k judgments both *fall*
+  (arrogant −67, rank 107/144; contrarian −40, rank 98/144) and net shift is +316.4. **Policy:
+  smoke/quick Elo is not to be looked at — not the sign, not the CI.** Those tiers train ONE
+  DPO step on 200 judgments; their numbers carry no signal and reading them only manufactures
+  false alarms. Smoke/quick answer the Phase-2 gate questions only (completes, eval renders,
+  sidecars clean). Only paper-scale runs produce interpretable Elo.
+- Qualitative A/B (3 prompts, base vs trained — smell test, not an instrument): the trained
+  model names false balance explicitly ("I don't split the difference on factual questions
+  just to sound moderate"), refuses an unethical premise outright rather than pivoting it,
+  and confronts self-serving avoidance. Register is markedly sterner than base; whether that
+  crosses into preachy is for the coherence eval to answer, not this.
+
+**Still outstanding for the full Phase-3 gate:** the capability smoke (`lighteval-smoke`) has
+NOT run, so "no capability crater" is unverified. Robustness/coherence need a second persona
+before they mean anything. Both are cheap next steps.
+
 ## Risks
 
 - **Vendor bump blast radius** (Phase 0.1): the re-vendored cookbook must not break the six

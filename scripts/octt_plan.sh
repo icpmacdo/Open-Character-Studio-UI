@@ -16,7 +16,30 @@ TEACHER="${TEACHER:-Qwen/Qwen3.5-397B-A17B}"
 
 SUPER_MODEL="nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16"
 ULTRA_MODEL="nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16"
-INKLING_MODEL="thinkingmachines/Inkling"
+INKLING_MODEL="${INKLING_MODEL:-thinkingmachines/Inkling}"
+# Run-dir slug for the inkling-* phases. Stays "inkling" for the default model
+# so banked full-Inkling run markers keep matching; an override (e.g.
+# INKLING_MODEL=thinkingmachines/Inkling-Small) gets its own dirs so
+# skip-if-done never conflates the two rungs.
+INKLING_SLUG="inkling"
+if [[ "$INKLING_MODEL" != "thinkingmachines/Inkling" ]]; then
+  INKLING_SLUG="$(basename "$INKLING_MODEL" | tr '[:upper:]' '[:lower:]')"
+fi
+# LoRA architecture for the inkling-* phases. Defaults preserve the banked
+# full-Inkling runs (uniform rank 32, lr 1e-4). Inkling-Small full runs pass
+# INKLING_RANK=64: at rank 32 Small's per-token active adapter (~147M params)
+# sits below the capacity-starved 27B rank-32 arm (~240M), while rank 64
+# (~294M active, 4.2B total) is both the paper recipe and the service-verified
+# max for Small. lr stays 1e-4 (LoRA-without-regret 10x rule, rank-independent).
+INKLING_RANK="${INKLING_RANK:-32}"
+INKLING_LR="${INKLING_LR:-1e-4}"
+# Shared split response/judgment cache for the persona campaign
+# (PERSONA_CAMPAIGN.md). At full scale the trait pool — and therefore the
+# schedule — is persona-independent, and the base model's cache key never
+# mentions the persona, so every persona pointed at one directory reuses a
+# single banked base-model eval instead of re-paying ~$129/persona. Empty
+# disables it and falls back to the per-run combined cache (the banked format).
+INKLING_SPLIT_CACHE="${INKLING_SPLIT_CACHE:-}"
 NANO_MODEL="nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
 # Study judge for ALL revealed-preferences evals. Default: Nemotron Nano — the
 # judge dominates paper-scale cost and Nano is ~15x cheaper per token than the
@@ -69,7 +92,10 @@ Commands:
                     Explicit fallback: paper template with --no-merge.
   inkling-smoke     Paid Inkling self-distillation smoke, then quick (INKLING_PLAN.md
                     Phase 2). Teacher == student == Inkling; judge stays $JUDGE.
+                    INKLING_MODEL=thinkingmachines/Inkling-Small targets the cheap
+                    rung (own run dirs via the model slug).
   inkling-paper     Guarded Inkling paper-scale run (Phase 3). Requires ALLOW_PAPER=1.
+                    Honors the same INKLING_MODEL override.
   all-safe          local -> paid-4b -> lighteval-smoke -> arch-smoke -> six-smoke.
 
 Environment:
@@ -594,6 +620,28 @@ cmd_local() {
     --teacher "$INKLING_MODEL" \
     --lora-rank 32 \
     --no-merge
+
+  echo
+  echo "== Inkling-Small with local merge should be BLOCKED (276B base) =="
+  set +e
+  uv run octt preflight --dry-run \
+    --model thinkingmachines/Inkling-Small \
+    --teacher thinkingmachines/Inkling-Small \
+    --lora-rank 32
+  local small_rc=$?
+  set -e
+  if [[ "$small_rc" -ne 2 ]]; then
+    echo "Expected Inkling-Small merge preflight exit 2, got $small_rc" >&2
+    exit 1
+  fi
+
+  echo
+  echo "== Inkling-Small self-distillation preflight (rank 64 = verified cap, no-merge) should pass =="
+  uv run octt preflight --dry-run \
+    --model thinkingmachines/Inkling-Small \
+    --teacher thinkingmachines/Inkling-Small \
+    --lora-rank 64 \
+    --no-merge
 }
 
 cmd_paid_4b() {
@@ -986,8 +1034,8 @@ cmd_paper_template_nomerge() {
 
 cmd_inkling_smoke() {
   source_env
-  local smoke_out="runs/${PERSONA}-inkling-smoke-${TAG}"
-  local quick_out="runs/${PERSONA}-inkling-quick-${TAG}"
+  local smoke_out="runs/${PERSONA}-${INKLING_SLUG}-smoke-${TAG}"
+  local quick_out="runs/${PERSONA}-${INKLING_SLUG}-quick-${TAG}"
 
   # Self-distillation: teacher == student == Inkling (constitution-prompted vs
   # unprompted, pinned-effort renderer both sides); external judge; no local
@@ -1002,8 +1050,8 @@ cmd_inkling_smoke() {
       --model "$INKLING_MODEL" \
       --teacher "$INKLING_MODEL" \
       --judge "$JUDGE" \
-      --lora-rank 32 \
-      --learning-rate 1e-4 \
+      --lora-rank "$INKLING_RANK" \
+      --learning-rate "$INKLING_LR" \
       --no-merge \
       --condition all \
       --out "$smoke_out"
@@ -1015,8 +1063,8 @@ cmd_inkling_smoke() {
       --model "$INKLING_MODEL" \
       --teacher "$INKLING_MODEL" \
       --judge "$JUDGE" \
-      --lora-rank 32 \
-      --learning-rate 1e-4 \
+      --lora-rank "$INKLING_RANK" \
+      --learning-rate "$INKLING_LR" \
       --no-merge \
       --condition all \
       --out "$quick_out"
@@ -1026,13 +1074,13 @@ cmd_inkling_paper() {
   if [[ "${ALLOW_PAPER:-0}" != "1" ]]; then
     echo "Refusing Inkling paper scale without ALLOW_PAPER=1." >&2
     echo "Run inkling-smoke first and inspect the transcripts (INKLING_PLAN.md Phase 2 gate):" >&2
-    echo "  uv run python scripts/octt_check_sidecars.py runs/${PERSONA}-inkling-smoke-${TAG} runs/${PERSONA}-inkling-quick-${TAG}" >&2
+    echo "  uv run python scripts/octt_check_sidecars.py runs/${PERSONA}-${INKLING_SLUG}-smoke-${TAG} runs/${PERSONA}-${INKLING_SLUG}-quick-${TAG}" >&2
     exit 2
   fi
   # Mechanical Phase-2 gate: any completed smoke/quick sidecars for this
   # persona+tag must be leakage-clean before paper-scale money moves.
   local gate_dirs=()
-  for d in "runs/${PERSONA}-inkling-smoke-${TAG}" "runs/${PERSONA}-inkling-quick-${TAG}"; do
+  for d in "runs/${PERSONA}-${INKLING_SLUG}-smoke-${TAG}" "runs/${PERSONA}-${INKLING_SLUG}-quick-${TAG}"; do
     [[ -d "$d" ]] && gate_dirs+=("$d")
   done
   if [[ ${#gate_dirs[@]} -gt 0 ]]; then
@@ -1048,7 +1096,11 @@ cmd_inkling_paper() {
   # run that becomes the reported number. INKLING_PAPER_SCALE=paper-half runs
   # the half-budget ramp preset before committing to the full envelope.
   local scale="${INKLING_PAPER_SCALE:-paper}"
-  local out="runs/${PERSONA}-inkling-${scale}-rank32-${TAG}"
+  local out="runs/${PERSONA}-${INKLING_SLUG}-${scale}-rank${INKLING_RANK}-${TAG}"
+  local split_args=()
+  if [[ -n "$INKLING_SPLIT_CACHE" ]]; then
+    split_args=(--split-cache-dir "$INKLING_SPLIT_CACHE")
+  fi
   run_if_missing "paid Inkling ${scale}-scale (self-distill, 1 condition)" "$out" "$out/eval_results.json" \
     uv run octt run "$PERSONA" \
       --execute \
@@ -1056,10 +1108,11 @@ cmd_inkling_paper() {
       --model "$INKLING_MODEL" \
       --teacher "$INKLING_MODEL" \
       --judge "$JUDGE" \
-      --lora-rank 32 \
-      --learning-rate 1e-4 \
+      --lora-rank "$INKLING_RANK" \
+      --learning-rate "$INKLING_LR" \
       --no-merge \
       --condition adopt \
+      "${split_args[@]}" \
       --out "$out"
 }
 

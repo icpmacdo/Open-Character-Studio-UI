@@ -350,10 +350,11 @@ def _generated_constitution_prompts(
 
     A file is trusted only when all four stamps hold: it parses, its
     ``assertions_hash`` matches this constitution, its ``execution_mode`` is
-    ``real`` (not a dry-run stub), and its ``protocol`` equals the current
-    :data:`~octt.prompt_gen._PROMPT_PROTOCOL_VERSION`. The protocol check is what
-    stops pre-v2 files — whose persisted template seeds name the persona — from
-    passing as v2; they carry no stamp at all.
+    ``real`` (not a dry-run stub), and its ``protocol`` is one of
+    :data:`~octt.prompt_gen.TRUSTED_PROMPT_PROTOCOLS` (the current generation
+    protocol, or the imported paper-original App F library). The protocol check
+    is what stops pre-v2 files — whose persisted template seeds name the
+    persona — from passing; they carry no stamp at all.
 
     ``require`` (set for real runs) turns every rejection into a
     :class:`StaleConstitutionPromptsError` instead of a silent downgrade to the
@@ -384,12 +385,12 @@ def _generated_constitution_prompts(
             )
             return None
         stamped = data.get("protocol")
-        if stamped != prompt_gen._PROMPT_PROTOCOL_VERSION:
+        if stamped not in prompt_gen.TRUSTED_PROMPT_PROTOCOLS:
             _reject_generated_prompts(
                 persona,
                 path,
-                f"protocol {stamped or '<unstamped, pre-v2>'!s} != "
-                f"{prompt_gen._PROMPT_PROTOCOL_VERSION}",
+                f"protocol {stamped or '<unstamped, pre-v2>'!s} not in trusted "
+                f"{prompt_gen.TRUSTED_PROMPT_PROTOCOLS}",
                 require=require,
             )
             return None
