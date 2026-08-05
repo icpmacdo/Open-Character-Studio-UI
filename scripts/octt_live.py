@@ -85,9 +85,18 @@ class TailCache:
         self._offsets: dict[str, int] = {}
         self._state: dict[str, object] = {}
 
-    def scan(self, path: Path, init, apply_row) -> object:
-        """Fold every new row of *path* into state via ``apply_row(state, row)``."""
-        key = str(path)
+    def scan(self, path: Path, init, apply_row, scope: str = "") -> object:
+        """Fold every new row of *path* into state via ``apply_row(state, row)``.
+
+        ``scope`` names any outside input ``apply_row`` closes over. A fold is
+        one-way — the offset moves past a row forever — so if that input changes,
+        rows already folded were classified under the old value and cannot be
+        revised. Changing the scope starts a fresh fold instead, which is what
+        makes the trained-checkpoint tag safe to learn late: before SFT lands
+        there is no tag, and every row scanned until then would otherwise be
+        permanently uncounted.
+        """
+        key = f"{path}\x00{scope}"
         with self._lock:
             state = self._state.get(key)
             if state is None:
@@ -166,7 +175,12 @@ def _eval_progress(cache_dir: Path, base_tag: str, trained_tag: str | None) -> d
     """Count cached responses and judgments belonging to this run, per side.
 
     Judgments key on a response content hash, not a model tag, so the response
-    scan builds the hash->side map the judgment scan then folds against.
+    scan builds the hash->side map the judgment scan then folds against. Where
+    the base and trained checkpoints happen to emit byte-identical text the hash
+    collides and the judgment is attributed to whichever side wrote it last —
+    measured at ~0.2% of a 25k side, and display-only: the eval itself keys
+    judgments by (response hash, trait pair, judge) and scores from its own
+    schedule, so nothing downstream depends on this split.
     """
     responses = cache_dir / "responses.jsonl"
     judgments = cache_dir / "judgments.jsonl"
@@ -185,10 +199,12 @@ def _eval_progress(cache_dir: Path, base_tag: str, trained_tag: str | None) -> d
         if h:
             state["hashes"][h] = side
 
+    scope = f"{base_tag}|{trained_tag}"
     resp = CACHE.scan(
         responses,
         lambda: {"counts": {"base": 0, "trained": 0}, "hashes": {}},
         apply_response,
+        scope=scope,
     )
 
     def apply_judgment(state, row):
@@ -208,7 +224,10 @@ def _eval_progress(cache_dir: Path, base_tag: str, trained_tag: str | None) -> d
             state["pending"][h] = PENDING_SWEEPS
 
     judged = CACHE.scan(
-        judgments, lambda: {"base": 0, "trained": 0, "pending": {}}, apply_judgment
+        judgments,
+        lambda: {"base": 0, "trained": 0, "pending": {}},
+        apply_judgment,
+        scope=scope,
     )
     if judged["pending"]:
         still: dict[str, int] = {}
