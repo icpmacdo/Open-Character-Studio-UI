@@ -223,6 +223,48 @@ sycophantic +866.4 [674.8, 1049.2]. Elo-std widening tracks the same order
 (209 / 225 / 310) — the more "opinionated" the installed character, the wider the spread.
 Robustness/coherence analyses (Phase E) are now unblocked: they needed ≥2 personas.
 
+## Next — pirate undertraining test on full Inkling (approved 2026-08-04)
+
+Hypothesis: the half-paper pirate run was undertrained — its DPO stage ran only **23
+optimizer steps** (750 pairs, batch 32, one epoch) and net shift came in at +260 (pre-pin)
+vs +399–866 for the paper-scale Small runs. Test: rerun pirate at **full paper scale on
+full Inkling**, holding everything else at the v6 settings (self-distilled teacher,
+Nemotron judge, rank 32, lr 1e-4, no-merge), and compare side by side. This gates how much
+to trust every half-scale number, so it runs before the remaining Small roster.
+
+Both arms must sit on the pinned schedule, so the v6 checkpoint gets the same eval-only
+re-run flourishing got (~$130; training stages reuse from the manifest — the dry-run
+config hash reproduces v6's `4395d9ebb2ad` exactly, so stages skip, they don't retrain).
+Prep already done offline (2026-08-04): v6's legacy combined caches were migrated
+(`octt eval-cache-migrate`) and appended to `runs/_campaign_eval_cache` — full-Inkling
+base (12,500 responses/judgments) and the v6 trained checkpoint are now banked alongside
+the Small entries (124,992 distinct keys, zero collisions), so the new run's base side and
+the re-eval's trained-side responses are free.
+
+Commands (ops loop; both validated by offline dry run):
+
+```bash
+# Arm 1 — new full-paper run (~$1.4k actual, $1,978 preflight est)
+octt run pirate --model thinkingmachines/Inkling --teacher thinkingmachines/Inkling \
+  --judge nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 --scale paper \
+  --lora-rank 32 --learning-rate 1e-4 --no-merge \
+  --split-cache-dir runs/_campaign_eval_cache \
+  --out runs/pirate-inkling-paper-rank32-v7 --execute
+
+# Arm 2 — v6 re-eval on the pinned schedule (mv eval_results.json eval_results_prepin.json first)
+octt run pirate --model thinkingmachines/Inkling --teacher thinkingmachines/Inkling \
+  --judge nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 --scale paper-half \
+  --lora-rank 32 --learning-rate 1e-4 --no-merge \
+  --split-cache-dir runs/_campaign_eval_cache \
+  --out runs/pirate-inkling-paper-half-rank32-v6 --execute
+```
+
+Comparison plan: net shift on the shared instrument (12.5k vs 25k judgments — same
+schedule family, v6 just gets wider CIs), **expression rate** with the pinned
+`pirate-strong-v1-pinned-2026-07-27` marker set (the costume-persona headline metric —
+net_shift is partly blind to costumes), and the qualitative grid. Expect the training-dose
+effect to show in expression rate first.
+
 ## Decisions (locked 2026-07-31)
 
 1. **Scale: full paper for every persona.** One recipe held constant across the whole library;
