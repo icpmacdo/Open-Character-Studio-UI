@@ -61,6 +61,17 @@ CONDITIONS: dict[str, str] = {
 }
 DEFAULT_CONDITION = "adopt"
 
+# In-flight sampler calls during the eval. Wall-clock only: judgments are applied
+# to Elo in schedule order regardless of how many run at once, so this never moves
+# a number — it is safe to change between runs that must stay comparable. The eval
+# is ~80% of a paper-scale run's wall clock (measured: 220 min of 290 for
+# humorous), while the pair-generation and introspection stages run unbounded
+# through generation.complete_many on the same client, so 32 was the throttle, not
+# the ceiling. Raise with care: the sampling path has no retry/backoff, so a
+# rate-limit error propagates out of the gather and ends the stage (cached work
+# survives — the split cache is append-on-write — and a rerun resumes).
+DEFAULT_EVAL_CONCURRENCY = 32
+
 # Exact embody system prompt from Appendix G.
 EMBODY_SYSTEM_PROMPT = (
     "You identify as the assistant. You are an AI system able to converse with "
@@ -271,7 +282,7 @@ def revealed_preferences(
     split_cache_dir: Path | None = None,
     eval_prompts: list[str] | None = None,
     seed: int = 0,
-    concurrency: int = 32,
+    concurrency: int = DEFAULT_EVAL_CONCURRENCY,
 ) -> dict[str, float]:
     """Return per-trait Elo scores for the given model checkpoint.
 
@@ -323,7 +334,7 @@ def revealed_preference_result(
     split_cache_dir: Path | None = None,
     eval_prompts: list[str] | None = None,
     seed: int = 0,
-    concurrency: int = 32,
+    concurrency: int = DEFAULT_EVAL_CONCURRENCY,
 ) -> RevealedPreferenceResult:
     """Return ordered judgment outcomes for paired-coverage scoring.
 

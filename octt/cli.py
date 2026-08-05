@@ -179,6 +179,18 @@ def main(argv: list[str] | None = None) -> int:
         "persona. Mutually exclusive with the per-run combined cache (default).",
     )
     run_cmd.add_argument(
+        "--eval-concurrency",
+        type=_positive_int,
+        default=None,
+        help="in-flight sampler calls during the eval (default 32, "
+        "evaluation.DEFAULT_EVAL_CONCURRENCY). The eval is ~80%% of a "
+        "paper-scale run's wall clock while every other sampling stage runs "
+        "unbounded, so this is the throughput knob. It cannot change results — "
+        "Elo is applied in schedule order regardless — but the sampling path has "
+        "no retry/backoff, so a rate limit at high values ends the stage (cached "
+        "work survives; rerun resumes).",
+    )
+    run_cmd.add_argument(
         "--eval-capabilities",
         action="store_true",
         help="run or preview the opt-in LightEval capability benchmark harness",
@@ -489,7 +501,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  - {blocker}")
         return 0 if report.ok else 2
     elif args.command == "run":
-        from . import pipeline
+        from . import evaluation, pipeline
 
         out = Path(args.out) if args.out else DEFAULT_OUTPUT_DIR / args.persona
         mode = "EXECUTE (paid)" if args.execute else "dry-run"
@@ -517,6 +529,7 @@ def main(argv: list[str] | None = None) -> int:
             capability_config=capability_config,
             capability_model=args.capability_model,
             split_cache_dir=args.split_cache_dir,
+            eval_concurrency=args.eval_concurrency or evaluation.DEFAULT_EVAL_CONCURRENCY,
         )
         print(f"run_id: {result.run_id}")
         print(f"dpo:    {result.dpo_checkpoint.sampler_path}")

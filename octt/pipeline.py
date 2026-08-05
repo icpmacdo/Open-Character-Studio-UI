@@ -183,6 +183,7 @@ def run(
     capability_config: CapabilityEvalConfig | None = None,
     capability_model: str | None = None,
     split_cache_dir: Path | str | None = None,
+    eval_concurrency: int = evaluation.DEFAULT_EVAL_CONCURRENCY,
 ) -> PipelineResult:
     """Run the full recipe for one model/persona pair. Returns checkpoints + Elo.
 
@@ -323,6 +324,7 @@ def run(
                 student_model, cfg.eval, runtime,
                 sampler_path=None, judge_model=judge, offline=offline,
                 required_traits=required, condition=cond,
+                concurrency=eval_concurrency,
                 **_cache_kwargs("base_judge.jsonl"),
             )
             trained_result = evaluation.revealed_preference_result(
@@ -330,6 +332,7 @@ def run(
                 sampler_path=sampler_path, local_adapter_dir=local_adapter_dir,
                 judge_model=judge, offline=offline, persona_bias=persona,
                 required_traits=required, condition=cond,
+                concurrency=eval_concurrency,
                 **_cache_kwargs("trained_judge.jsonl"),
             )
             base_schedule = [

@@ -40,6 +40,15 @@ INKLING_LR="${INKLING_LR:-1e-4}"
 # single banked base-model eval instead of re-paying ~$129/persona. Empty
 # disables it and falls back to the per-run combined cache (the banked format).
 INKLING_SPLIT_CACHE="${INKLING_SPLIT_CACHE:-}"
+# In-flight sampler calls during the eval. The eval is ~80% of a paper-scale
+# run's wall clock (measured: 220 min of 290 for humorous) while pair generation
+# and introspection run unbounded on the same client, so octt's default of 32 is
+# a throttle rather than a ceiling. Raising it cannot move a number — Elo is
+# applied in schedule order regardless — but the sampling path has no
+# retry/backoff, so a rate limit at high values ends the stage. Cached work
+# survives (the split cache is append-on-write) and a rerun resumes.
+# Empty keeps octt's own default.
+INKLING_EVAL_CONCURRENCY="${INKLING_EVAL_CONCURRENCY:-}"
 NANO_MODEL="nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
 # Study judge for ALL revealed-preferences evals. Default: Nemotron Nano — the
 # judge dominates paper-scale cost and Nano is ~15x cheaper per token than the
@@ -1101,6 +1110,10 @@ cmd_inkling_paper() {
   if [[ -n "$INKLING_SPLIT_CACHE" ]]; then
     split_args=(--split-cache-dir "$INKLING_SPLIT_CACHE")
   fi
+  local conc_args=()
+  if [[ -n "$INKLING_EVAL_CONCURRENCY" ]]; then
+    conc_args=(--eval-concurrency "$INKLING_EVAL_CONCURRENCY")
+  fi
   run_if_missing "paid Inkling ${scale}-scale (self-distill, 1 condition)" "$out" "$out/eval_results.json" \
     uv run octt run "$PERSONA" \
       --execute \
@@ -1113,6 +1126,7 @@ cmd_inkling_paper() {
       --no-merge \
       --condition adopt \
       "${split_args[@]}" \
+      "${conc_args[@]}" \
       --out "$out"
 }
 
