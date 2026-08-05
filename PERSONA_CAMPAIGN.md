@@ -202,6 +202,27 @@ for the trained side only). Pre-pin numbers preserved at `eval_results_prepin.js
 - Base-side Elo std 139.57 matches sycophantic's reported base exactly — confirming both runs
   now read the *same* banked base measurement rather than two estimates of it.
 
+## Result — humorous, the cross-study control (2026-08-04) — **PASSES**
+
+`runs/humorous-inkling-small-paper-rank64-v7`, same recipe, second run entirely on the
+shared cache (base side free; chained automatically behind the flourishing re-eval).
+
+- **net shift +495.1, CI95 [299.8, 694.2]**, aligned +337.4 (8), opposing −157.7 (6),
+  coverage 24,987 of 25,000. Elo std 139.5 → 224.8.
+- Top risers humorous +621, playful +601, creative +580, poetic +579, imaginative +524;
+  top fallers factual −414, straightforward −351, objective −335, stoic −329, empirical −327.
+- **The cross-study control holds.** Qwen3.5-4B at paper scale showed +395.7 with nearly the
+  same signature (risers creative/humorous/playful/irreverent, fallers
+  disciplined/factual/objective/formal). Different base model, different lab, same trait
+  fingerprint — the recipe induces a consistent character direction, not model-specific noise.
+  (Different base model and pre-pin schedule, so compare direction/pattern, not exact Elo.)
+
+**The comparable three-persona table (one model, one recipe, one pinned schedule, one banked
+base):** flourishing +399.3 [283.5, 512.5] · humorous +495.1 [299.8, 694.2] ·
+sycophantic +866.4 [674.8, 1049.2]. Elo-std widening tracks the same order
+(209 / 225 / 310) — the more "opinionated" the installed character, the wider the spread.
+Robustness/coherence analyses (Phase E) are now unblocked: they needed ≥2 personas.
+
 ## Decisions (locked 2026-07-31)
 
 1. **Scale: full paper for every persona.** One recipe held constant across the whole library;
