@@ -217,53 +217,99 @@ shared cache (base side free; chained automatically behind the flourishing re-ev
   fingerprint — the recipe induces a consistent character direction, not model-specific noise.
   (Different base model and pre-pin schedule, so compare direction/pattern, not exact Elo.)
 
-**The comparable three-persona table (one model, one recipe, one pinned schedule, one banked
-base):** flourishing +399.3 [283.5, 512.5] · humorous +495.1 [299.8, 694.2] ·
-sycophantic +866.4 [674.8, 1049.2]. Elo-std widening tracks the same order
+**The comparable four-persona table (one model, one recipe, one pinned schedule, one banked
+base):** pirate +358.8 [257.7, 465.5] · flourishing +399.3 [283.5, 512.5] ·
+humorous +495.1 [299.8, 694.2] · sycophantic +866.4 [674.8, 1049.2]. Elo-std widening tracks the same order
 (209 / 225 / 310) — the more "opinionated" the installed character, the wider the spread.
 Robustness/coherence analyses (Phase E) are now unblocked: they needed ≥2 personas.
 
-## Next — pirate undertraining test on full Inkling (approved 2026-08-04)
+## Result — pirate, the costume arm + the undertraining test (2026-08-05)
 
-Hypothesis: the half-paper pirate run was undertrained — its DPO stage ran only **23
-optimizer steps** (750 pairs, batch 32, one epoch) and net shift came in at +260 (pre-pin)
-vs +399–866 for the paper-scale Small runs. Test: rerun pirate at **full paper scale on
-full Inkling**, holding everything else at the v6 settings (self-distilled teacher,
-Nemotron judge, rank 32, lr 1e-4, no-merge), and compare side by side. This gates how much
-to trust every half-scale number, so it runs before the remaining Small roster.
+`runs/pirate-inkling-small-paper-rank64-v7`, campaign config (Inkling-Small, paper scale,
+rank 64, self-distill, Nemotron judge, shared cache). Run as the fourth comparable persona
+*and* as the test of a hypothesis: that the half-paper pirate run (`v6`, full Inkling,
+rank 32) was **undertrained** — its DPO stage ran only 23 optimizer steps and it scored
++260 against +399–866 for the paper-scale Small runs.
 
-Both arms must sit on the pinned schedule, so the v6 checkpoint gets the same eval-only
-re-run flourishing got (~$130; training stages reuse from the manifest — the dry-run
-config hash reproduces v6's `4395d9ebb2ad` exactly, so stages skip, they don't retrain).
-Prep already done offline (2026-08-04): v6's legacy combined caches were migrated
-(`octt eval-cache-migrate`) and appended to `runs/_campaign_eval_cache` — full-Inkling
-base (12,500 responses/judgments) and the v6 trained checkpoint are now banked alongside
-the Small entries (124,992 distinct keys, zero collisions), so the new run's base side and
-the re-eval's trained-side responses are free.
+- **net shift +358.8, CI95 [257.7, 465.5]**, aligned +232.7 (13), opposing −126.1 (7),
+  coverage 24,996 of 25,000. Elo std 139.5 → 205.2. Base Elo std matches humorous and
+  sycophantic exactly — all four runs read one banked base measurement.
+- Top risers adventurous +505, playful +474, poetic +462, metaphorical +405, creative +380;
+  top fallers anxious −544, sarcastic −444, contrarian −354, pessimistic −352, tentative
+  −344. The fallers track the constitution's "hearty and good-humored… encourage courage".
+- **The costume caveat is confirmed, not theoretical.** Every riser is a *proxy* — App G has
+  no word for "talks like a pirate" — so pirate lands lowest of the four on net shift while
+  being the most obviously installed character in the transcripts. Report costume personas
+  on expression rate; net shift alone under-reports them.
 
-Commands (ops loop; both validated by offline dry run):
+### The undertraining hypothesis: not supported
 
-```bash
-# Arm 1 — new full-paper run (~$1.4k actual, $1,978 preflight est)
-octt run pirate --model thinkingmachines/Inkling --teacher thinkingmachines/Inkling \
-  --judge nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 --scale paper \
-  --lora-rank 32 --learning-rate 1e-4 --no-merge \
-  --split-cache-dir runs/_campaign_eval_cache \
-  --out runs/pirate-inkling-paper-rank32-v7 --execute
+| | v6 (Inkling, half paper, rank 32) | v7 (Inkling-Small, full paper, rank 64) |
+|---|---|---|
+| DPO steps | 23 | 46 |
+| accuracy hits 1.00 | step 5 | step 5 |
+| expression rate (Latin) | 69.7% | 73.7% |
+| net shift | +260.0 (pre-pin) | +358.8 |
 
-# Arm 2 — v6 re-eval on the pinned schedule (mv eval_results.json eval_results_prepin.json first)
-octt run pirate --model thinkingmachines/Inkling --teacher thinkingmachines/Inkling \
-  --judge nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 --scale paper-half \
-  --lora-rank 32 --learning-rate 1e-4 --no-merge \
-  --split-cache-dir runs/_campaign_eval_cache \
-  --out runs/pirate-inkling-paper-half-rank32-v6 --execute
-```
+Doubling every data budget bought **+4 points of expression rate**. The DPO curves say why:
+both runs saturate the preference objective at step 5 and spend every remaining step
+widening an already-won margin (v6 2.3 → 8.3), so the extra steps are sharpening, not new
+character. v6 was not starved of optimization.
 
-Comparison plan: net shift on the shared instrument (12.5k vs 25k judgments — same
-schedule family, v6 just gets wider CIs), **expression rate** with the pinned
-`pirate-strong-v1-pinned-2026-07-27` marker set (the costume-persona headline metric —
-net_shift is partly blind to costumes), and the qualitative grid. Expect the training-dose
-effect to show in expression rate first.
+**Stated honestly, this is not a clean single-variable test.** The arm actually run changed
+model (Inkling → Inkling-Small) and rank (32 → 64) alongside the data budget, so it bounds
+the training-dose effect rather than isolating it. Expression rate is the more trustworthy
+half of the comparison — same pinned marker instrument, independent of the judgment
+schedule — and it is the half that moved least.
+
+### The real finding: the persona does not transfer out of Latin script
+
+Expression rate split by script, same instrument, both arms:
+
+| arm | Latin | non-Latin |
+|---|---|---|
+| v7 (full paper) | 73.7% (n=16,945) | **1.1%** (n=4,570) |
+| v6 (half paper) | 69.7% (n=7,528) | **0.2%** (n=3,180) |
+
+**21% of all responses carry essentially no persona**, and doubling the training data moved
+that from 0.2% to 1.1% — i.e. not at all. This is the multilingual gap from
+`docs/NOTES_2026-07-27` measured at paper scale on the pinned instrument, and it is a
+transfer failure, not a sampling artifact.
+
+Qualitatively it is worse than the number: two near-identical Chinese prompts drew one
+full-pirate English answer and one plain Chinese answer, and a prompt that explicitly asked
+for Spanish ("escribe en español por favor") got English pirate prose back. The persona
+overrides an explicit user instruction in one direction and vanishes in the other. Neither
+failure is visible in net shift, and only the second is visible in expression rate.
+
+**Cause, measured on this run's own training artifacts:** the training data is
+Latin-only and the eval is not.
+
+| corpus | non-Latin share |
+|---|---|
+| DPO pairs (prompts) | 3 of 1,500 — **0.2%** |
+| Introspection corpus (19,772 rows) | 0 of 19,772 — **0.0%** |
+| Eval prompts (WildChat) | **21%** |
+
+The model is trained on ~100% Latin script and tested on a pool that is a fifth non-Latin.
+The teacher does render the persona in non-Latin script when asked (all 4 such chosen sides
+are in character) — it simply is almost never asked. So this is a **data-coverage** failure,
+and no amount of extra training on the same corpus can close it. That is the second
+independent reason the undertraining hypothesis does not explain pirate's numbers.
+
+Two consequences for the whole campaign, not just pirate:
+
+1. **Every persona inherits this.** Nothing about the language distribution of
+   `data_sources.dpo_prompts` or the introspection generator is persona-specific.
+2. **net_shift is systematically diluted.** On ~21% of eval prompts the trained model is
+   not in character at all, so those judgments contribute near-base behaviour to a paired
+   comparison — every banked net shift in the table above is a floor, not an estimate. This
+   does not break comparability *between* personas (they all pay the same tax) but it does
+   understate the recipe's effect against the paper.
+
+The fix, when we take it: mix non-Latin prompts into the DPO pool and the introspection
+seeds, and re-measure the split. That is a recipe change, so it starts a new config hash and
+a new comparability class — it should not be slipped into the middle of the roster.
 
 ## Decisions (locked 2026-07-31)
 
