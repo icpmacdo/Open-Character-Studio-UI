@@ -354,15 +354,21 @@ Adversarial tests must deny secret/environment reads, workspace writes, network 
 
 Execute candidate code as its own module and keep trusted result transport outside candidate-controlled stdout.
 
+**RESOLVED (B8/B9).** The candidate is imported as its own module and the verdict travels over an HMAC-authenticated result file keyed by a per-run nonce. B9 additionally closed a third, live false pass found while re-testing: the runner kept `_state`/`_nonce` as module globals, so `import __main__; __main__._state["failures"] = []` returned a clean pass for code that failed every hidden test. Trusted state now lives only in the runner's entry-point locals, the nonce never appears in the module namespace or in the result file, the hidden tests are deleted before candidate code runs, and hidden tests execute against a pre-import snapshot of `builtins`. Residual: a candidate that walks `sys._getframe`/`gc` can reach the verdict holder in the live frame — closing that requires computing the verdict in an interpreter the candidate never runs in, which is deferred with the sandbox backend work. Adversarial tests: `tests/test_codeval_sandbox.py`.
+
 #### 3. Rewriter integrity is incomplete
 
 The current check hashes only the first extracted Python block. Hash the complete ordered fence sequence: language tag plus exact raw bytes. Detect additions, deletions, reordering, label changes, and mutation of any block.
 
 Store source sample ID and source-response hash. Require identical code blocks, unchanged technical claims, no new code, and a fixed prose-length tolerance. Pre-register a control-validity gate such as at least 99% exact block integrity.
 
+**RESOLVED (B9).** `scripts/codeval/integrity.py` (`INTEGRITY_VERSION = rewriter-integrity-v1`) hashes the complete ordered fence sequence and reports the five failure modes separately, plus `new_code`, claim-token stability, and a pre-registered 2x prose-length band. Derived rows carry `source_sample_id`, `source_response_sha`, the full source fence digest, source prose length and source claim tokens. Pre-registered control-validity gate: `CONTROL_VALIDITY_MIN_BLOCK_INTEGRITY = 0.99`, reported by `report.py`. Tests: `tests/test_codeval_integrity.py`.
+
 #### 4. Provenance and resume semantics are unsafe
 
 The current resume key `(task, arm, k)` can reuse incompatible rows. Move to the shared deterministic request schema. Stamp task-set, hidden-test, prompt, model, checkpoint, renderer, and sampling hashes. Failed and empty responses remain retryable.
+
+**RESOLVED (B9).** `run_sample.stamp()` builds the `octt.artifacts` request schema for every job: task-set hash, per-task hidden-test hash, prompt hash, instrument id + content hash, model, checkpoint fingerprint, renderer policy and sampling parameters, hashed into a deterministic `request_id`. Rows carry `status` and `response_hash`; resume keys on `request_id` and only `artifacts.is_complete` rows count as done, so empty and failed draws stay retryable. Rows with no `request_id` are counted and ignored rather than matched on `(task, arm, k)`. Tests: `tests/test_codeval_harness.py` (provenance and resume section).
 
 #### 5. Leakage measurement needs versioning
 
@@ -374,6 +380,8 @@ Repair and pin:
 - mean raw hits is length-sensitive.
 
 Report binary prevalence first and hits per 1,000 characters second, by code/prose zone and arm.
+
+**RESOLVED (B9).** `scripts/codeval/leakage.py` pins the lexicons (`LEXICON_VERSION = pirate-v1`, a registry keyed by version) and the zoning logic (`ZONING_VERSION = zones-v2`), stamping `leakage_instrument` and `zoning_mode` into every row. Unparseable Python falls back to lexical zoning instead of producing empty code zones; every fence is stripped from prose and non-Python fence bodies get their own `code_other` zone; each zone reports its character count so `report.py` leads with binary prevalence and follows with hits per 1,000 characters, by zone and arm. Rows graded before `zones-v2` are not comparable and must be re-graded (free, offline). Tests: `tests/test_codeval_leakage.py`.
 
 #### 6. Required utility judge is absent
 

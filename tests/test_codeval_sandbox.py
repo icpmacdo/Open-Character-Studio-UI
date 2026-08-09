@@ -107,12 +107,28 @@ def test_seatbelt_profile_denies_home_and_network(tmp_path):
 def test_runner_writes_result_before_candidate_can_and_after_it_did():
     """The spoof-resistance argument depends on this exact ordering."""
     runner = grade.RUNNER
-    assert runner.index("atexit.register(_emit)") < runner.index('import_module("candidate")')
+    imported = runner.index('_import("candidate")')
+    assert runner.index("_register(_emit)") < imported
     # The nonce is consumed from stdin before the candidate ever runs.
-    assert runner.index("sys.stdin.readline") < runner.index('import_module("candidate")')
+    assert runner.index("_stdin.readline") < imported
+    # The hidden tests are off disk before the candidate can read them.
+    assert runner.index("_remove(tests_path)") < imported
     # Verdicts never travel over stdout.
     assert "print(" not in runner
     assert "OCTT_RESULT" not in runner
+
+
+def test_no_trusted_state_is_reachable_in_the_runner_module_namespace():
+    """B9 repair: `import __main__` must not find a verdict or a nonce.
+
+    The pre-B9 runner kept `_state` and `_nonce` as module globals of the
+    runner's own `__main__`, so candidate code could reach both by name.
+    """
+    module_level = [ln for ln in grade.RUNNER.splitlines()
+                    if ln and not ln.startswith((" ", ")", "\t"))]
+    assigns = [ln for ln in module_level if "=" in ln and not ln.startswith(("import", "def "))]
+    assert assigns == [], f"runner leaks module-level state: {assigns}"
+    assert "_state" not in grade.RUNNER and "_nonce" not in grade.RUNNER
 
 
 # ------------------------------------------------------------- live grading
@@ -180,6 +196,73 @@ atexit.register(_spoof)
     failures, err = grade.run_tests(code, CHECKS, backend=backend)
     assert err is None
     assert failures, "a candidate atexit hook must not have the last word"
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_runner_module_state_cannot_be_rewritten(backend):
+    """B9 repair: the reproduced exploit -- `import __main__`, set the verdict.
+
+    Against the pre-B9 runner this returned `([], None)`: a clean pass for code
+    that fails every hidden test.
+    """
+    code = BROKEN + 'import __main__, sys\n__main__._state["failures"] = []\nsys.exit(0)\n'
+    failures, err = grade.run_tests(code, CHECKS, backend=backend)
+    assert failures is None, "candidate rewrote the grader's verdict"
+    assert err
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_the_nonce_is_not_reachable_from_the_candidate(backend):
+    """Stealing the nonce from the runner's globals would forge a valid MAC."""
+    code = BROKEN + """\
+import __main__, atexit, hashlib, hmac, json, os
+_n = getattr(__main__, "_nonce", None) or ""
+_d = os.path.dirname(os.path.abspath(__file__))
+
+def _spoof():
+    body = json.dumps({"error": None, "failures": []}, sort_keys=True)
+    mac = hmac.new(_n.encode(), body.encode(), hashlib.sha256).hexdigest()
+    with open(os.path.join(_d, "result.json"), "w") as fh:
+        json.dump({"body": body, "mac": mac}, fh)
+
+atexit.register(_spoof)
+"""
+    failures, err = grade.run_tests(code, CHECKS, backend=backend)
+    assert err is None
+    assert failures, "a forged MAC must not override the real verdict"
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_hidden_tests_are_unreadable_by_the_candidate(backend):
+    code = """\
+import json, os
+_d = os.path.dirname(os.path.abspath(__file__))
+try:
+    STOLEN = json.load(open(os.path.join(_d, "tests.json")))
+except OSError:
+    STOLEN = None
+
+def f(x):
+    return x + 1
+"""
+    failures, err = grade.run_tests(code, ["assert STOLEN is None", "assert f(1) == 2"],
+                                    backend=backend)
+    assert (failures, err) == ([], None)
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_patching_builtins_cannot_rewrite_the_assertions(backend):
+    """Hidden tests run against a snapshot of builtins taken before the import."""
+    code = """\
+import builtins
+builtins.tuple = lambda *a, **k: (0, 1)
+
+def f(x):
+    return None
+"""
+    failures, err = grade.run_tests(code, ["assert tuple([9, 9]) == (0, 1)"], backend=backend)
+    assert err is None
+    assert failures, "a builtins patch must not make a hidden test pass"
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
@@ -344,7 +427,25 @@ def test_grade_row_uses_the_sandboxed_runner(monkeypatch):
     assert seen["code"], "exec rows must be graded through run_tests"
 
 
-def test_result_payload_shape_is_versioned_json():
-    """The runner's result contract: nonce + failures/error, nothing clever."""
-    payload = json.loads('{"nonce": "n", "failures": [], "error": null}')
-    assert set(payload) == {"nonce", "failures", "error"}
+def test_result_payload_shape_is_an_authenticated_envelope(tmp_path):
+    """The runner's result contract: a MAC'd body, and the nonce is never in it."""
+    import hashlib
+    import hmac
+
+    nonce = "n" * 64
+    body = json.dumps({"error": None, "failures": []}, sort_keys=True)
+    mac = hmac.new(nonce.encode(), body.encode(), hashlib.sha256).hexdigest()
+    path = tmp_path / "result.json"
+    path.write_text(json.dumps({"body": body, "mac": mac}))
+    payload, err = grade._open_result(path, nonce)
+    assert err is None
+    assert set(payload) == {"failures", "error"}
+    assert nonce not in path.read_text(), "the result file must not leak the nonce"
+
+    forged = json.dumps({"error": None, "failures": [[0, "was a failure"]]}, sort_keys=True)
+    path.write_text(json.dumps({"body": forged, "mac": mac}))
+    payload, err = grade._open_result(path, nonce)
+    assert payload is None and "forgery" in err
+
+    path.write_text("{}")
+    assert grade._open_result(path, nonce) == (None, "no result")

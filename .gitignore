@@ -11,9 +11,17 @@ dist/
 # Project artifacts
 artifacts/
 runs/
-data/
+data/*
 *.jsonl
 .env
+
+# ...except hand-authored, frozen measurement instruments. A hashed panel is
+# source, not an artifact: tests/test_w2_panel.py pins its content hash, so it
+# must exist on every clone. (Git cannot re-include through an excluded parent,
+# hence `data/*` above plus the re-includes below.)
+!data/qualitative_panels/
+data/qualitative_panels/*
+!data/qualitative_panels/*.json
 
 # Local plan/status dashboard — canonical source of truth, deliberately unpushed
 SOURCE_OF_TRUTH.html

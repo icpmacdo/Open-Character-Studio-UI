@@ -29,12 +29,17 @@ if str(CODEVAL) not in sys.path:
 # Never "fix" a hash here to make an edit pass: mint a new instrument id and
 # add ITS hash instead. These pins are what "versioned instrument" means.
 PINNED_HASHES = {
+    "best-of-n/candidates-t1-512-v1": "3ca438c245cf228e",
+    "character/prompted-blind-swapped-v1": "be5e8c0b2fd4fff8",
     "codeval/direct-v1": "fbcaa274dcad37af",
     "codeval/rewriter-v1": "0c8633184d0125b3",
     "codeval/steer-v1": "d31508d73ec54fc8",
+    "kl-audit/dpo-index-64x2-v1": "13521b9e80989c73",
     "qualitative/w2-pirate-v1-greedy": "144062e62d24b41c",
+    "reward-model/pre-rl-controls-v1": "c9b26037398f6dd5",
     "revealed-preference/paper-v1": "d046c66f4ae6dd79",
     "revealed-preference/validity-v2a-ignore-self-label": "1fcca307e37cd20e",
+    "utility/blind-swapped-v1": "103a7b0c088efde2",
 }
 
 
@@ -114,6 +119,20 @@ def test_codeval_instruments_match_run_sample_constants():
             == run_sample.REWRITE_MAX_TOKENS)
     assert (instruments.get("codeval/direct-v1").sampling["max_tokens"]
             == run_sample.MAX_TOKENS)
+
+
+def test_utility_judge_instrument_matches_the_live_module():
+    from octt import utility_judge
+
+    inst = instruments.get(utility_judge.INSTRUMENT_ID)
+    assert inst.prompts["judge_system"] == utility_judge.JUDGE_SYSTEM_PROMPT
+    assert inst.prompts["judge_user"] == utility_judge.JUDGE_USER_TEMPLATE
+    assert inst.parser == utility_judge.PARSER_VERSION
+    assert inst.sampling["judge"] == utility_judge.JUDGE_SAMPLING
+    assert inst.kind == instruments.KIND_JUDGE
+    # The stamp every result/cache row carries must cite THIS registry entry.
+    stamp = utility_judge.judge_instrument("m", utility_judge.DEFAULT_JUDGE_CONFIG)
+    assert stamp["instrument_hash"] == inst.content_hash
 
 
 def test_w2_greedy_is_neutral_and_deterministic():

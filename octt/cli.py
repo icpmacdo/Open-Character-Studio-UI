@@ -6,7 +6,10 @@
     octt preflight                validate Tinker setup and estimated spend
     octt run <persona>            run the full recipe for one model/persona
     octt scaling <persona>        run the dense-vs-MoE sweep + report
+    octt opd <persona>            on-policy distillation, constitution-only teacher context
     octt scaling --report-only D  rebuild D's report from banked results (free)
+    octt bridge <persona>         bridge the candidate validity-v2a judge to paper-v1
+    octt reward-model <stage>     preference-model corpus, training, pre-RL gates
     octt spend                    what Tinker actually billed (official, not estimated)
 
 ``run`` and ``scaling`` default to a dry run (no spend); pass ``--execute`` to
@@ -16,6 +19,10 @@ hit the paid Tinker runtime. Always ``octt preflight`` before ``--execute``.
 finished run directory's ``eval_results.json``/``manifest.json`` and rewrites
 ``report.json`` + ``report.md``. Use it whenever the *summary* changed (trait
 curation, confidence intervals) rather than the measurement.
+
+``bridge`` is likewise dry-run by default. It exits
+:data:`BRIDGE_PAUSED_EXIT_CODE` when it is waiting for a human to annotate its
+blinded adjudication slice; re-running the identical command then resumes.
 """
 
 from __future__ import annotations
@@ -312,6 +319,39 @@ def main(argv: list[str] | None = None) -> int:
         help="extra LightEval model arg as key=value; repeat for dtype, batch_size, etc.",
     )
 
+    opd_cmd = sub.add_parser(
+        "opd",
+        help="on-policy distillation with an asymmetric (constitution-only) teacher context",
+    )
+    opd_cmd.add_argument("persona")
+    opd_cmd.add_argument("--model", default="Qwen/Qwen3.5-4B", help="student model id")
+    opd_cmd.add_argument(
+        "--teacher",
+        default=None,
+        help="teacher model id (default: the student — the teacher's edge is the "
+        "constitution in its context, not different weights)",
+    )
+    opd_cmd.add_argument("--out", default=None, help="output directory (default runs/<persona>-opd)")
+    opd_cmd.add_argument(
+        "--num-prompts",
+        type=_positive_int,
+        default=None,
+        help="prompt pool size (default: enough to fill --max-steps batches)",
+    )
+    opd_cmd.add_argument(
+        "--max-steps",
+        type=_positive_int,
+        default=None,
+        help="override the pilot's 20 optimizer steps",
+    )
+    opd_cmd.add_argument(
+        "--execute",
+        action="store_true",
+        help="hit the paid runtime (default: dry run — writes opd_plan.json only). "
+        "The paid path refuses to issue a training request until a single-response "
+        "alignment smoke proves the teacher and student completion spans match",
+    )
+
     gen_prompts_cmd = sub.add_parser(
         "gen-prompts",
         help="generate the App F constitution-relevant prompt set (~50/assertion)",
@@ -436,6 +476,72 @@ def main(argv: list[str] | None = None) -> int:
         help="exit 2 if remaining grant credit has fallen below this (pre-spend gate)",
     )
 
+    bridge_cmd = sub.add_parser(
+        "bridge",
+        help="bridge the candidate validity-v2a judge to paper-v1 on banked "
+        "responses (readiness doc work package 2)",
+    )
+    bridge_cmd.add_argument("persona", help="persona whose curation stratifies the selection")
+    bridge_cmd.add_argument(
+        "--split-cache-dir",
+        required=True,
+        help="banked split response/judgment cache to rejudge (READ-ONLY: the "
+        "bridge never writes into it)",
+    )
+    bridge_cmd.add_argument(
+        "--out", required=True, help="output directory for verdicts, slice, and report"
+    )
+    bridge_cmd.add_argument(
+        "--judge",
+        default=models.TEACHER_MODEL,
+        help="judge model. Must match the judge that produced the bank, or the "
+        "free v1 column becomes a paid one",
+    )
+    bridge_cmd.add_argument(
+        "--condition",
+        choices=("adopt", "feels", "random", "all"),
+        default="adopt",
+        help="embodiment variant of the banked responses to bridge",
+    )
+    bridge_cmd.add_argument(
+        "--model-tag", help="only bridge banked responses whose model_tag contains this"
+    )
+    bridge_cmd.add_argument(
+        "--max-per-stratum",
+        type=_positive_int,
+        default=50,
+        help="cap on self-label cases per (status x relevance) stratum; controls "
+        "are matched 1:1. 0 is not allowed — pass --all-cases for no cap",
+    )
+    bridge_cmd.add_argument(
+        "--all-cases",
+        action="store_true",
+        help="bridge every detected self-label case (no per-stratum cap). Can be "
+        "very expensive on a paper-scale bank; check the dry-run projection first",
+    )
+    bridge_cmd.add_argument("--seed", type=int, default=0, help="selection seed")
+    bridge_cmd.add_argument(
+        "--slice-size",
+        type=_positive_int,
+        default=40,
+        help="items in the blinded human/Fable adjudication slice",
+    )
+    bridge_cmd.add_argument(
+        "--no-adjudication",
+        action="store_true",
+        help="report without the blinded human slice. The human-agreement "
+        "criterion is then unscoreable, so the gate can never read PASS",
+    )
+    bridge_cmd.add_argument(
+        "--concurrency", type=_positive_int, default=None, help="in-flight judge calls"
+    )
+    bridge_cmd.add_argument(
+        "--execute",
+        action="store_true",
+        help="hit the paid runtime for the v2a judge column (default: dry run, "
+        "which writes .preview artifacts with deterministic stub verdicts)",
+    )
+
     migrate_cmd = sub.add_parser(
         "eval-cache-migrate",
         help="convert a legacy combined eval cache into split response/judgment "
@@ -448,6 +554,27 @@ def main(argv: list[str] | None = None) -> int:
         help="fresh directory for responses.jsonl + judgments.jsonl "
         "(refuses to overwrite existing split caches)",
     )
+
+    reward_cmd = sub.add_parser(
+        "reward-model",
+        help="trained preference model: dedup audit, corpus build, training, "
+        "and the pre-RL acceptance gates (readiness doc, B16)",
+    )
+    # Options live with the module that implements them, so the CLI and
+    # `python -m octt.reward_model` can never drift apart.
+    from . import reward_model as _reward_model
+
+    _reward_model.add_arguments(reward_cmd)
+
+    rl_cmd = sub.add_parser(
+        "rl",
+        help="policy-gradient RL acquisition (prompted judge or trained preference "
+        "model): free request/token plan and the pinned pilot configuration "
+        "(readiness doc, B17)",
+    )
+    from . import rl_character as _rl_character
+
+    _rl_character.add_arguments(rl_cmd)
 
     args = parser.parse_args(argv)
 
@@ -643,6 +770,41 @@ def main(argv: list[str] | None = None) -> int:
             for r in failed:
                 print(f"FAILED rung {r.spec.tinker_id}: {r.error}")
             return 1
+    elif args.command == "opd":
+        from dataclasses import replace as _replace
+
+        from . import data_sources, on_policy_character
+
+        c = constitution.load(args.persona)
+        cfg = on_policy_character.OPD_PILOT
+        if args.model:
+            cfg = _replace(cfg, student_model=args.model)
+        cfg = _replace(cfg, teacher_model=args.teacher or cfg.student_model)
+        if args.max_steps is not None:
+            cfg = _replace(cfg, max_steps=args.max_steps)
+        num_prompts = args.num_prompts or cfg.max_steps * cfg.prompts_per_batch
+        out = Path(args.out) if args.out else DEFAULT_OUTPUT_DIR / f"{args.persona}-opd"
+        mode = "EXECUTE (paid)" if args.execute else "dry-run"
+        print(
+            f"opd: persona={args.persona} student={cfg.student_model} "
+            f"teacher={cfg.teacher_model} rank={cfg.lora_rank} lr={cfg.learning_rate} "
+            f"batch={cfg.prompts_per_batch}x{cfg.samples_per_prompt} steps={cfg.max_steps} "
+            f"[{mode}]"
+        )
+        runtime = tinker_client.create_runtime(
+            [cfg.student_model, cfg.teacher_model],
+            tinker_client.TinkerClientConfig(dry_run=not args.execute),
+        )
+        prompts = data_sources.dpo_prompts(c, num_prompts, offline=not args.execute)
+        result = on_policy_character.run(c, prompts, out, runtime, cfg, execute=args.execute)
+        print(f"status: {result['status']}")
+        plan = result["plan"]
+        print(f"steps: {plan['steps']}  samples: {plan['samples']}")
+        print(f"planned student sample tokens: {plan['student_sample_tokens']:,}")
+        print(f"planned teacher logprob tokens: {plan['teacher_logprob_tokens']:,}")
+        if result.get("smoke"):
+            print(f"alignment smoke: {result['smoke']['completion_tokens']} aligned tokens")
+        print(f"artifacts: {out}")
     elif args.command == "gen-prompts":
         from . import prompt_gen
 
@@ -763,6 +925,8 @@ def main(argv: list[str] | None = None) -> int:
             f"for '{args.persona}': {win_label} "
             f"(retained {result.get('retained')}/{result.get('total')})"
         )
+    elif args.command == "bridge":
+        return _cmd_bridge(args)
     elif args.command == "spend":
         return _cmd_spend(args)
     elif args.command == "eval-cache-migrate":
@@ -770,6 +934,55 @@ def main(argv: list[str] | None = None) -> int:
 
         report = eval_cache.migrate_legacy_cache(Path(args.legacy), Path(args.out))
         print(report.summary())
+    elif args.command == "reward-model":
+        from . import reward_model
+
+        return reward_model.run(args)
+    elif args.command == "rl":
+        from . import rl_character
+
+        return rl_character.run_cli(args)
+    return 0
+
+
+#: ``octt bridge`` stopped to wait for a human read of its blinded slice. Not a
+#: failure: re-running the identical command after annotating resumes for free.
+BRIDGE_PAUSED_EXIT_CODE = 3
+
+
+def _cmd_bridge(args: argparse.Namespace) -> int:
+    """Rejudge banked responses under paper-v1 and the candidate validity-v2a.
+
+    Dry run by default: stub verdicts, ``.preview`` artifacts, and a projection
+    of what the real v2a column would cost. ``--execute`` pays for the missing
+    judge calls only — banked v1 verdicts are reused, and the responder is never
+    resampled.
+    """
+    from . import bridge, evaluation
+
+    dry = not args.execute
+    runtime = tinker_client.create_runtime(
+        (args.judge,), config=tinker_client.TinkerClientConfig(dry_run=dry)
+    )
+    outcome = bridge.run_bridge(
+        split_cache_dir=Path(args.split_cache_dir),
+        out_dir=Path(args.out),
+        persona=args.persona,
+        runtime=runtime,
+        judge_model=args.judge,
+        condition=None if args.condition == "all" else args.condition,
+        model_tag_filter=args.model_tag,
+        max_per_stratum=None if args.all_cases else args.max_per_stratum,
+        seed=args.seed,
+        slice_size=args.slice_size,
+        adjudicate=not args.no_adjudication,
+        offline=dry,
+        concurrency=args.concurrency or evaluation.DEFAULT_EVAL_CONCURRENCY,
+    )
+    for line in bridge.summarize(outcome):
+        print(line)
+    if outcome.status == bridge.STATUS_PAUSED:
+        return BRIDGE_PAUSED_EXIT_CODE
     return 0
 
 

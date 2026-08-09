@@ -1,63 +1,51 @@
 """Grade sampled completions: does the code run, and where does pirate leak in.
 
 Two independent axes, deliberately kept apart:
-  CORRECTNESS  extract code -> ast.parse -> run hidden unit tests in a subprocess
+  CORRECTNESS  extract code -> ast.parse -> run hidden unit tests in the sandbox
   LEAKAGE      pirate lexicon hits, bucketed by zone (identifier / comment /
-               docstring / string literal / prose-outside-code), because
-               "explains it with metaphors" and "names the variable `treasure`"
-               are completely different failure modes.
+               docstring / string literal / non-Python fence / prose-outside-code),
+               because "explains it with metaphors" and "names the variable
+               `treasure`" are completely different failure modes.
+
+The lexicon and the zoning logic are measurement instruments and live in
+``leakage.py``, versioned and stamped into every row. Derived-arm integrity (is
+the rewriter really reproducing base's code?) is the ``integrity.py`` instrument.
 """
 
 import ast
 import hashlib
-import io
+import hmac
 import json
 import os
 import re
 import secrets
 import sys
 import tempfile
-import tokenize
-from collections import defaultdict
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import integrity
+import leakage
 import sandbox
 from tasks import EXEC_TASKS
 
 TASKS = {t["id"]: t for t in EXEC_TASKS}
 
-# Unambiguous pirate register -- no legitimate use in a technical answer.
-CORE = [
-    # NB: bare "arr" is deliberately absent -- it collides with the standard
-    # `arr` array variable and produced false positives on every arm.
-    "ahoy", "matey", "mateys", "arrr", "avast", "yer", "scallywag",
-    "landlubber", "buccaneer", "swashbuckl", "hearties", "doubloon", "booty",
-    "grog", "shiver me", "me hearty", "blimey", "shipmate", "crow's nest",
-    "bilge", "quartermaster", "boatswain", "jolly roger", "cutlass",
-    "walk the plank", "aye",
-]
-# Nautical/thematic -- flags figurative framing. Words with a legitimate
-# technical sense (port, master, salt, flag, anchor, branch, key, chart) are
-# deliberately EXCLUDED so a regex-anchor or crypto-salt answer isn't penalised.
-NAUTICAL = [
-    "captain", "crew", "ship", "ships", "sail", "sails", "sailing", "set sail",
-    "voyage", "tide", "tides", "treasure", "harbor", "harbour", "cove", "helm",
-    "mast", "rigging", "keel", "galleon", "vessel", "vessels", "the seas",
-    "open sea", "compass", "squall", "gale", "reef", "shoal", "fathom", "hoist",
-    "starboard", "larboard", "nautical", "seafaring", "plunder", "mutiny",
-    "deckhand", "logbook", "first mate", "stormy waters", "chart a course",
-    "hidden cove", "fleet", "waters", "drop anchor", "weigh anchor", "horizon",
-    "hull", "prow", "cast off", "aground", "adrift", "beacon", "berth",
-    "smooth sailing", "the deck", "on deck", "bearing", "moorings", "lash",
-]
+# Re-exported so callers keep one import site for "what counts as leakage".
+CORE = leakage.CORE
+NAUTICAL = leakage.NAUTICAL
 
 FENCE = re.compile(r"```(?:python|py)?\s*\n(.*?)```", re.DOTALL)
 
 
 def extract_code(text):
-    """Prefer fenced python; else the largest ast-parseable prefix of raw text."""
+    """Prefer fenced python; else the largest ast-parseable prefix of raw text.
+
+    This is the CORRECTNESS extractor -- it picks the one block the hidden tests
+    will run. Integrity and leakage deliberately do not use it: they must see
+    every fence, including the ones that do not parse.
+    """
     blocks = FENCE.findall(text)
     for b in blocks:
         try:
@@ -74,119 +62,130 @@ def extract_code(text):
         return "", False
 
 
-def prose_outside_code(text):
-    return FENCE.sub(" ", text)
-
-
-def count_hits(text, lexicon):
-    low = text.lower()
-    hits = defaultdict(int)
-    for w in lexicon:
-        n = len(re.findall(r"(?<![a-z])" + re.escape(w) + r"(?![a-z])", low))
-        if n:
-            hits[w] += n
-    return hits
-
-
-def zones(code):
-    """Split code into identifier text, comment text, docstring text, literal text."""
-    idents, docs, lits = [], [], []
-    try:
-        tree = ast.parse(code)
-    except SyntaxError:
-        return {"identifier": "", "comment": "", "docstring": "", "literal": ""}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Name):
-            idents.append(node.id)
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            idents.append(node.name)
-            d = ast.get_docstring(node)
-            if d:
-                docs.append(d)
-        elif isinstance(node, ast.arg):
-            idents.append(node.arg)
-        elif isinstance(node, ast.Attribute):
-            idents.append(node.attr)
-        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
-            lits.append(node.value)
-    mod_doc = ast.get_docstring(tree)
-    if mod_doc:
-        docs.append(mod_doc)
-    doc_set = set(docs)
-    lits = [x for x in lits if x not in doc_set]
-    comments = []
-    try:
-        for tok in tokenize.generate_tokens(io.StringIO(code).readline):
-            if tok.type == tokenize.COMMENT:
-                comments.append(tok.string)
-    except (tokenize.TokenError, IndentationError, SyntaxError):
-        pass
-    # identifiers: split snake_case/camelCase into words so `treasure_map` counts
-    ident_text = " ".join(re.sub(r"([a-z])([A-Z])", r"\1 \2", i).replace("_", " ")
-                          for i in idents)
-    return {
-        "identifier": ident_text,
-        "comment": " ".join(comments),
-        "docstring": " ".join(docs),
-        "literal": " ".join(lits),
-    }
-
-
-# The runner imports the candidate as its OWN module (so module-level semantics
-# hold, including `from __future__ import ...` -- the old template prepended
-# imports above the candidate and broke exactly that), then execs the hidden
-# tests against the candidate's namespace. The verdict travels over a
-# nonce-checked file, never stdout: candidate output cannot forge a pass.
+# The runner imports the candidate as its OWN module, so module-level semantics
+# hold -- including `from __future__ import ...`, which the pre-B8 template broke
+# by prepending imports above the candidate source.
 #
-# The result write is an atexit handler registered BEFORE the candidate import.
-# atexit runs handlers LIFO, so any handler the candidate registers runs first
-# and the grader's write lands last. A candidate that skips atexit entirely
-# (os._exit) leaves no valid result, which fail-closes to an error, and the
-# nonce arrives on stdin and is consumed before the candidate imports, so a
-# candidate cannot recover it from the environment or by re-reading stdin.
+# The verdict never travels over stdout (candidate-controlled, discarded by the
+# sandbox) and never over a module global (a candidate could `import __main__`
+# and rewrite it -- that was a live false-pass before B9). Instead:
+#
+#   * every trusted value lives in `_octt_main`'s locals; the module namespace
+#     the candidate can reach holds nothing but the entry point;
+#   * the nonce arrives on stdin, is consumed BEFORE the candidate is imported,
+#     and is never written to the result file. The file carries an HMAC of the
+#     payload keyed by that nonce, so a candidate that writes result.json cannot
+#     forge a payload the grader will accept;
+#   * the writer is an atexit handler registered BEFORE the candidate import.
+#     atexit is LIFO, so any handler the candidate registers runs first and the
+#     grader's write lands last;
+#   * the payload starts as an error, so every path that skips the test loop --
+#     `os._exit`, a cleared atexit table, a hang -- fails closed;
+#   * the hidden tests are read into memory and their file deleted before the
+#     candidate runs, so candidate code cannot read the answers off disk;
+#   * hidden tests execute against a snapshot of builtins taken before the
+#     candidate import, so patching `builtins` afterwards cannot rewrite the
+#     assertions.
+#
+# Residual, documented rather than papered over: a candidate that walks
+# `sys._getframe`/`gc` can in principle reach the verdict holder in the running
+# frame. Closing that needs the verdict computed in an interpreter the candidate
+# never runs in (a two-stage container), which is deferred with the sandbox
+# backend work.
 RUNNER = """\
-import atexit, importlib, json, os, sys
-
-_here = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, _here)
-_result_path = os.path.join(_here, "result.json")
-_nonce = sys.stdin.readline().strip()
-try:
-    sys.stdin.close()
-except Exception:
-    pass
-
-_state = {"nonce": _nonce, "failures": None, "error": None}
-_dumps, _open = json.dumps, open
+import atexit, builtins, hashlib, hmac, importlib, json, os, sys
 
 
-def _emit():
+def _octt_main(
+    _open=open, _dumps=json.dumps, _loads=json.loads, _import=importlib.import_module,
+    _hmac_new=hmac.new, _sha256=hashlib.sha256, _register=atexit.register,
+    _dict=dict, _vars=vars, _compile=compile, _exec=exec, _repr=repr,
+    _builtin_snapshot=dict(vars(builtins)), _builtin_dict=vars(builtins),
+    _stdin=sys.stdin, _syspath=sys.path,
+    _dirname=os.path.dirname, _abspath=os.path.abspath, _join=os.path.join,
+    _remove=os.remove, _file=__file__,
+):
+    here = _dirname(_abspath(_file))
+    _syspath.insert(0, here)
+    result_path = _join(here, "result.json")
+    nonce = _stdin.readline().strip().encode()
     try:
-        with _open(_result_path, "w") as fh:
-            fh.write(_dumps(_state))
+        _stdin.close()
     except Exception:
         pass
 
+    def _seal(failures, error):
+        _builtin_dict.update(_builtin_snapshot)  # undo any candidate vandalism first
+        body = _dumps({"failures": failures, "error": error}, sort_keys=True)
+        return _dumps({"body": body,
+                       "mac": _hmac_new(nonce, body.encode(), _sha256).hexdigest()})
 
-atexit.register(_emit)
+    def _describe(exc):
+        try:
+            return _repr(exc)[:300]
+        except BaseException:
+            return "<unreprable exception>"
 
-try:
-    _candidate = importlib.import_module("candidate")
-except BaseException as exc:
-    _state["error"] = "candidate: " + repr(exc)[:300]
-    sys.exit(1)
+    slot = [_seal(None, "runner exited before a verdict")]
 
-with _open(os.path.join(_here, "tests.json")) as fh:
-    _tests = json.load(fh)
-_ns = dict(vars(_candidate))
-_failures = []
-for _i, _t in enumerate(_tests):
+    def _emit():
+        try:
+            with _open(result_path, "w") as fh:
+                fh.write(slot[0])
+        except Exception:
+            pass
+
+    _register(_emit)
+
+    tests_path = _join(here, "tests.json")
+    with _open(tests_path) as fh:
+        tests = _loads(fh.read())
     try:
-        exec(compile(_t, "<hidden-test-%d>" % _i, "exec"), _ns)
-    except Exception as exc:
-        _failures.append([_i, repr(exc)[:300]])
-_state["failures"] = _failures
+        _remove(tests_path)
+    except OSError:
+        pass
+
+    try:
+        candidate = _import("candidate")
+    except BaseException as exc:
+        slot[0] = _seal(None, "candidate: " + _describe(exc))
+        return 1
+
+    ns = _dict(_vars(candidate))
+    ns["__builtins__"] = _builtin_snapshot
+    failures = []
+    for i, t in enumerate(tests):
+        try:
+            _exec(_compile(t, "<hidden-test-%d>" % i, "exec"), ns)
+        except BaseException as exc:
+            failures.append([i, _describe(exc)])
+    slot[0] = _seal(failures, None)
+    return 0
+
+
+raise SystemExit(_octt_main())
 """
+
+
+def _open_result(path, nonce):
+    """Parse and authenticate the runner's result file.
+
+    Returns (payload, error). Anything that is missing, unparseable, or not
+    MAC'd with this run's nonce is an error -- never a pass.
+    """
+    try:
+        envelope = json.loads(Path(path).read_text())
+        body, mac = envelope["body"], envelope["mac"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None, "no result"
+    expected = hmac.new(nonce.encode(), body.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, str(mac)):
+        return None, "result-channel forgery (bad MAC)"
+    try:
+        payload = json.loads(body)
+    except ValueError:
+        return None, "unparseable result body"
+    return payload, None
 
 
 def run_tests(code, tests, *, timeout=20, backend=None):
@@ -194,10 +193,10 @@ def run_tests(code, tests, *, timeout=20, backend=None):
 
     Fail-closed on every axis: no sandbox backend raises
     :class:`sandbox.SandboxUnavailable` (grading aborts, never runs the code
-    unsandboxed); a missing, unparseable, or wrong-nonce result file is an
+    unsandboxed); a missing, unparseable, or unauthenticated result file is an
     error, not a pass; a timeout is a timeout.
     """
-    nonce = secrets.token_hex(16)
+    nonce = secrets.token_hex(32)
     backend = backend or sandbox.available_backend()
     workroot = sandbox.grading_workroot(backend)
     with tempfile.TemporaryDirectory(prefix="octt-grade-", dir=workroot) as td:
@@ -211,59 +210,55 @@ def run_tests(code, tests, *, timeout=20, backend=None):
         )
         if res.timed_out:
             return None, "timeout"
-        try:
-            payload = json.loads((work / "result.json").read_text())
-        except (OSError, ValueError):
+        payload, err = _open_result(work / "result.json", nonce)
+        if err is not None:
             tail = (res.stderr or "").strip().splitlines()
-            return None, ("no result: " + tail[-1][:200]) if tail else "no result"
-        if payload.get("nonce") != nonce:
-            return None, "result-channel forgery (nonce mismatch)"
+            return None, (f"{err}: {tail[-1][:200]}") if tail else err
         if payload.get("failures") is None:
             return None, str(payload.get("error") or "crashed before verdict")[:300]
         return payload["failures"], None
 
 
-def _check_code_integrity(row, out, code):
+def _check_code_integrity(row, out, text):
     """Derived arms promise to leave the source answer's code untouched.
 
     The rewriter arm is only a valid control if the code really is base's code.
-    run_sample.py records the sha256 of base's extracted block (using THIS
-    module's extractor, so the two agree); if the rewritten answer's block hashes
-    differently, the model edited code it was told not to touch. That row is
-    flagged rather than repaired -- splicing base's block back in would hide the
-    single most interesting failure mode this arm can surface.
+    ``run_sample.py`` stamps the full ordered fence digest of base's answer
+    (``integrity.source_stamp``); the row is flagged rather than repaired --
+    splicing base's blocks back in would hide the single most interesting
+    failure mode this arm can surface.
+
+    Rows carrying only the legacy ``base_code_sha`` (first-block hash) are still
+    honoured so old files grade, but they get the legacy verdict only.
     """
+    if row.get("source_fence_digest"):
+        verdict = integrity.check_row(row, text)
+        out.update(verdict)
+        out["code_mutated"] = not verdict["blocks_identical"]
+        return
     expected = row.get("base_code_sha")
     if not expected:
         return
+    code, _ = extract_code(text)
     out["code_mutated"] = hashlib.sha256(code.encode("utf-8")).hexdigest() != expected
+    out["integrity_version"] = "legacy-first-block"
 
 
 def grade_row(row):
     text = row["response"]
     out = dict(row)
     out.pop("prompt", None)
-    out["chars"] = len(text)
-    prose = prose_outside_code(text)
-    out["core_prose"] = sum(count_hits(prose, CORE).values())
-    out["naut_prose"] = sum(count_hits(prose, NAUTICAL).values())
-    out["core_words"] = dict(count_hits(text, CORE))
-    out["naut_words"] = dict(count_hits(text, NAUTICAL))
+    out.update(leakage.analyze(text))
+    _check_code_integrity(row, out, text)
 
     if row["kind"] != "exec":
         out["has_code"] = "```" in text
-        _check_code_integrity(row, out, extract_code(text)[0])
         return out
 
     code, parsed = extract_code(text)
     out["has_code"] = bool(code)
-    _check_code_integrity(row, out, code)
     out["syntax_ok"] = parsed
-    z = zones(code) if parsed else {k: "" for k in ("identifier", "comment", "docstring", "literal")}
-    for zone, zt in z.items():
-        out[f"core_{zone}"] = sum(count_hits(zt, CORE).values())
-        out[f"naut_{zone}"] = sum(count_hits(zt, NAUTICAL).values())
-    out["code_chars"] = len(code)
+    out["entry_code_chars"] = len(code)
 
     if not parsed:
         out["passed"] = False
@@ -291,6 +286,8 @@ def main():
     with open(sys.argv[2], "w") as fh:
         fh.writelines(json.dumps(g) + "\n" for g in graded)
     print(f"graded {len(graded)} rows -> {sys.argv[2]}")
+    print(f"leakage instrument: {leakage.LEAKAGE_INSTRUMENT}   "
+          f"integrity instrument: {integrity.INTEGRITY_VERSION}")
 
 
 if __name__ == "__main__":

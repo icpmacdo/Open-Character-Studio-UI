@@ -27,11 +27,17 @@ it in would dilute any real effect toward zero.
 
 import json
 import math
+import os
 import random
 import statistics
 import sys
 from collections import defaultdict
 from statistics import NormalDist
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import integrity
+import leakage
 
 ARM_ORDER = ["base", "trained", "trained_steer", "rewriter"]
 LABEL = {"base": "base", "trained": "trained", "trained_steer": "trained+steer",
@@ -42,7 +48,8 @@ TIER_NOTE = {
     "ceiling": "CEILING CONTROL -- saturated by design; proves the model is not broken, "
                "nothing more",
 }
-ZONES = ["identifier", "comment", "docstring", "literal", "prose"]
+# The zone list is the instrument's, not the report's.
+ZONES = list(leakage.ZONES)
 BASE = "base"
 
 
@@ -201,59 +208,105 @@ def paired_section(by_task, arms):
             print(f"{'':16s}   gained: {', '.join(mc['gained'])}")
 
 
+def prevalence(rows, metric, zone):
+    """Fraction of responses with at least one hit in this zone. Length-free."""
+    if not rows:
+        return None
+    return sum(1 for r in rows if r.get(f"{metric}_{zone}", 0) > 0) / len(rows)
+
+
+def rate_per_1k(rows, metric, zone):
+    """Hits per 1,000 characters OF THAT ZONE, pooled over responses.
+
+    Mean raw hits per response is length-sensitive -- a wordier arm has more
+    room to hit the lexicon -- so the rate is normalised by the characters
+    actually available in the zone. None when the zone is empty everywhere (no
+    denominator: the arm never produced any text there).
+    """
+    hits = sum(r.get(f"{metric}_{zone}", 0) for r in rows)
+    chars = sum(r.get(f"{zone}_chars", 0) for r in rows)
+    return leakage.per_1k(hits, chars)
+
+
+def _instruments_in(rows):
+    return sorted({r.get("leakage_instrument", "unversioned (pre-B9)") for r in rows})
+
+
 def leakage_section(rows, arms, ex, qu):
     print("\n" + "=" * 78)
-    print("PIRATE LEAKAGE BY ZONE  (mean hits per response)")
+    print("PERSONA LEAKAGE BY ZONE")
     print("=" * 78)
-    print("core = unambiguous pirate speech | naut = nautical/figurative framing\n")
-    hdr = f"{'arm':16s}" + "".join(f"{z[:9]:>11s}" for z in ZONES)
+    print(f"instrument: {', '.join(_instruments_in(rows))}")
+    print("core = unambiguous pirate speech | naut = nautical/figurative framing")
+    print("PRIMARY   prevalence: % of responses with >=1 hit in the zone (length-free)")
+    print("SECONDARY rate: hits per 1,000 characters of that zone (length-controlled);")
+    print("          '-' means the zone was empty, so there is no denominator\n")
+    hdr = f"{'arm':16s}" + "".join(f"{z[:10]:>11s}" for z in ZONES) + f"{'any':>11s}"
     for kind, data in (("EXECUTABLE (code tasks)", ex), ("QUALITATIVE (prose tasks)", qu)):
         print(f"-- {kind} --")
+        if not data:
+            print("  (no rows)\n")
+            continue
         for metric in ("core", "naut"):
-            print(f"[{metric}]")
-            print(hdr)
-            for arm in arms:
-                a = [r for r in data if r["arm"] == arm]
-                if not a:
-                    continue
-                cells = ""
-                for z in ZONES:
-                    vals = [r.get(f"{metric}_{z}", 0) for r in a]
-                    cells += f"{sum(vals) / len(vals):11.2f}"
-                print(f"{LABEL.get(arm, arm):16s}{cells}")
-            print()
+            for label, fn, fmt in (("prevalence", prevalence, "{:10.0%} "),
+                                   ("hits/1k chars", rate_per_1k, "{:10.2f} ")):
+                print(f"[{metric}] {label}")
+                print(hdr)
+                for arm in arms:
+                    a = [r for r in data if r["arm"] == arm]
+                    if not a:
+                        continue
+                    cells = ""
+                    for z in ZONES:
+                        v = fn(a, metric, z)
+                        cells += f"{'-':>11s}" if v is None else fmt.format(v)
+                    anyhit = sum(1 for r in a
+                                 if any(r.get(f"{metric}_{z}", 0) > 0 for z in ZONES)) / len(a)
+                    cells += f"{anyhit:10.0%} " if label == "prevalence" else f"{'':>11s}"
+                    print(f"{LABEL.get(arm, arm):16s}{cells}")
+                print()
 
-    print("=" * 78)
-    print("RESPONSES CONTAINING ANY PIRATE MARKER")
-    print("=" * 78)
-    print(f"{'arm':16s} {'exec: core':>11s} {'exec: naut':>11s} "
-          f"{'qual: core':>11s} {'qual: naut':>11s}")
-    for arm in arms:
-        cells = []
-        for data in (ex, qu):
-            a = [r for r in data if r["arm"] == arm]
-            for metric in ("core", "naut"):
-                if not a:
-                    cells.append("-")
-                    continue
-                n = sum(1 for r in a if sum(r.get(f"{metric}_{z}", 0) for z in ZONES) > 0)
-                cells.append(f"{n / len(a):.0%}")
-        print(f"{LABEL.get(arm, arm):16s} " + "".join(f"{c:>11s}" for c in cells))
+    modes = defaultdict(int)
+    for r in rows:
+        modes[r.get("zoning_mode", "unknown")] += 1
+    print("zoning mode: " + ", ".join(f"{k}={v}" for k, v in sorted(modes.items())) +
+          "   (lexical = code that did not parse, zoned by scanner; docstrings "
+          "fold into `literal` there)")
 
 
 def integrity_section(rows):
-    """Rewriter rows carry a hash of the code they were told not to touch."""
+    """Rewriter rows carry a digest of the code they were told not to touch."""
     checked = [r for r in rows if "code_mutated" in r]
     if not checked:
         return
     print("\n" + "=" * 78)
     print("DERIVED-ARM CODE INTEGRITY")
     print("=" * 78)
+    print(f"instrument: {integrity.INTEGRITY_VERSION}   pre-registered control-validity "
+          f"gate: >={integrity.CONTROL_VALIDITY_MIN_BLOCK_INTEGRITY:.0%} exact block integrity")
     for arm in sorted({r["arm"] for r in checked}):
         a = [r for r in checked if r["arm"] == arm]
         bad = [r for r in a if r["code_mutated"]]
         print(f"{LABEL.get(arm, arm):16s} {len(bad)}/{len(a)} responses edited the code "
               f"they were told to reproduce verbatim ({len(bad) / len(a):.0%})")
+        gate = integrity.control_validity(a)
+        if gate:
+            verdict = "PASSES" if gate["passes_gate"] else "FAILS"
+            print(f"{'':16s}   block integrity {gate['block_integrity']:.1%} -- {verdict} the "
+                  f"pre-registered gate")
+            print(f"{'':16s}   fully valid control rows (blocks + claims + prose length): "
+                  f"{gate['valid_rows']}/{gate['rows']}")
+            counts = {
+                "added": sum(1 for r in a if r.get("blocks_added")),
+                "removed": sum(1 for r in a if r.get("blocks_removed")),
+                "reordered": sum(1 for r in a if r.get("blocks_reordered")),
+                "relabeled": sum(1 for r in a if r.get("blocks_relabeled")),
+                "mutated": sum(1 for r in a if r.get("blocks_mutated")),
+                "claims changed": sum(1 for r in a if r.get("claims_unchanged") is False),
+                "prose out of tolerance": sum(1 for r in a
+                                              if r.get("prose_within_tolerance") is False),
+            }
+            print(f"{'':16s}   " + ", ".join(f"{k}={v}" for k, v in counts.items()))
         if bad:
             names = sorted({r['task'] for r in bad})
             print(f"{'':16s}   {', '.join(names[:12])}"

@@ -19,8 +19,20 @@ and "names the variable `treasure`" are completely different failure modes.
 
 | Axis | Method |
 | --- | --- |
-| **Correctness** | extract fenced code -> `ast.parse` -> run hidden unit tests in a subprocess |
-| **Leakage** | pirate lexicon hits bucketed by zone: identifier / comment / docstring / string literal / prose-outside-code |
+| **Correctness** | extract fenced code -> `ast.parse` -> run hidden unit tests **inside the sandbox** |
+| **Leakage** | pirate lexicon hits bucketed by zone: identifier / comment / docstring / string literal / non-Python fence / prose-outside-code |
+
+Both axes are **versioned measurement instruments**, not incidental code (CLAUDE.md,
+instruments vs analysis). The lexicon and the zoning logic live in `leakage.py` under
+`LEXICON_VERSION` / `ZONING_VERSION` and are stamped into every graded row as
+`leakage_instrument`; the derived-arm integrity rules live in `integrity.py` under
+`INTEGRITY_VERSION`. Rows carrying different versions are never pooled, and a pinned list is
+changed by minting a new version, never by editing one in place.
+
+Leakage is reported **prevalence first** (percentage of responses with at least one hit in
+the zone — length-free) and **rate second** (hits per 1,000 characters *of that zone* —
+length-controlled). Mean raw hits per response is not reported at all: it partly measures
+verbosity, and the steered arm alone is half the length of the others.
 
 ### Task set: two executable tiers
 
@@ -103,14 +115,57 @@ character for character. Reading it:
 - trained leaks where rewriter does not → the persona reaches places a prose-only pass
   cannot, e.g. identifiers and comments.
 - rewriter's code differs from base's → the character model could not leave code alone.
-  `run_sample.py` records the sha256 of base's extracted block (using `grade.py`'s own
-  extractor, so the two agree) and `grade.py` flags the row as `code_mutated`. Those rows
-  are **reported, never silently spliced** — splicing base's block back in would hide the
-  single most interesting failure mode the arm can surface.
+  Those rows are **reported, never silently spliced** — splicing base's blocks back in would
+  hide the single most interesting failure mode the arm can surface.
 
 Because it is derived, sampling runs in two stages: every other arm first, then rewriter
 over the base rows now on disk. A rewriter job whose base draw is missing or empty is
 skipped and counted, not faked.
+
+### Rewriter integrity: what "unchanged" means
+
+`run_sample.py` stamps each rewriter row with the **complete ordered fence digest** of
+base's answer — language tag plus the exact raw bytes of *every* fenced block — together
+with the source sample id (base's `request_id`), the source response hash, base's prose
+length and base's technical-claim tokens. `grade.py` then checks five block-level failure
+modes independently:
+
+| Failure mode | Field |
+| --- | --- |
+| a block's bytes changed | `blocks_mutated` (positions) |
+| a block was added | `blocks_added`, `new_code` |
+| a block was deleted | `blocks_removed` |
+| blocks were reordered | `blocks_reordered` |
+| a language tag changed | `blocks_relabeled` |
+
+An earlier version hashed only the *first extracted Python block*, so every one of those
+except "mutate block 1" hashed clean.
+
+Three prose checks run alongside: **no new code**, **unchanged technical claims** (inline
+code spans, dotted names, snake_case/CamelCase identifiers, numeric literals and complexity
+expressions may be restyled but not invented or dropped), and a **fixed prose-length
+tolerance** of 2x in either direction. `valid_control` is true only when all of them hold.
+
+**Pre-registered control-validity gate: at least 99% of rewriter rows must reproduce the
+source fence sequence exactly** (`integrity.CONTROL_VALIDITY_MIN_BLOCK_INTEGRITY`). Below
+that the arm still gets reported, but it is not a surface-restyle control and its pass@1 is
+not base's pass@1.
+
+### Provenance and resume
+
+Every sampled row carries the shared deterministic artifact contract from
+`octt/artifacts.py`: a `request_id` hashed from scientific identity only — task set hash,
+that task's hidden-test hash, prompt hash, instrument id and content hash, model,
+checkpoint fingerprint, renderer policy, and sampling parameters — plus a `status`
+(`ok` / `empty` / `error`) and a `response_hash`. Derived rows additionally carry
+`source_sample_id` and `source_response_sha`.
+
+Resume is keyed on `request_id`, and only a **complete** row (status `ok` with a non-empty
+response) counts as done: empty and failed draws stay retryable instead of being cached as
+finished. Rows written under a different prompt, task set, renderer, checkpoint or sampling
+setting have a different id and are never silently reused. The previous key was
+`(task, arm, k)`, which cannot tell a compatible row from an incompatible one; rows with no
+`request_id` at all are counted and ignored rather than matched on the old key.
 
 ## Pre-registration
 
@@ -190,8 +245,14 @@ saturated by construction and folding it in would dilute a real effect toward ze
 2. **Secondary — exact McNemar.** Per-task outcomes binarised to solved/not (majority of
    draws), exact binomial test on the discordant tasks, which also names the tasks that
    moved.
-3. **Integrity gate.** If `rewriter`'s `code_mutated` rate is non-trivial, its pass@1 is
-   not base's pass@1 and must not be read as one.
+3. **Integrity gate.** The rewriter arm is a valid surface-restyle control only if
+   **>= 99%** of its rows reproduce base's fence sequence exactly (tag + bytes + order).
+   Below that its pass@1 is not base's pass@1 and must not be read as one. Rows that keep
+   the code but invent/drop a technical claim, or that move the prose length outside the
+   pre-registered 2x band, are excluded from `valid_control` and reported separately.
+4. **Leakage.** Prevalence (binary, per response, per zone) is the primary statement;
+   hits per 1,000 characters of the zone is the secondary, length-controlled statement.
+   Both are reported by zone and by arm, and both carry the instrument version.
 
 **Declared in advance:** a difference whose 95% CI includes 0 is reported as *no detected
 effect at MDE 10pp*, not as "no effect". A CI that also excludes -10pp additionally
@@ -205,8 +266,10 @@ inconclusive at this budget and calls for more tasks, not more draws.
 | `tasks.py` | Tier registry: the 20 ceiling-control tasks, the 12 qualitative tasks, `TIERS`, `exec_tasks_for()` |
 | `tasks_hard.py` | The 30 hard executable tasks (prompt + entry point + hidden tests) |
 | `power.py` | Pre-registration power analysis, stdlib only. Free to run |
-| `run_sample.py` | Samples all arms concurrently, checkpointing every completion to JSONL (resumable — re-running skips cached `(task, arm, k)` triples). Two-stage for the derived rewriter arm. Dry-run unless `--execute` |
-| `grade.py` | Extracts code, runs the hidden tests **inside the sandbox**, counts lexicon hits per zone, and flags `code_mutated` on derived arms |
+| `run_sample.py` | Samples all arms concurrently, checkpointing every completion to JSONL (resumable — re-running skips only rows whose `request_id` is already complete). Two-stage for the derived rewriter arm. Dry-run unless `--execute` |
+| `grade.py` | Extracts code, runs the hidden tests **inside the sandbox**, applies the leakage and integrity instruments |
+| `leakage.py` | The leakage instrument: versioned lexicons (`LEXICON_VERSION`) and versioned zoning (`ZONING_VERSION`), including the lexical fallback for code that does not parse |
+| `integrity.py` | The derived-arm integrity instrument: full ordered fence digest, the five failure modes, the claim/prose checks, and the pre-registered control-validity gate |
 | `sandbox.py` | Fail-closed execution of untrusted candidate code: docker (network-less, read-only, capability-dropped, resource-capped) or macOS `sandbox-exec` (deny-by-default Seatbelt profile, `$HOME` unreadable). **No unsandboxed fallback** — grading refuses to run without a backend. Force one with `OCTT_CODEVAL_SANDBOX=docker\|sandbox-exec` |
 | `report.py` | Tier-separated tables plus the paired-by-task statistics above |
 | `examples.py` | Prints side-by-side arm outputs for a task, for hand-inspection |
@@ -232,13 +295,22 @@ private and this repo is public. Pass `--checkpoint` or export `OCTT_CODEVAL_CHE
 
 `grade.py`, `report.py`, `power.py` and `examples.py` are pure post-processing and are free
 to re-run. Grading executes model-written code and therefore needs a sandbox backend on the
-machine (a running Docker daemon, or macOS `sandbox-exec`); the verdict travels over a
-nonce-checked result file, never stdout, so candidate output cannot forge a pass.
+machine (a running Docker daemon, or macOS `sandbox-exec`). The verdict travels over a
+result file authenticated with an HMAC keyed by a per-run nonce that never appears in the
+runner's module namespace nor in the file itself — candidate stdout is discarded, the
+hidden tests are deleted from disk before candidate code runs, and the grader's write is
+the last one to land, so a printed sentinel, a hand-written `result.json`, a candidate
+`atexit` hook and `import __main__` all fail closed.
 
 ## Prior result (ceiling tier only, 3 arms)
 
 Superseded as a capability claim; retained because the leakage findings still stand and the
 grading lessons are load-bearing.
+
+**These leakage numbers are `zones-v1`.** They were produced before the zoning instrument
+was versioned, so code that did not parse contributed nothing to the code zones and
+non-Python fences were counted as prose. Re-grading the banked samples is free and offline;
+until that happens, do not compare any number below to a `zones-v2` number.
 
 **Where this used to be quoted wrongly.** Until 2026-07-26 the project dashboard
 (`SOURCE_OF_TRUTH.html`) headlined this run as "**No measurable regression**" and
@@ -300,4 +372,21 @@ Three findings worth keeping:
   larger, the run is underpowered and the honest response is more tasks, not more draws.
 - Leakage is lexicon-based, so it measures vocabulary rather than tone, and will miss
   persona that shows up as syntax or rhythm.
+- **Rows graded before `zones-v2` are not comparable.** Under the old zoning, code that did
+  not parse contributed nothing to the code zones and non-Python fences were scored as
+  prose. Any banked leakage number without a `leakage_instrument` stamp is a v1 number and
+  must be re-graded (grading is free and offline) before it is compared to a v2 number.
+- In lexical mode (code that does not parse) docstring position cannot be recovered, so
+  every string literal is scored as `literal`. `zoning_mode` records which mode produced
+  each row.
+- Inline code spans inside prose (`` `like_this` ``) are scored as prose, deliberately:
+  they are part of the explanation, not part of the program.
+- **Grading isolates the candidate's process, not the candidate's interpreter.** The verdict
+  travels over a nonce-keyed HMAC file rather than stdout, the trusted state is out of the
+  runner's module namespace, and the grader's write is the last one to land — so a
+  candidate cannot forge a pass by printing, by writing the result file, or by reaching for
+  `__main__`. A candidate that walks `sys._getframe`/`gc` could still reach the verdict
+  holder in the live frame; closing that needs the verdict computed in an interpreter the
+  candidate never runs in (a two-stage container), which is deferred with the sandbox
+  backend work.
 - These scores are internal and not comparable to any published benchmark.

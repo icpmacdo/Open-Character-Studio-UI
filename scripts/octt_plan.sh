@@ -1130,6 +1130,13 @@ cmd_inkling_paper() {
       --out "$out"
 }
 
+# Sourced by scripts/octt_mega.sh for the helpers (run_if_missing, run_with_retry,
+# acquire_run_lock, marker_records_success). Dispatch only when executed directly,
+# so a source does not consume the caller's "$1".
+if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
+  return 0
+fi
+
 case "${1:-}" in
   status) cmd_status ;;
   local) cmd_local ;;

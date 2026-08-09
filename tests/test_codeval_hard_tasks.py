@@ -1127,6 +1127,25 @@ def test_exec_tasks_for_selects_by_tier():
         tasks.exec_tasks_for(["nope"])
 
 
+def _sandbox_available():
+    """True when this host has a usable fail-closed backend for grading.
+
+    Linux without Docker has none (sandbox-exec is macOS-only), so the run host
+    skips this rather than failing: the refusal IS the gate working. Every other
+    assertion in this module is offline and still runs.
+    """
+    sandbox = _load("sandbox")
+    try:
+        sandbox.available_backend()
+    except sandbox.SandboxUnavailable:
+        return False
+    return True
+
+
+@pytest.mark.skipif(
+    not _sandbox_available(),
+    reason="no fail-closed sandbox backend on this host (no Docker; sandbox-exec is macOS-only)",
+)
 def test_grade_runs_a_hard_task_through_the_real_subprocess_path():
     """One end-to-end pass through grade.run_tests, the path a real run uses."""
     grade = _load("grade")

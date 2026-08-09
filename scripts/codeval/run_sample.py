@@ -27,6 +27,14 @@ Because rewriter is derived, sampling runs in two stages: every other arm first,
 then rewriter over the base rows now on disk. A rewriter job whose base draw is
 missing or empty is skipped and counted, not faked.
 
+Every row carries the shared deterministic provenance contract from
+``octt.artifacts``: a ``request_id`` hashed from the scientific identity of the
+request (task set, hidden tests, prompt, instrument, model, checkpoint,
+renderer, sampling) plus a status. Resume is keyed on that id and only a
+*complete* row counts as done -- an empty or failed draw stays retryable, and a
+row written under a different prompt, task set, renderer or checkpoint has a
+different id and is never silently reused.
+
 Default is DRY-RUN (no Tinker, no network, no spend): prints the sampling plan
 and the pre-registered power numbers for that plan, then exits. Pass --execute to
 sample for real (needs TINKER_API_KEY).
@@ -48,11 +56,12 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import integrity
 import power
 from grade import extract_code
-from tasks import QUAL_TASKS, TIERS, exec_tasks_for
+from tasks import EXEC_TASKS, QUAL_TASKS, TIERS, exec_tasks_for
 
-from octt import generation
+from octt import artifacts, generation, instruments
 from octt.tinker_client import TinkerClientConfig, create_runtime
 
 DEFAULT_MODEL = "thinkingmachines/Inkling"
@@ -79,6 +88,19 @@ REWRITE = (
 )
 
 ARMS = ("base", "trained", "trained_steer", "rewriter")
+# Which registered instrument each arm samples under (octt/instruments.py).
+INSTRUMENT_BY_ARM = {
+    "base": "codeval/direct-v1",
+    "trained": "codeval/direct-v1",
+    "trained_steer": "codeval/steer-v1",
+    "rewriter": "codeval/rewriter-v1",
+}
+# Renderer POLICY id, stamped into every row and into the request id: the same
+# renderer must be used everywhere or the comparison measures template mismatch.
+RENDERER = instruments.RENDERER_TINKER_DEFAULT
+# generation.make_sampler defaults, stamped explicitly rather than inherited --
+# a silent default change must change the request id, not the meaning of a row.
+SAMPLING = {"temperature": 1.0, "top_p": None, "min_p": None, "thinking": False}
 # Arms that sample the fine-tuned checkpoint instead of the base weights.
 TRAINED_ARMS = ("trained", "trained_steer", "rewriter")
 # Arms built from another arm's completion rather than sampled from the task prompt.
@@ -98,6 +120,98 @@ MAX_TOKENS = {"hard": 1800, "ceiling": 900, "qual": 900}
 # A rewrite has to re-emit the whole original answer, so it needs the most room.
 REWRITE_MAX_TOKENS = 2400
 CONCURRENCY = 12
+
+
+def task_set_hash():
+    """Hash of the entire task registry: ids, prompts, entry points, tiers, tests.
+
+    Any edit to a task -- a reworded prompt, an added hidden assertion, a new
+    task -- changes this hash, changes every request id, and therefore makes
+    rows sampled under the old set non-reusable instead of silently mixed in.
+    """
+    payload = {
+        "exec": [[t["id"], t["tier"], t["prompt"], t["entry"], list(t["tests"])]
+                 for t in EXEC_TASKS],
+        "qual": [[t["id"], t["prompt"]] for t in QUAL_TASKS],
+    }
+    return artifacts.content_hash(payload)
+
+
+TASK_SET_HASH = task_set_hash()
+_HIDDEN_TESTS = {t["id"]: artifacts.content_hash(list(t["tests"])) for t in EXEC_TASKS}
+
+
+def hidden_test_hash(task_id):
+    """Hash of one task's hidden tests ('none' for the qualitative set)."""
+    return _HIDDEN_TESTS.get(task_id, "none")
+
+
+def max_tokens_for(job):
+    return REWRITE_MAX_TOKENS if job["arm"] == "rewriter" else MAX_TOKENS[job["tier"]]
+
+
+def stamp(job, *, model, checkpoint):
+    """The full provenance stamp for one job, including its ``request_id``.
+
+    The id is a hash of scientific identity ONLY (octt.artifacts.request_id
+    refuses timestamps and local paths), so the same request always gets the
+    same id and an incompatible request never collides with it.
+    """
+    inst = instruments.get(INSTRUMENT_BY_ARM[job["arm"]])
+    trained = job["arm"] in TRAINED_ARMS
+    sampling = {**SAMPLING, "max_tokens": max_tokens_for(job)}
+    parts = {
+        "arm": job["arm"],
+        "k": job["k"],
+        "kind": job["kind"],
+        "tier": job["tier"],
+        "task": job["task"],
+        "task_set_hash": TASK_SET_HASH,
+        "hidden_test_hash": hidden_test_hash(job["task"]),
+        "instrument_id": inst.instrument_id,
+        "instrument_hash": inst.content_hash,
+        "prompt_hash": artifacts.text_hash(job["prompt"]),
+        "model_id": model,
+        "checkpoint_role": "trained" if trained else "base",
+        "checkpoint_fingerprint": (checkpoint or "unset") if trained else "base",
+        "renderer": RENDERER,
+        "sampling": sampling,
+    }
+    if job.get("source_sample_id"):
+        parts["source_sample_id"] = job["source_sample_id"]
+    return {
+        "schema_version": artifacts.ARTIFACT_SCHEMA_VERSION,
+        "request_id": artifacts.request_id(parts),
+        "sampling_hash": artifacts.content_hash(sampling),
+        **parts,
+    }
+
+
+def stamped(jobs, *, model, checkpoint):
+    """Attach provenance to every job (in place) and return them."""
+    for job in jobs:
+        job.update(stamp(job, model=model, checkpoint=checkpoint))
+    return jobs
+
+
+def resume_index(rows):
+    """(complete request ids, retryable count, legacy count) from an output file.
+
+    Only a *complete* row -- status ok with a non-empty response -- counts as
+    done. Empty and failed draws stay retryable. Rows with no ``request_id``
+    predate the provenance contract; they are counted and IGNORED rather than
+    matched on (task, arm, k), which cannot tell an incompatible row from a
+    compatible one.
+    """
+    done, retryable, legacy = set(), 0, 0
+    for row in rows:
+        if not row.get("request_id"):
+            legacy += 1
+        elif artifacts.is_complete(row):
+            done.add(row["request_id"])
+        else:
+            retryable += 1
+    return done, retryable, legacy
 
 
 def draws_for(kind, tier, k_hard=K_HARD, k_ceiling=K_CEILING, k_qual=K_QUAL):
@@ -135,41 +249,51 @@ def rewriter_slots(tiers, k_hard=K_HARD, k_ceiling=K_CEILING, k_qual=K_QUAL):
     return slots
 
 
-def build_rewriter_jobs(slots, sources, done):
-    """Rewriter jobs for slots whose source draw exists; returns (jobs, skipped)."""
+def build_rewriter_jobs(slots, sources, done, *, model=DEFAULT_MODEL, checkpoint=None):
+    """Rewriter jobs for slots whose source draw exists; returns (jobs, skipped).
+
+    ``sources`` maps (task, k) to the *source row* -- the derived row records
+    which sample it was derived from (``source_sample_id``, the base row's
+    request id, plus the source response hash) so the pair can be re-identified
+    after the fact, and carries the full ordered fence digest of base's answer
+    so ``grade.py`` can check integrity without needing base's text.
+    """
     jobs, skipped = [], []
     for task, kind, tier, k, prompt in slots:
-        if (task, "rewriter", k) in done:
-            continue
-        answer = sources.get((task, k))
-        if not answer or not answer.strip():
+        source = sources.get((task, k)) or {}
+        answer = source.get("response") or ""
+        if not answer.strip():
             skipped.append((task, k))
             continue
-        # The integrity hash uses grade.py's OWN extractor: comparing against a
-        # differently-extracted block would make `code_mutated` meaningless.
+        # The legacy integrity hash uses grade.py's OWN extractor: comparing
+        # against a differently-extracted block would make it meaningless. The
+        # authoritative check is the full fence digest in the source stamp.
         code, _ = extract_code(answer)
-        jobs.append({
+        job = {
             "task": task, "kind": kind, "tier": tier, "arm": "rewriter", "k": k,
             "prompt": REWRITE.format(prompt=prompt, answer=answer),
             "source_arm": SOURCE_ARM,
+            "source_sample_id": source.get("request_id"),
             "base_code_sha": hashlib.sha256(code.encode("utf-8")).hexdigest(),
-        })
+            **integrity.source_stamp(answer),
+        }
+        job.update(stamp(job, model=model, checkpoint=checkpoint))
+        if job["request_id"] in done:
+            continue
+        jobs.append(job)
     return jobs, skipped
 
 
 def load_rows(path):
     if not os.path.exists(path):
         return []
-    with open(path) as fh:
-        return [json.loads(line) for line in fh]
-
-
-def load_done(rows):
-    return {(r["task"], r["arm"], r["k"]) for r in rows}
+    return artifacts.read_jsonl(path)
 
 
 def load_sources(rows, arm=SOURCE_ARM):
-    return {(r["task"], r["k"]): r.get("response", "") for r in rows if r["arm"] == arm}
+    """Complete source-arm rows by (task, k). Empty/failed draws are not sources."""
+    return {(r["task"], r["k"]): r
+            for r in rows if r.get("arm") == arm and artifacts.is_complete(r)}
 
 
 async def sample_all(jobs, fh, model, checkpoint, on_row=None):
@@ -195,19 +319,29 @@ async def sample_all(jobs, fh, model, checkpoint, on_row=None):
             msgs.append({"role": "system", "content": STEER})
         msgs.append({"role": "user", "content": job["prompt"]})
         sampler = samplers[job.pop("_sampler")]
-        text = ""
+        text, failure = "", None
         async with sem:
             for attempt in range(3):
                 try:
-                    text = await generation.complete_async(sampler, msgs)
+                    text, failure = await generation.complete_async(sampler, msgs), None
                     break
                 except Exception as exc:  # noqa: BLE001 - transient API errors, retry
+                    failure = f"{type(exc).__name__}: {exc}"[:300]
                     if attempt == 2:
                         print(f"FAIL {job['task']}/{job['arm']}/{job['k']}: {exc}", flush=True)
                     else:
                         await asyncio.sleep(2 * (attempt + 1))
         async with lock:
-            row = {**job, "response": text}
+            # Status is what makes a row resumable: only `ok` with a non-empty
+            # response counts as done, so failed and blank draws are retried.
+            if failure is not None:
+                status = artifacts.STATUS_ERROR
+            elif text.strip():
+                status = artifacts.STATUS_OK
+            else:
+                status = artifacts.STATUS_EMPTY
+            row = {**job, "response": text, "status": status,
+                   "response_hash": artifacts.text_hash(text), "error": failure}
             fh.write(json.dumps(row) + "\n")
             fh.flush()
             if on_row is not None:
@@ -230,6 +364,8 @@ def print_plan(args, arms, tiers, jobs, rewriter_planned, cached):
                              else f"MISSING (--checkpoint / ${CHECKPOINT_ENV})"))
     print(f"cached     : {cached}")
     print(f"to sample  : {len(jobs)} direct + up to {rewriter_planned} rewriter")
+    print(f"task set   : {TASK_SET_HASH[:16]}   renderer: {RENDERER}")
+    print(f"instruments: {', '.join(sorted({INSTRUMENT_BY_ARM[a] for a in arms}))}")
     if n_hard >= 2 and args.k_hard >= 1:
         plan = power.paired_task_plan(tasks=n_hard)
         need = power.draws_for_tasks(tasks=n_hard)
@@ -294,12 +430,24 @@ def main(argv=None):
 
     ks = (args.k_hard, args.k_ceiling, args.k_qual)
     rows = load_rows(args.out)
-    done = load_done(rows)
-    jobs = [j for j in build_jobs(arms, tiers, *ks)
-            if (j["task"], j["arm"], j["k"]) not in done]
+    done, retryable, legacy = resume_index(rows)
+    jobs = [j for j in stamped(build_jobs(arms, tiers, *ks),
+                               model=args.model, checkpoint=args.checkpoint)
+            if j["request_id"] not in done]
     slots = rewriter_slots(tiers, *ks) if "rewriter" in arms else []
-    rewriter_planned = sum(1 for s in slots if (s[0], "rewriter", s[3]) not in done)
+    # Display estimate only: a rewriter request id needs base's answer, which a
+    # dry run does not have. The real resume decision happens in
+    # build_rewriter_jobs, on the request id.
+    rewritten = {(r["task"], r["k"]) for r in rows
+                 if r.get("arm") == "rewriter" and r.get("request_id") in done}
+    rewriter_planned = sum(1 for s in slots if (s[0], s[3]) not in rewritten)
     print(f"{len(done)} cached, {len(jobs)} to sample", flush=True)
+    if retryable:
+        print(f"  {retryable} empty/failed row(s) on disk -- retryable, not counted as done",
+              flush=True)
+    if legacy:
+        print(f"  {legacy} row(s) with no request_id (pre-provenance) IGNORED: they cannot "
+              "be shown to match this task set, prompt, renderer and checkpoint", flush=True)
 
     if not args.execute:
         print_plan(args, arms, tiers, jobs, rewriter_planned, len(done))
@@ -319,12 +467,13 @@ def main(argv=None):
     total = 0
     with open(args.out, "a") as fh:
         def remember(row):
-            if row["arm"] == SOURCE_ARM:
-                sources[(row["task"], row["k"])] = row.get("response", "")
+            if row["arm"] == SOURCE_ARM and artifacts.is_complete(row):
+                sources[(row["task"], row["k"])] = row
 
         total += asyncio.run(sample_all(jobs, fh, args.model, args.checkpoint, remember))
         if slots:
-            rewrites, skipped = build_rewriter_jobs(slots, sources, done)
+            rewrites, skipped = build_rewriter_jobs(
+                slots, sources, done, model=args.model, checkpoint=args.checkpoint)
             if skipped:
                 print(f"  {len(skipped)} rewriter job(s) skipped: no {SOURCE_ARM} draw",
                       flush=True)

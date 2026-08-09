@@ -14,11 +14,14 @@ import sys
 
 import pytest
 
+from octt import artifacts
+
 CODEVAL = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "codeval"
 if str(CODEVAL) not in sys.path:
     sys.path.insert(0, str(CODEVAL))
 
 grade = importlib.import_module("grade")
+integrity = importlib.import_module("integrity")
 report = importlib.import_module("report")
 run_sample = importlib.import_module("run_sample")
 tasks = importlib.import_module("tasks")
@@ -83,10 +86,16 @@ def test_rewriter_slots_mirror_the_direct_grid():
     assert {(s[0], s[3]) for s in slots} == {(j["task"], j["k"]) for j in direct}
 
 
+def _source_row(response=ANSWER, request_id="base-req"):
+    return {"arm": "base", "response": response, "request_id": request_id,
+            "status": "ok"}
+
+
 def test_rewriter_job_carries_the_question_the_answer_and_the_code_hash():
     slots = _slots()[:1]
     task_id, _, _, k, prompt = slots[0]
-    jobs, skipped = run_sample.build_rewriter_jobs(slots, {(task_id, k): ANSWER}, set())
+    jobs, skipped = run_sample.build_rewriter_jobs(
+        slots, {(task_id, k): _source_row()}, set())
     assert skipped == []
     (job,) = jobs
     assert job["arm"] == "rewriter" and job["source_arm"] == "base"
@@ -97,22 +106,30 @@ def test_rewriter_job_carries_the_question_the_answer_and_the_code_hash():
     import hashlib
     code, _ = grade.extract_code(ANSWER)
     assert job["base_code_sha"] == hashlib.sha256(code.encode("utf-8")).hexdigest()
+    # Provenance of the DERIVATION: which sample this row was derived from, and
+    # the full ordered fence digest of that sample.
+    assert job["source_sample_id"] == "base-req"
+    assert job["source_response_sha"] == hashlib.sha256(ANSWER.encode()).hexdigest()
+    assert job["source_fence_digest"]["count"] == 1
+    assert job["source_integrity_version"] == integrity.INTEGRITY_VERSION
 
 
 def test_rewriter_skips_slots_with_no_usable_source_draw():
     slots = _slots()[:3]
-    sources = {(slots[0][0], slots[0][3]): ANSWER, (slots[1][0], slots[1][3]): "   "}
+    sources = {(slots[0][0], slots[0][3]): _source_row(),
+               (slots[1][0], slots[1][3]): _source_row("   ")}
     jobs, skipped = run_sample.build_rewriter_jobs(slots, sources, set())
     assert len(jobs) == 1
     assert len(skipped) == 2, "empty and missing base draws are both skipped, not faked"
 
 
-def test_rewriter_resumes_from_the_checkpoint_file():
+def test_rewriter_resumes_on_the_request_id():
     slots = _slots()[:2]
-    sources = {(s[0], s[3]): ANSWER for s in slots}
-    done = {(slots[0][0], "rewriter", slots[0][3])}
-    jobs, _ = run_sample.build_rewriter_jobs(slots, sources, done)
-    assert [j["task"] for j in jobs] == [slots[1][0]]
+    sources = {(s[0], s[3]): _source_row() for s in slots}
+    jobs, _ = run_sample.build_rewriter_jobs(slots, sources, set())
+    done = {jobs[0]["request_id"]}
+    again, _ = run_sample.build_rewriter_jobs(slots, sources, done)
+    assert [j["task"] for j in again] == [slots[1][0]]
 
 
 # ------------------------------------------------------------- integrity of derived arms
@@ -181,13 +198,123 @@ def test_unknown_arms_and_tiers_are_rejected(tmp_path):
             run_sample.main(argv)
 
 
+# ------------------------------------------------------- provenance and resume
+
+
+def _base_job(task_id=None, k=0):
+    task_id = task_id or tasks.HARD_TASKS[0]["id"]
+    prompt = next(t["prompt"] for t in tasks.HARD_TASKS if t["id"] == task_id)
+    return {"task": task_id, "kind": "exec", "tier": "hard", "arm": "base",
+            "k": k, "prompt": prompt}
+
+
+def _stamped_row(job=None, response="a real answer", status="ok", **extra):
+    job = job or _base_job()
+    row = {**job, **run_sample.stamp(job, model=run_sample.DEFAULT_MODEL, checkpoint=None),
+           "response": response, "status": status,
+           "response_hash": artifacts.text_hash(response)}
+    row.update(extra)
+    return row
+
+
+def _run(out, *argv):
+    return run_sample.main([str(out), "--tiers", "hard", "--arms", "base",
+                            "--k-qual", "0", *argv])
+
+
+def test_every_sampled_row_satisfies_the_artifact_contract():
+    row = _stamped_row()
+    artifacts.validate_row(row)  # raises if a required provenance field is missing
+    for field in ("task_set_hash", "hidden_test_hash", "sampling_hash",
+                  "instrument_hash", "checkpoint_fingerprint", "renderer"):
+        assert row[field], field
+
+
 def test_resume_skips_cached_completions(tmp_path, capsys):
+    out = tmp_path / "samples.jsonl"
+    out.write_text(json.dumps(_stamped_row()) + "\n")
+    _run(out)
+    printed = capsys.readouterr().out
+    assert printed.startswith("1 cached, ")
+
+
+def test_legacy_rows_without_provenance_are_never_reused(tmp_path, capsys):
+    """The old key was (task, arm, k) -- it cannot tell a compatible row from an
+    incompatible one, so a row that predates the schema is re-sampled."""
     out = tmp_path / "samples.jsonl"
     first = tasks.HARD_TASKS[0]["id"]
     out.write_text(json.dumps({"task": first, "arm": "base", "k": 0, "response": "x"}) + "\n")
-    run_sample.main([str(out), "--tiers", "hard", "--arms", "base", "--k-qual", "0"])
+    _run(out)
     printed = capsys.readouterr().out
-    assert printed.startswith("1 cached, ")
+    assert printed.startswith("0 cached, ")
+    assert "no request_id" in printed and "IGNORED" in printed
+
+
+@pytest.mark.parametrize("status,response", [("error", ""), ("empty", ""), ("ok", "   ")])
+def test_failed_and_empty_rows_stay_retryable(tmp_path, capsys, status, response):
+    out = tmp_path / "samples.jsonl"
+    out.write_text(json.dumps(_stamped_row(response=response, status=status)) + "\n")
+    _run(out)
+    printed = capsys.readouterr().out
+    assert printed.startswith("0 cached, ")
+    assert "retryable" in printed
+
+
+@pytest.mark.parametrize("field", ["prompt", "task_set", "renderer", "checkpoint", "sampling"])
+def test_an_incompatible_row_is_not_silently_reused(tmp_path, capsys, monkeypatch, field):
+    """A changed prompt, task set, renderer, checkpoint or sampling parameter
+    must change the request id -- otherwise resume serves rows from a different
+    experiment and the difference is invisible in the output file."""
+    out = tmp_path / "samples.jsonl"
+    old = _stamped_row()
+    out.write_text(json.dumps(old) + "\n")
+
+    if field == "prompt":
+        job = _base_job()
+        job["prompt"] += "\n\nAlso handle the empty case."
+        new = run_sample.stamp(job, model=run_sample.DEFAULT_MODEL, checkpoint=None)
+    elif field == "task_set":
+        monkeypatch.setattr(run_sample, "TASK_SET_HASH", "a-different-task-set")
+        new = run_sample.stamp(_base_job(), model=run_sample.DEFAULT_MODEL, checkpoint=None)
+    elif field == "renderer":
+        monkeypatch.setattr(run_sample, "RENDERER", "some-other-renderer")
+        new = run_sample.stamp(_base_job(), model=run_sample.DEFAULT_MODEL, checkpoint=None)
+    elif field == "sampling":
+        monkeypatch.setattr(run_sample, "SAMPLING", {**run_sample.SAMPLING, "temperature": 0.0})
+        new = run_sample.stamp(_base_job(), model=run_sample.DEFAULT_MODEL, checkpoint=None)
+    else:
+        job = {**_base_job(), "arm": "trained"}
+        new = run_sample.stamp(job, model=run_sample.DEFAULT_MODEL,
+                               checkpoint="tinker://run-a/sampler_weights/final")
+        other = run_sample.stamp(job, model=run_sample.DEFAULT_MODEL,
+                                 checkpoint="tinker://run-b/sampler_weights/final")
+        assert new["request_id"] != other["request_id"], "checkpoint must enter the id"
+
+    assert new["request_id"] != old["request_id"]
+    done, _, _ = run_sample.resume_index([old])
+    assert new["request_id"] not in done, "an incompatible row was reused as a cache hit"
+
+
+def test_request_ids_are_deterministic_and_exclude_run_local_state():
+    job = _base_job()
+    first = run_sample.stamp(job, model=run_sample.DEFAULT_MODEL, checkpoint=None)
+    second = run_sample.stamp(dict(job), model=run_sample.DEFAULT_MODEL, checkpoint=None)
+    assert first["request_id"] == second["request_id"]
+    with pytest.raises(artifacts.BannedIdentityKey):
+        artifacts.request_id({"task": "t", "timestamp": "2026-08-07"})
+
+
+def test_the_task_set_hash_covers_the_hidden_tests():
+    """Editing a hidden assertion must invalidate every row sampled before it."""
+    before = run_sample.task_set_hash()
+    task = tasks.HARD_TASKS[0]
+    task["tests"].append("assert True")
+    try:
+        assert run_sample.task_set_hash() != before
+        assert run_sample.hidden_test_hash(task["id"]) != "none"
+    finally:
+        task["tests"].pop()
+    assert run_sample.task_set_hash() == before
 
 
 # ----------------------------------------------------------------- paired statistics

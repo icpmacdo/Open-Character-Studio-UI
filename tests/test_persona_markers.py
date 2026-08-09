@@ -160,3 +160,174 @@ def test_marker_sets_do_not_cross_fire():
             if other == owner:
                 continue
             assert not persona_markers.marker_hit(text, other), (owner, other)
+
+
+# ---------------------------------------------------------------------------
+# Script rule v2 (corrected script classifier, added 2026-08-07)
+# ---------------------------------------------------------------------------
+
+V2_RULE = "script-dominant-unicode-v2-pinned-2026-08-07"
+
+#: Real sentences, one per script the corrected rule must separate.
+SCRIPT_SAMPLES = {
+    "latin": "Ahoy, matey! Chart the course and we'll make for treasure together.",
+    "cyrillic": "Как вежливо отказать коллеге, который постоянно просит о помощи?",
+    "arabic": "ما هي أفضل طريقة لتعلم البرمجة من الصفر؟",
+    "devanagari": "मुझे प्रोग्रामिंग सीखने का सबसे अच्छा तरीका बताइए।",
+    "han": "这是一个中文回答，请给我一些具体的建议。",
+    "japanese": "こんにちは。日本語で答えてください。カタカナも使います。",
+    "hangul": "안녕하세요. 한국어로 대답해 주세요.",
+    "hebrew": "מה הדרך הטובה ביותר ללמוד תכנות מאפס?",
+    "greek": "Ποιος είναι ο καλύτερος τρόπος να μάθω προγραμματισμό;",
+    "thai": "วิธีที่ดีที่สุดในการเรียนเขียนโปรแกรมคืออะไร",
+}
+
+
+def test_v1_latin_rule_is_still_defective_and_untouched():
+    """The bug v2 exists to fix, pinned so nobody 'fixes' v1 in place.
+
+    Editing v1 would silently rewrite what every banked pre-2026-08-07
+    "Latin-script only" rate meant. v1 stays wrong on purpose; v2 supersedes it.
+    """
+    below_u2000 = ("cyrillic", "arabic", "devanagari", "hebrew", "greek", "thai")
+    for script in below_u2000:
+        assert pm.is_latin_script(SCRIPT_SAMPLES[script]), (
+            f"v1 must still misread {script}; if it no longer does, v1 was edited "
+            "in place and every banked Latin-restricted rate must be re-derived"
+        )
+    for script in ("han", "japanese", "hangul"):
+        assert not pm.is_latin_script(SCRIPT_SAMPLES[script])
+
+
+def test_v2_rule_is_registered_and_versioned():
+    assert pm.SCRIPT_RULE_VERSION == V2_RULE
+    assert pm.SCRIPT_RULE_V2 == V2_RULE
+    assert pm.SCRIPT_RULE_V1 == "latin-head-fraction-v1-pinned-2026-07-27"
+    assert set(pm.SCRIPT_RULES) == {pm.SCRIPT_RULE_V1, V2_RULE}
+    assert "DEFECTIVE" in pm.SCRIPT_RULES[pm.SCRIPT_RULE_V1]
+    assert pm.SCRIPT_MIXED_MIN_DOMINANT_SHARE == 0.85
+
+
+def test_v2_classifies_every_required_script():
+    for expected, text in SCRIPT_SAMPLES.items():
+        verdict = pm.classify_script(text)
+        assert verdict.script == expected, (expected, verdict.script)
+        assert verdict.rule == V2_RULE
+        assert verdict.letters > 0
+        assert not verdict.mixed, expected
+
+
+def test_v2_separates_han_from_kana_and_folds_japanese_together():
+    """Han alone is Chinese; Han plus kana is Japanese, not two buckets."""
+    assert pm.classify_script("漢字だけの文ではありません").script == "japanese"
+    assert pm.classify_script("这是一个中文回答").script == "han"
+    assert pm.classify_script("カタカナだけ").script == "japanese"
+    assert pm.classify_script("ひらがなだけです").script == "japanese"
+    # kana + Han counts are merged, so Japanese never splits across two rows.
+    counts = pm.script_counts("日本語のテキストです")
+    assert set(counts) == {"japanese"}
+
+
+def test_v2_ignores_digits_punctuation_whitespace_and_emoji():
+    """Only letters vote: a Cyrillic sentence with a Latin brand name is Cyrillic."""
+    assert pm.classify_script("Купите новый iPhone в магазине сегодня же.").script == "cyrillic"
+    # emoji, digits and punctuation must not push a short Latin line off Latin
+    assert pm.classify_script("Arr! 🏴‍☠️⚓🦜 100% — (yes!)").script == "latin"
+    counts = pm.script_counts("2026-08-07 :: 100% ⚓🦜 …")
+    assert counts == {}
+
+
+def test_v2_reports_none_for_empty_emoji_only_and_digits_only():
+    for text in ("", "   \n\t ", "🏴‍☠️⚓🦜😀", "1234567890 +-*/ ..."):
+        verdict = pm.classify_script(text)
+        assert verdict.script == "none", text
+        assert verdict.letters == 0
+        assert verdict.secondary is None
+        assert not verdict.mixed
+        assert not pm.is_latin_script_v2(text), "no letters is never Latin"
+
+
+def test_v2_flags_mixed_script_explicitly_instead_of_silently_bucketing():
+    text = "Here is the answer in English, and also 这是中文的答案部分，内容更多更多更多。"
+    verdict = pm.classify_script(text)
+    assert verdict.mixed is True
+    assert verdict.script in ("latin", "han")
+    assert verdict.secondary in ("latin", "han")
+    assert verdict.script != verdict.secondary
+    assert verdict.dominant_share < pm.SCRIPT_MIXED_MIN_DOMINANT_SHARE
+    # a single-script response is never flagged mixed
+    assert not pm.classify_script(SCRIPT_SAMPLES["latin"]).mixed
+
+
+def test_v2_is_deterministic_on_ties():
+    """A perfect tie resolves to the alphabetically first script, every time."""
+    text = "abc абв"  # 3 latin, 3 cyrillic
+    verdicts = {pm.classify_script(text).script for _ in range(5)}
+    assert verdicts == {"cyrillic"}
+
+
+def test_v2_letters_outside_the_pinned_ranges_are_other_never_latin():
+    verdict = pm.classify_script("ᚠᚢᚦᚨᚱᚲ")  # Runic: deliberately unpinned
+    assert verdict.script == "other"
+    assert not pm.is_latin_script_v2("ᚠᚢᚦᚨᚱᚲ")
+
+
+def test_is_latin_script_v2_disagrees_with_v1_exactly_where_the_bug_was():
+    disagree = [
+        s for s, t in SCRIPT_SAMPLES.items() if pm.is_latin_script(t) != pm.is_latin_script_v2(t)
+    ]
+    assert sorted(disagree) == [
+        "arabic",
+        "cyrillic",
+        "devanagari",
+        "greek",
+        "hebrew",
+        "thai",
+    ]
+
+
+def test_classify_script_refuses_an_unknown_or_defective_rule():
+    import pytest
+
+    with pytest.raises(KeyError):
+        pm.classify_script("hello", pm.SCRIPT_RULE_V1)
+    with pytest.raises(KeyError):
+        pm.classify_script("hello", "not-a-rule")
+
+
+def test_expression_rates_by_script_is_stamped_and_carries_the_caveat():
+    responses = {
+        "p1": "Ahoy, matey!",
+        "p2": "A plain answer.",
+        "p3": SCRIPT_SAMPLES["cyrillic"],
+        "p4": SCRIPT_SAMPLES["han"],
+    }
+    out = pm.expression_rates_by_script(responses)
+    assert out["instrument"] == V1
+    assert out["script_rule"] == V2_RULE
+    assert out["n"] == 4
+    assert out["n_latin"] == 2
+    assert out["rate_latin"] == 1 / 2
+    assert out["n_non_latin"] == 2
+    assert out["rate_non_latin"] == 0.0
+    scripts = out["scripts"]
+    assert set(scripts) == {"latin", "cyrillic", "han"}
+    assert scripts["latin"] == {
+        "n": 2,
+        "hits": 1,
+        "rate": 0.5,
+        "mixed": 0,
+        "mean_letters": scripts["latin"]["mean_letters"],
+    }
+    assert "English-only" in out["caveat"]
+    assert out["caveat"] == pm.NON_LATIN_RATE_CAVEAT
+
+
+def test_v1_two_way_split_is_stamped_with_the_v1_script_rule():
+    """The old number stays computable, and now says which rule made it."""
+    responses = {"p1": "Ahoy, matey!", "p2": SCRIPT_SAMPLES["cyrillic"]}
+    old = pm.expression_rates(responses)
+    assert old["script_rule"] == pm.SCRIPT_RULE_V1
+    assert old["n_latin"] == 2, "v1 counts the Cyrillic response as Latin — the bug"
+    new = pm.expression_rates_by_script(responses)
+    assert new["n_latin"] == 1
