@@ -31,3 +31,6 @@ tinker-cookbook/
 
 # OS
 .DS_Store
+
+# Raw sponsored run evidence is versioned only in private octt-research/main.
+outputs/sponsored/
