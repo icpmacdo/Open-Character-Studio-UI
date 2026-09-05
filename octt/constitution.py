@@ -2,15 +2,23 @@
 
 A constitution is ~10 first-person assertions phrased for pairwise comparison
 ("Choose the response which is more..." / "I am..."). Plain-text constitutions
-live one-per-file in ``constitutions/``.
+live one-per-file in ``constitutions/``, or in an external directory named by
+``OCTT_CONSTITUTIONS_DIR`` for consumers that keep persona content separately.
 """
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
-CONSTITUTIONS_DIR = Path(__file__).resolve().parent.parent / "constitutions"
+# Set the override before importing OCTT; explicit function roots still win.
+CONSTITUTIONS_DIR = Path(
+    os.environ.get(
+        "OCTT_CONSTITUTIONS_DIR",
+        str(Path(__file__).resolve().parent.parent / "constitutions"),
+    )
+)
 
 
 @dataclass(frozen=True)

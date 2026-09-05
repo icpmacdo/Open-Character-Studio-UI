@@ -62,7 +62,23 @@ CANDIDATES: dict[str, ModelSpec] = {
     ),
     "Qwen/Qwen3.6-27B": ModelSpec(
         "Qwen/Qwen3.6-27B", "dense", "Qwen", "Medium", 27.0, 27.0, 64, 1.86, 5.595, 4.103,
-        note="dense half of the within-family architecture control",
+        note="dense half of the within-family architecture control; Tinker "
+        "retires it September 2 — successor is Qwen3.8-27B",
+    ),
+    # --- TBPN cast base (ai-tbpn show lane; not a scaling rung) ---
+    "Qwen/Qwen3.8-27B": ModelSpec(
+        "Qwen/Qwen3.8-27B", "dense", "Qwen", "Medium", 27.0, 27.0, 64, 1.86, 5.595, 4.103,
+        note="pinned base for the TBPN per-host character models; published "
+        "list rate verified against tinker-docs 2026-08-20; same rate card "
+        "as the retiring Qwen3.6-27B",
+    ),
+    "Qwen/Qwen3.8-27B:peft:262144": ModelSpec(
+        "Qwen/Qwen3.8-27B:peft:262144", "dense", "Qwen", "Medium", 27.0, 27.0, 256,
+        2.48, 7.46, 7.46,
+        note="256K-context variant of the TBPN cast base (Ian's original pin); "
+        "published list rate verified against tinker-docs 2026-08-20 — train "
+        "1.8x and sample 1.33x the 64K base, so prefer the 64K base unless "
+        "the serve context truly needs >64K",
     ),
     # --- Architecture control (Qwen MoE, same generation as Qwen3.6-27B) ---
     "Qwen/Qwen3.6-35B-A3B": ModelSpec(
@@ -116,7 +132,24 @@ CANDIDATES: dict[str, ModelSpec] = {
         max_lora_rank=64,  # service-verified 2026-07-30: rank 128 rejected, 64 accepted
         local_merge_feasible=False,  # 276B bf16 base (~550GB) cannot merge locally
     ),
+    # --- Sponsored coding track (separate from the frozen scaling ladders) ---
+    "zai-org/GLM-5.3:peft:262144": ModelSpec(
+        "zai-org/GLM-5.3:peft:262144", "moe", "GLM", "Large", 753.0, 40.0, 256,
+        4.86, 12.15, 14.58,
+        note=(
+            "illustrative sponsored coding demo; 256K-only Tinker variant; "
+            "thinking cannot be disabled, so pin glm5_3_low_reasoning across "
+            "generation and training. Rate snapshot carried from the local "
+            "2026-09-04 verification: prefill 4.86 / sample 12.15 / train 14.58. "
+            "Requires the external cookbook's glm5_3 renderer (1f962ed); "
+            "the vendored cookbook predates it."
+        ),
+        max_lora_rank=32,  # service-verified 2026-09-04: rank 64 rejected
+        local_merge_feasible=False,  # 753B MoE base cannot merge locally
+    ),
 }
+
+SPONSORED_MODEL: str = "zai-org/GLM-5.3:peft:262144"
 
 # The Inkling track's model ids (INKLING_PLAN.md). Deliberately NOT in
 # SCALING_SET/MOE_LADDER: the scaling-study rungs are frozen.

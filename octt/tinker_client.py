@@ -22,7 +22,11 @@ from . import models
 from .config import RecipeConfig, get_config
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_COOKBOOK_PATH = PROJECT_ROOT / "tinker-cookbook"
+# GLM-5.3 needs a newer cookbook than the read-only vendor. Set the override
+# before importing OCTT; this never installs dependencies or edits the vendor.
+DEFAULT_COOKBOOK_PATH = Path(
+    os.environ.get("OCTT_COOKBOOK_PATH", str(PROJECT_ROOT / "tinker-cookbook"))
+)
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "runs"
 
 # Pessimistic fallback for teachers outside the registry (the study teacher and
@@ -37,6 +41,7 @@ TEACHER_SAMPLE_PRICE_USD_PER_MTOK = 7.5
 # the effort level whose native behavior that text approximates.
 TML_PINNED_EFFORT = 0.0
 TML_PINNED_RENDERER_NAME = "octt/tml_v0_pinned_effort"
+GLM_PINNED_RENDERER_NAME = "glm5_3_low_reasoning"
 
 DIRECT_ANSWER_RENDERER_OVERRIDES = {
     # The cookbook's default Qwen3.5 renderer enables thinking. OCTT persists
@@ -50,6 +55,10 @@ DIRECT_ANSWER_RENDERER_OVERRIDES = {
     "nemotron3_ultra": "nemotron3_ultra_disable_thinking",
     # Inkling: pin thinking effort to its minimum (same policy, different knob).
     "tml_v0": TML_PINNED_RENDERER_NAME,
+    # GLM cannot disable thinking. Low is the saved sponsored SFT setting.
+    "glm5_3_max_reasoning": GLM_PINNED_RENDERER_NAME,
+    "glm5_3_high_reasoning": GLM_PINNED_RENDERER_NAME,
+    "glm5_3": GLM_PINNED_RENDERER_NAME,
 }
 
 
@@ -73,7 +82,23 @@ def _recommended_renderer_name(model_id: str, vendored_lookup: Any) -> str:
     except Exception:
         if _is_tml_org(model_id):
             return "tml_v0"
+        if model_id.split(":", 1)[0] == "zai-org/GLM-5.3":
+            # Name planning stays dependency-free with an older registry;
+            # actual bindings need the newer external cookbook renderer.
+            return GLM_PINNED_RENDERER_NAME
+        if model_id.split(":", 1)[0] == "Qwen/Qwen3.8-27B":
+            # The TBPN cast base postdates the frozen vendor. Keep this exact
+            # family pin; unknown future Qwen versions must fail explicitly.
+            return "qwen3_5"
         raise
+
+
+def _select_renderer_name(model_id: str, recommended: str, *, thinking: bool = False) -> str:
+    if model_id.split(":", 1)[0] == "zai-org/GLM-5.3":
+        # Pin planning, training, generation and teacher-prefill alike. GLM
+        # low already opens <think>; the saved low-effort SFT needs no max path.
+        return GLM_PINNED_RENDERER_NAME
+    return recommended if thinking else DIRECT_ANSWER_RENDERER_OVERRIDES.get(recommended, recommended)
 
 
 def _tml_aware_get_tokenizer(model_name: str) -> Any:
@@ -294,7 +319,7 @@ def resolve_renderer_name(model_id: str, cookbook_path: Path = DEFAULT_COOKBOOK_
         recommended = _recommended_renderer_name(
             model_id, model_info.get_recommended_renderer_name
         )
-        return DIRECT_ANSWER_RENDERER_OVERRIDES.get(recommended, recommended)
+        return _select_renderer_name(model_id, recommended)
     except Exception as exc:
         raise TinkerSetupError(f"Could not resolve renderer for {model_id!r}: {exc}") from exc
 
@@ -394,11 +419,18 @@ def resolve_renderer_binding(
     model_id: str, stack: TinkerStack, *, thinking: bool = False
 ) -> RendererBinding:
     recommended = stack.get_recommended_renderer_name(model_id)
-    renderer_name = (
-        recommended if thinking else DIRECT_ANSWER_RENDERER_OVERRIDES.get(recommended, recommended)
-    )
+    renderer_name = _select_renderer_name(model_id, recommended, thinking=thinking)
     tokenizer = stack.get_tokenizer(model_id)
-    renderer = stack.renderers.get_renderer(renderer_name, tokenizer, model_name=model_id)
+    try:
+        renderer = stack.renderers.get_renderer(renderer_name, tokenizer, model_name=model_id)
+    except (ImportError, ValueError) as exc:
+        if renderer_name == GLM_PINNED_RENDERER_NAME:
+            raise TinkerSetupError(
+                "GLM-5.3 requires a cookbook with glm5_3_low_reasoning. Set "
+                "OCTT_COOKBOOK_PATH to the compatible external checkout before "
+                "starting Python (saved training used 1f962ed); leave the vendor unchanged."
+            ) from exc
+        raise
     return RendererBinding(
         model_id=model_id,
         renderer_name=renderer_name,
@@ -427,7 +459,6 @@ def create_runtime(
 
     require_api_key(api_key_env=cfg.api_key_env)
     stack = import_tinker_stack(cfg.cookbook_path)
-    service_client = stack.tinker.ServiceClient(base_url=cfg.base_url)
     bindings = {
         model_id: resolve_renderer_binding(model_id, stack)
         for model_id in plans
@@ -437,6 +468,8 @@ def create_runtime(
         thinking = resolve_renderer_binding(model_id, stack, thinking=True)
         if thinking.renderer_name != binding.renderer_name:
             thinking_bindings[model_id] = thinking
+    # Resolve local renderer compatibility before constructing the API client.
+    service_client = stack.tinker.ServiceClient(base_url=cfg.base_url)
     return TinkerRuntime(
         config=cfg,
         service_client=service_client,
